@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Docker-to-host smoke test. Requires a running Docker daemon and built Builder.
+"""Outbound Builder-to-gateway smoke test. Requires Docker and a built Builder.
 
 Uses only disposable state, mock model responses, and a uniquely named Compose
-project. Covers IPv4 host-gateway routing, auth, approvals, and durable history.
+project. Covers pairing, relay failure semantics, approvals, and durable history.
 """
 import http.server
 import json
@@ -55,10 +55,20 @@ class Model(http.server.BaseHTTPRequestHandler):
 
 
 def main():
-    backend_port, web_port = port(), port()
+    web_port = port()
     project = 'builder-test-' + uuid.uuid4().hex[:10]
-    environment = dict(os.environ, BUILDER_UPSTREAM=f'host.docker.internal:{backend_port}', BUILDER_WEB_PORT=str(web_port))
-    compose = ['docker', 'compose', '-p', project, '-f', str(REPO / 'remote/compose.yaml')]
+    origin = f'http://127.0.0.1:{web_port}'
+    environment = dict(
+        os.environ,
+        BUILDER_GATEWAY_ORIGIN=origin,
+        BUILDER_GATEWAY_AUTH_HEADER='X-Test-User',
+        BUILDER_GATEWAY_PORT=str(web_port),
+    )
+    compose = [
+        'docker', 'compose', '-p', project,
+        '-f', str(REPO / 'remote/compose.yaml'),
+        '-f', str(REPO / 'remote/compose.build.yaml'),
+    ]
     endpoint = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Model)
     threading.Thread(target=endpoint.serve_forever, daemon=True).start()
     process = None
@@ -69,24 +79,17 @@ def main():
             home.mkdir()
             workspace.mkdir()
             (home / 'config.toml').write_text(f'default_profile = "fixture"\n[profiles.fixture]\nbase_url = "http://127.0.0.1:{endpoint.server_port}/v1"\nmodel = "fixture"\nstream = false\n[profiles.fixture.pipeline]\nenabled = false\n')
-            origin = f'http://localhost:{web_port}'
             with (root / 'host.log').open('w') as log:
-                process = subprocess.Popen([str(BINARY), '--home', str(home), '-C', str(workspace), 'remote', '--listen', f'0.0.0.0:{backend_port}', '--origin', origin], stdout=log, stderr=log)
-                deadline = time.monotonic() + 10
-                while not (home / 'remote-token').exists():
-                    assert process.poll() is None, (root / 'host.log').read_text()
-                    assert time.monotonic() < deadline, 'Host startup timed out'
-                    time.sleep(0.05)
-                token = (home / 'remote-token').read_text()
-                subprocess.run(compose + ['up', '-d', '--build'], env=environment, check=True, timeout=180, stdout=subprocess.DEVNULL)
+                subprocess.run(compose + ['up', '-d', '--build'], env=environment, check=True, timeout=600, stdout=subprocess.DEVNULL)
 
-                def api(path, body=None, authenticated=True):
+                def api(path, body=None, authenticated=True, gateway=False):
                     headers = {'Origin': origin}
                     if authenticated:
-                        headers['X-Builder-Token'] = token
+                        headers['X-Test-User'] = 'fixture-owner'
                     if body is not None:
                         headers['Content-Type'] = 'application/json'
-                    request = urllib.request.Request(origin + '/api/' + path, data=json.dumps(body).encode() if body is not None else None, headers=headers)
+                    prefix = '/api/gateway/' if gateway else '/api/'
+                    request = urllib.request.Request(origin + prefix + path, data=json.dumps(body).encode() if body is not None else None, headers=headers)
                     try:
                         with urllib.request.urlopen(request, timeout=15) as response:
                             return response.status, json.load(response)
@@ -96,16 +99,40 @@ def main():
                 deadline = time.monotonic() + 15
                 while True:
                     try:
-                        status, _ = api('status', authenticated=False)
+                        status, _ = api('status', authenticated=False, gateway=True)
                         if status == 401:
                             break
                     except (urllib.error.URLError, ConnectionError):
-                        # Docker may accept and close a socket before nginx is ready.
+                        # Docker may accept and close a socket before the gateway is ready.
                         # Only this bounded read-only readiness probe retries.
                         pass
-                    assert time.monotonic() < deadline, 'Container did not reach the host'
+                    assert time.monotonic() < deadline, 'Gateway did not become ready'
                     time.sleep(0.1)
-                # Repeated read requests catch dual-stack round-robin routing failures.
+                status, invitation = api('invitations', {}, gateway=True)
+                assert status == 200, invitation
+                code = invitation['command'].split()[-1]
+                subprocess.run(
+                    [str(BINARY), '--home', str(home), '-C', str(workspace), 'remote', 'connect', origin, '--code', code, '--pair-only'],
+                    stdout=log,
+                    stderr=log,
+                    check=True,
+                    timeout=15,
+                )
+                process = subprocess.Popen(
+                    [str(BINARY), '--home', str(home), '-C', str(workspace), 'remote', 'connect', origin],
+                    stdout=log,
+                    stderr=log,
+                )
+                deadline = time.monotonic() + 15
+                while True:
+                    assert process.poll() is None, (root / 'host.log').read_text()
+                    status, value = api('status', gateway=True)
+                    if status == 200 and value['connected']:
+                        break
+                    assert time.monotonic() < deadline, (root / 'host.log').read_text()
+                    time.sleep(0.1)
+
+                # Repeated reads exercise the long-lived outbound connection.
                 for _ in range(12):
                     assert api('status')[0] == 200
                 request_id = str(uuid.uuid4())
@@ -132,7 +159,7 @@ def main():
                 assert history['entries'][-1]['message']['content'] == 'Container round trip complete'
                 assert api('run', {'request_id': request_id, 'session': run['session'], 'operation': {'action': 'retry'}})[0] == 409
                 assert Model.calls == 2
-                print('Docker smoke passed: auth, IPv4 host routing, approval, host write, durable history, no duplicate replay.')
+                print('Docker smoke passed: pairing, outbound relay, approval, host write, durable history, no duplicate replay.')
                 process.send_signal(signal.SIGINT)
                 process.wait(timeout=10)
     finally:

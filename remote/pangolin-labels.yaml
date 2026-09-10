@@ -1,0 +1,17 @@
+# Optional Compose override for Newt container-label discovery. Newt must have
+# Docker socket discovery enabled. The connector path bypasses Pangolin SSO;
+# Builder Gateway authenticates it with a single-use code or device credential.
+services:
+  builder-gateway:
+    labels:
+      pangolin.public-resources.builder.name: Builder
+      pangolin.public-resources.builder.mode: http
+      pangolin.public-resources.builder.full-domain: ${BUILDER_DOMAIN:?set BUILDER_DOMAIN to the public Builder hostname}
+      pangolin.public-resources.builder.auth.sso-enabled: "true"
+      pangolin.public-resources.builder.rules[0].action: allow
+      pangolin.public-resources.builder.rules[0].match: path
+      pangolin.public-resources.builder.rules[0].value: /api/gateway/connect
+      pangolin.public-resources.builder.rules[0].priority: "1"
+      pangolin.public-resources.builder.targets[0].method: http
+      pangolin.public-resources.builder.targets[0].hostname: builder-gateway
+      pangolin.public-resources.builder.targets[0].port: "8080"

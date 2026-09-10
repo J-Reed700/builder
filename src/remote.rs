@@ -151,6 +151,9 @@ impl RemoteControl {
     pub fn token_path(&self) -> PathBuf {
         self.shared.options.home.join("remote-token")
     }
+    pub(crate) fn token(&self) -> &str {
+        &self.shared.token
+    }
     pub fn router(&self) -> Router {
         let api = Router::new()
             .route("/api/status", get(status))

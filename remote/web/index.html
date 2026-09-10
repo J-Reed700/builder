@@ -9,7 +9,29 @@
 </script>
 </head>
 <body>
-<section id="login" class="login">
+<section id="gateway-setup" class="login" hidden>
+<div class="brand">
+<svg class="icon brand-icon" viewBox="0 0 24 24" aria-hidden="true">
+<path d="m12 3 9 5-9 5-9-5 9-5Z"/>
+<path d="m3 12 9 5 9-5M3 16l9 5 9-5"/>
+</svg>builder <span class="brand-tag">REMOTE</span>
+</div>
+<div class="login-intro">
+<h1>Connect your computer</h1>
+<p id="gateway-state">Builder is waiting for a computer.</p>
+</div>
+<div class="connect-card">
+<p>Open a terminal in the project you want Builder to control, then run the generated command.</p>
+<button id="create-invitation">Generate connect command <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"/></svg></button>
+<div id="invitation" hidden>
+<label for="connect-command">This command expires in 10 minutes</label>
+<pre id="connect-command"></pre>
+<button id="copy-connect" class="quiet">Copy command</button>
+</div>
+</div>
+<p class="hint">The gateway stores a hashed device credential. Your workspace, model credentials, conversations, and tools stay on this computer.</p>
+</section>
+<section id="login" class="login" hidden>
 <div class="brand">
 <svg class="icon brand-icon" viewBox="0 0 24 24" aria-hidden="true">
 <path d="m12 3 9 5-9 5-9-5 9-5Z"/>

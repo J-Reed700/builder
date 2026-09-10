@@ -1,17 +1,21 @@
-# Default project name; `docker compose -p` still overrides it (the smoke test does).
-name: builder-remote
-
+# Image-only by design: this file can be merged into an existing Pangolin/Newt
+# Compose project without requiring a Builder source checkout. Source developers
+# can additionally pass compose.build.yaml.
 services:
-  builder-web:
-    build: .
-    image: builder-remote:local
+  builder-gateway:
+    image: ghcr.io/j-reed700/builder-gateway:latest
+    pull_policy: missing
     restart: unless-stopped
     ports:
-      - "${BUILDER_WEB_BIND:-127.0.0.1}:${BUILDER_WEB_PORT:-8080}:8080"
+      - "${BUILDER_GATEWAY_BIND:-127.0.0.1}:${BUILDER_GATEWAY_PORT:-8080}:8080"
     environment:
-      BUILDER_UPSTREAM: ${BUILDER_UPSTREAM:-host.docker.internal:7432}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      BUILDER_GATEWAY_ORIGIN: ${BUILDER_GATEWAY_ORIGIN:-http://127.0.0.1:8080}
+      BUILDER_GATEWAY_AUTH_HEADER: ${BUILDER_GATEWAY_AUTH_HEADER:-Remote-User}
+    volumes:
+      - builder-gateway-data:/data
     security_opt:
       - no-new-privileges:true
-    # Only static assets and HTTP proxying; no host filesystem or Docker socket mounts.
+    # No host filesystem, model credential, Builder database, tool runtime, or Docker socket.
+
+volumes:
+  builder-gateway-data:

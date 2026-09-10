@@ -166,10 +166,14 @@ footer > .hint { text-align: center; font-size: 11px; }
 .login-intro { margin: 52px 0 28px; }
 .login h1 { font-size: 38px; line-height: 1.2; margin: 16px 0; letter-spacing: -.055em; }
 .login p { color: var(--muted); line-height: 1.8; }
-#connect { background: var(--surface); padding: 24px; border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 20px 70px #0003; }
+#connect, .connect-card { background: var(--surface); padding: 24px; border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 20px 70px #0003; }
 .login label { display: block; color: #d4d4d4; font-size: 12px; margin-bottom: 10px; }
 .login input[type=password] { width: 100%; padding: 13px; }
 .login button { width: 100%; margin-top: 20px; display: flex; align-items: center; justify-content: space-between; padding: 13px 15px; }
+.connect-card > p { margin-top: 0; font-size: 13px; }
+#invitation { margin-top: 24px; }
+#connect-command { margin: 8px 0 0; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: #151515; color: #eee; font: 12px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
+#copy-connect.quiet { justify-content: center; margin-top: 10px; }
 .login .remember { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); margin: 15px 0 0; }
 .remember input { margin: 0; }
 .login .hint { font-size: 11px; margin-top: 24px; }

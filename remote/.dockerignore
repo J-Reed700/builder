@@ -1,6 +1,0 @@
-*
-!Dockerfile
-!nginx.conf.template
-!web/
-!web/**
-!19-builder-upstream.envsh

@@ -4,6 +4,7 @@ let token = '', selected = null, states = [], info = null, nextBefore = null, ne
 let polling = false, epoch = 0, connection = 0, historyKey = '', items = [], sessionItems = [], viewLimited = false;
 let exportUrl = null;
 let newFolder = '', browsePath = '', browseVersion = 0;
+let gatewayMode = false, gatewayPoll = false;
 const folderLabel = folder => folder || 'workspace root';
 // Keep keyboard focus in the phone drawer while the workspace is covered.
 let drawerOpen = false;
@@ -58,6 +59,31 @@ async function api(path, body) {
   if (version !== connection) throw new Error('Connection changed');
   if (!response.ok) throw new Error(value.error || 'Request failed');
   return value;
+}
+async function gatewayStatus() {
+  const response = await fetch('/api/gateway/status', { method: 'GET', signal: AbortSignal.timeout(12000), cache: 'no-store' });
+  const value = await response.json().catch(() => null);
+  if (response.status === 404) return null;
+  if (!response.ok) { const failure = new Error(value?.error || 'Gateway is unavailable'); failure.gateway = true; throw failure; }
+  if (value?.mode !== 'gateway') return null;
+  return value;
+}
+function showGatewaySetup(status) {
+  gatewayMode = true; token = 'gateway'; $('login').hidden = true; $('app').hidden = true; $('gateway-setup').hidden = false;
+  const name = status?.device?.name;
+  $('gateway-state').textContent = status?.paired ? `${name || 'Your computer'} is offline. Start Builder there, or generate a fresh pairing command.` : 'Builder is waiting for a computer.';
+}
+async function initialize() {
+  try {
+    const status = await gatewayStatus();
+    if (status) {
+      gatewayMode = true; token = 'gateway';
+      if (status.connected) { $('gateway-setup').hidden = true; await connect('gateway', false); }
+      else showGatewaySetup(status);
+      return;
+    }
+  } catch (e) { error(e.message); if (e.gateway) { showGatewaySetup(); return; } }
+  if (savedToken()) connect(savedToken(), true); else $('login').hidden = false;
 }
 function saveDraft() {
   const key = draftKey(), value = $('prompt').value;
@@ -184,7 +210,7 @@ async function openSession(id, title) {
   if (!id) $('prompt').focus();
 }
 async function refresh() {
-  if (polling || !token) return;
+  if (polling || !token || $('app').hidden) return;
   polling = true;
   try {
     const result = await api('status'); if (!token) return;
@@ -207,15 +233,25 @@ async function connect(value, remember) {
   const version = ++connection; token = value;
   try {
     const [result, profiles] = await Promise.all([api('status'), api('profiles')]); states = result.states;
-    rememberToken(remember ? token : '');
+    if (!gatewayMode) rememberToken(remember ? token : '');
     $('approval-mode').value = result.approval_locked ? 'read-only' : result.approval_mode; $('approval-mode').disabled = !!result.approval_locked;
     $('profile').replaceChildren(...profiles.profiles.map(p => { const option = document.createElement('option'); option.value = p.name; option.textContent = `${p.name} · ${p.model}`; return option; })); $('profile').value = profiles.default_profile;
-    $('login').hidden = true; $('app').hidden = false; $('error').hidden = true; await sessions();
+    $('login').hidden = true; $('gateway-setup').hidden = true; $('app').hidden = false; $('error').hidden = true; await sessions();
     const latest = states.at(-1); if (latest?.session) await openSession(latest.session); else await openSession(null); await refresh();
-  } catch (e) { if (version !== connection) return; token = ''; if (remember && /token/i.test(e.message)) rememberToken(''); $('app').hidden = true; $('login').hidden = false; error(e.message); }
+  } catch (e) { if (version !== connection) return; if (gatewayMode) { showGatewaySetup(); } else { token = ''; if (remember && /token/i.test(e.message)) rememberToken(''); $('app').hidden = true; $('login').hidden = false; } error(e.message); }
 }
 $('connect').onsubmit = event => { event.preventDefault(); const value = $('token').value.trim(); $('token').value = ''; connect(value, $('remember').checked); };
-$('disconnect').onclick = () => { token = ''; rememberToken(''); newFolder = ''; setDrawer(false); $('folder-dialog').close(); connection++; epoch++; listVersion++; selected = null; items = []; states = []; info = null; sessionItems = []; drafts.clear(); posting.clear(); $('manage-dialog').close(); $('export-dialog').close(); $('app').hidden = true; $('login').hidden = false; $('messages').replaceChildren(); $('sessions').replaceChildren(); $('prompt').value = ''; $('error').hidden = true; };
+$('disconnect').onclick = () => { token = gatewayMode ? 'gateway' : ''; rememberToken(''); newFolder = ''; setDrawer(false); $('folder-dialog').close(); connection++; epoch++; listVersion++; selected = null; items = []; states = []; info = null; sessionItems = []; drafts.clear(); posting.clear(); $('manage-dialog').close(); $('export-dialog').close(); $('app').hidden = true; if (gatewayMode) showGatewaySetup(); else $('login').hidden = false; $('messages').replaceChildren(); $('sessions').replaceChildren(); $('prompt').value = ''; $('error').hidden = true; };
+$('create-invitation').onclick = async () => {
+  $('create-invitation').disabled = true; $('error').hidden = true;
+  try {
+    const response = await fetch('/api/gateway/invitations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(12000), cache: 'no-store' });
+    const value = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(value.error || 'Could not create a pairing command');
+    $('connect-command').textContent = value.command; $('invitation').hidden = false;
+  } catch (e) { error(e.message); } finally { $('create-invitation').disabled = false; }
+};
+$('copy-connect').onclick = async () => { try { await navigator.clipboard.writeText($('connect-command').textContent); $('copy-connect').textContent = 'Copied'; } catch { error('Clipboard unavailable. Select the command and copy it manually.'); } };
 $('new').onclick = () => openSession(null);
 $('menu').onclick = () => setDrawer(true); $('drawer-close').onclick = () => setDrawer(false);
 $('more-sessions').onclick = () => sessions(true).catch(e => error(e.message));
@@ -308,4 +344,10 @@ $('export-dialog').onclose = () => { if (exportUrl) URL.revokeObjectURL(exportUr
 $('copy-transcript').onclick = async () => { try { await navigator.clipboard.writeText($('export-text').value); $('copy-transcript').textContent = 'Copied'; } catch { $('export-text').select(); error('Clipboard unavailable. Copy the selected transcript text manually.'); } };
 document.querySelectorAll('[data-prompt]').forEach(button => { button.onclick = () => { $('prompt').value = button.dataset.prompt; saveDraft(); $('prompt').focus(); }; });
 setInterval(refresh, 1200);
-if (savedToken()) connect(savedToken(), true);
+setInterval(async () => {
+  if (!gatewayMode || gatewayPoll || !$('app').hidden) return;
+  gatewayPoll = true;
+  try { const status = await gatewayStatus(); if (status?.connected) await connect('gateway', false); else if (status) showGatewaySetup(status); } catch (e) { error(e.message); }
+  finally { gatewayPoll = false; }
+}, 1500);
+initialize();

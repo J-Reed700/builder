@@ -9,10 +9,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# BUILDER_REMOTE_WORKSPACE, BUILDER_REMOTE_LISTEN, BUILDER_REMOTE_ORIGIN,
+# BUILDER_REMOTE_WORKSPACE, BUILDER_REMOTE_GATEWAY,
 # optional BUILDER_REMOTE_ARGS / BUILDER_HOME / BUILDER_BASIC_AUTH.
-EnvironmentFile=%h/.config/builder/remote.env
-ExecStart=@BUILDER_BIN@ -C ${BUILDER_REMOTE_WORKSPACE} remote --listen ${BUILDER_REMOTE_LISTEN} --origin ${BUILDER_REMOTE_ORIGIN} $BUILDER_REMOTE_ARGS
+EnvironmentFile="@ENV_FILE@"
+ExecStart=@BUILDER_BIN@ -C ${BUILDER_REMOTE_WORKSPACE} remote connect ${BUILDER_REMOTE_GATEWAY} $BUILDER_REMOTE_ARGS
 # Builder shuts down cleanly on SIGINT (same as Ctrl+C in a terminal).
 KillSignal=SIGINT
 TimeoutStopSec=20

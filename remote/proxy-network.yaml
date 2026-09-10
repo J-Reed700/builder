@@ -1,15 +1,15 @@
-# Attach the web service to the Docker network your reverse proxy or tunnel
+# Attach the gateway to the Docker network your reverse proxy or tunnel
 # client already uses (Pangolin's `newt`, Traefik, Caddy, ...), so that
-# container can reach it as http://builder-web:8080 by name.
+# container can reach it as http://builder-gateway:8080 by name.
 #
 # Usage (BUILDER_PROXY_NETWORK may also live in remote/.env; see .env.example):
 #   BUILDER_PROXY_NETWORK=your-proxy-network \
-#     docker compose -f remote/compose.yaml -f remote/proxy-network.yaml up -d --build
+#     docker compose -f remote/compose.yaml -f remote/proxy-network.yaml up -d
 #
 # The network must already exist; `docker network ls` lists candidates. The
 # `ports:` mapping from compose.yaml stays in place for host-side proxies.
 services:
-  builder-web:
+  builder-gateway:
     networks:
       - default
       - proxy

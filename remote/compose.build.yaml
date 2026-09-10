@@ -1,0 +1,8 @@
+# Optional source-build override. Production and existing-stack installs should
+# use compose.yaml by itself so deployment needs only the published image.
+services:
+  builder-gateway:
+    build:
+      context: ..
+      dockerfile: remote/Dockerfile
+    pull_policy: build

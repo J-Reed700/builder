@@ -1,0 +1,7 @@
+.git
+target
+**/.env
+**/remote-token
+**/remote-gateways
+.DS_Store
+
