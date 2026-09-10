@@ -69,6 +69,13 @@ Arrow keys move through draft lines without replacing a new draft at its boundar
 
 ## Model stalls and empty responses
 
+Model progress shows total elapsed time for the current attempt. Streamed
+reasoning changes the label to `Thinking`. A separate live signal reads
+`receiving now` while response data is arriving, then changes to
+`no data for …` as silence grows. Incoming fragments do not reset the total
+clock. The profile's idle and total request timeouts remain the hard bounds, and
+the configured generation budget is unchanged.
+
 A completed response with no answer or tool call leaves the turn pending. Builder
 reports reasoning-only responses separately from empty responses, and does not
 repeat an expensive generation automatically. Whitespace alone is not an answer.
@@ -113,6 +120,9 @@ selected commands and settings. Paused guidance uses the warning color and stays
 first in the status line. Ordinary short messages omit byte counters. Model and
 compaction details are available through `/status`. Tool progress occupies a
 transient indicator, then resolves into one result row with timing.
+Submitted prompts and streamed replies wrap at word boundaries inside a
+96-column reading measure. Tool rows omit meaningless `0.0s` timings, keep long
+commands bounded, and wrap failure details beneath the affected action.
 
 See [the design notes](design/README.md) for competitor research and actual CLI
 render captures. `NO_COLOR`, plain mode, normal scrollback, and existing approval

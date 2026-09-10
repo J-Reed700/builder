@@ -150,21 +150,34 @@ impl Composer {
                     } else {
                         String::new()
                     };
-                    let preview = Layout::new(&self.buffer, preview_width);
+                    let visible = self
+                        .buffer
+                        .draft
+                        .atoms
+                        .iter()
+                        .map(|atom| atom.display())
+                        .collect::<String>();
+                    let preview = layout::wrap(&visible, preview_width);
                     println!(
                         "\n  {} {}",
                         theme::accent("›"),
                         theme::title(&if label.is_empty() {
-                            "you".into()
+                            "You".into()
                         } else {
-                            format!("you · {label}")
+                            format!("You · {label}")
                         })
                     );
-                    for line in preview.lines.iter().take(5) {
-                        println!("  {}", safe(line));
+                    for line in preview.iter().take(6) {
+                        println!("    {}", safe(line));
                     }
-                    if preview.lines.len() > 5 {
-                        println!("  {}", theme::muted("… more lines in this prompt"));
+                    if preview.len() > 6 {
+                        println!(
+                            "    {}",
+                            theme::muted(&format!(
+                                "… {} more lines · full prompt saved",
+                                preview.len() - 6
+                            ))
+                        );
                     }
                     self.remember();
                     self.buffer.restore(Draft::default());

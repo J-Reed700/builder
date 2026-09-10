@@ -3,6 +3,10 @@ use builder_provider::{Activity, Event};
 use builder_tools::Action;
 use console::style;
 use std::io::{self, IsTerminal, Write};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 pub mod stream;
 pub mod theme;
@@ -46,9 +50,46 @@ pub struct Renderer {
     heading_printed: bool,
     tool_started_at: Option<std::time::Instant>,
     tools: usize,
-    line_start: bool,
+    reflow: stream::Reflow,
     prompt_tokens: usize,
+    model_activity: Option<ModelActivity>,
 }
+
+const NO_MODEL_ACTIVITY: u64 = u64::MAX;
+
+#[derive(Clone)]
+struct ModelActivity(Arc<AtomicU64>);
+
+impl ModelActivity {
+    fn new() -> Self {
+        Self(Arc::new(AtomicU64::new(NO_MODEL_ACTIVITY)))
+    }
+
+    fn record(&self, elapsed: std::time::Duration) {
+        let millis = elapsed.as_millis().min(u128::from(u64::MAX - 1)) as u64;
+        self.0.store(millis, Ordering::Relaxed);
+    }
+
+    fn label(&self, elapsed: std::time::Duration) -> String {
+        let last = self.0.load(Ordering::Relaxed);
+        if last == NO_MODEL_ACTIVITY {
+            return "waiting for response".into();
+        }
+        let quiet = elapsed.as_millis().saturating_sub(u128::from(last));
+        if quiet < 2_000 {
+            "receiving now".into()
+        } else {
+            format!(
+                "no data for {}",
+                short_duration(
+                    std::time::Duration::from_millis(quiet.min(u128::from(u64::MAX)) as u64)
+                        .as_secs_f64()
+                )
+            )
+        }
+    }
+}
+
 impl Renderer {
     pub fn new(interactive: bool) -> Self {
         Self {
@@ -62,8 +103,9 @@ impl Renderer {
             heading_printed: false,
             tool_started_at: None,
             tools: 0,
-            line_start: true,
+            reflow: stream::Reflow::default(),
             prompt_tokens: 0,
+            model_activity: None,
         }
     }
     pub fn event(&mut self, event: AgentEvent) {
@@ -76,25 +118,36 @@ impl Renderer {
                 threshold,
                 context_tokens,
             } => {
-                self.flush();
+                self.finish_stream();
                 self.clear_spinner();
-                let percent = threshold * 100 / context_tokens.max(1);
+                let total = messages + overhead + reserved;
+                let percent = total * 100 / context_tokens.max(1);
                 eprintln!(
-                    "\n  Auto-compact triggered: {} conversation + {overhead} tool schemas + {reserved} reserved for output = {} estimated tokens, at or past the {threshold} trigger ({percent}% of {context_tokens})",
-                    messages,
-                    messages + overhead + reserved
+                    "\n  {}",
+                    theme::muted(&format!(
+                        "Context {percent}% full · compacting {} conversation + {} tools + {} response reserve",
+                        token_count(messages),
+                        token_count(overhead),
+                        token_count(reserved)
+                    ))
                 );
+                debug_assert!(total >= threshold);
             }
             AgentEvent::Compacting {
                 before,
                 context_tokens,
             } => {
-                self.flush();
+                self.finish_stream();
                 self.clear_spinner();
                 self.compacting = true;
                 eprintln!(
-                    "\n  Compacting context ({before} estimated tokens / {context_tokens} configured) · originals retained · ctrl+c cancel"
+                    "\n  {}",
+                    theme::muted(&format!(
+                        "Summarizing {} conversation · originals stay searchable · ctrl+c cancel",
+                        token_count(before)
+                    ))
                 );
+                let _ = context_tokens;
             }
             AgentEvent::Compacted {
                 before,
@@ -104,42 +157,60 @@ impl Renderer {
                 self.clear_spinner();
                 self.compacting = false;
                 eprintln!(
-                    "\n  Context compacted: {before} → {after} estimated tokens / {context_tokens} configured · /history archived keeps originals"
+                    "\n  {}",
+                    theme::success(&format!(
+                        "Context compacted · {} → {} · originals searchable",
+                        token_count(before),
+                        token_count(after)
+                    ))
                 );
+                let _ = context_tokens;
             }
             AgentEvent::SummaryRecovery { size, limit } => {
-                self.flush();
+                self.finish_stream();
                 self.clear_spinner();
                 eprintln!(
-                    "\n  Compaction handoff too long ({size} estimated tokens; limit {limit}) · retrying once with a shorter handoff"
+                    "\n  {}",
+                    theme::warning(&format!(
+                        "Tightening context summary · {} exceeded the {} target",
+                        token_count(size),
+                        token_count(limit)
+                    ))
                 );
             }
             AgentEvent::MemoryNotice(note) => {
-                self.flush();
+                self.finish_stream();
                 self.clear_spinner();
                 eprintln!("\n  {}", safe(&note));
             }
             AgentEvent::ExplorationRecovery { calls } => {
-                self.flush();
+                self.finish_stream();
                 self.clear_spinner();
                 eprintln!(
-                    "\n  Progress check · {calls} tool calls without file progress · focusing the next action · full context preserved"
+                    "\n  {}",
+                    theme::muted(&format!(
+                        "Refocusing after {calls} actions without a file change · context preserved"
+                    ))
                 );
             }
             AgentEvent::OutputRecovery { budget } => {
-                self.flush();
+                self.finish_stream();
                 self.clear_spinner();
                 let operation = if self.compacting {
-                    "Compaction"
+                    "Context summary"
                 } else {
-                    "Model"
+                    "Response"
                 };
                 eprintln!(
-                    "\n  {operation} output limit reached · partial output discarded · retrying once with {budget} output tokens"
+                    "\n  {}",
+                    theme::warning(&format!(
+                        "{operation} needed more room · retrying with {} · incomplete draft discarded",
+                        token_count(budget)
+                    ))
                 );
             }
             AgentEvent::RepetitionNotice { name, count, limit } => {
-                self.flush();
+                self.finish_stream();
                 self.clear_spinner();
                 eprintln!(
                     "\n  {}",
@@ -150,20 +221,23 @@ impl Renderer {
                 );
             }
             AgentEvent::ToolStarted { name, detail } => {
-                self.flush();
+                self.finish_stream();
                 self.clear_spinner();
                 if self.interactive {
                     if self.started {
                         println!();
                         self.started = false;
-                        self.line_start = true;
+                        self.reflow.reset();
                     }
                     self.tool_started_at = Some(std::time::Instant::now());
                     let label = tool_label(&name);
-                    self.start_spinner(match self.fit(&detail, label.len() + 22) {
-                        detail if detail.is_empty() => format!("{label} · ctrl+c cancel"),
-                        detail => format!("{label}  {detail} · ctrl+c cancel"),
-                    });
+                    self.start_spinner(
+                        match self.fit(&detail, label.len() + 36) {
+                            detail if detail.is_empty() => format!("{label} · ctrl+c cancel"),
+                            detail => format!("{label}  {detail} · ctrl+c cancel"),
+                        },
+                        false,
+                    );
                 }
             }
             AgentEvent::ToolFinished {
@@ -179,29 +253,7 @@ impl Renderer {
                         .tool_started_at
                         .take()
                         .map_or(0.0, |time| time.elapsed().as_secs_f64());
-                    let label = tool_label(&name);
-                    // What the call targeted outranks the note: a short note
-                    // stays on the line, a long reason moves below it rather
-                    // than crushing the path or command out of the display.
-                    let inline = note
-                        .as_deref()
-                        .filter(|note| note.chars().count() <= 24)
-                        .map_or_else(String::new, |note| format!("  {note}"));
-                    eprintln!(
-                        "  {} {}  {}{}  {}",
-                        if failed {
-                            theme::warning("!")
-                        } else {
-                            theme::success("✓")
-                        },
-                        label,
-                        self.fit(&detail, label.len() + inline.chars().count() + 22),
-                        theme::muted(&inline),
-                        theme::muted(&format!("{elapsed:.1}s"))
-                    );
-                    if let Some(note) = note.filter(|_| inline.is_empty()) {
-                        eprintln!("      {}", theme::muted(&self.fit(&note, 8)));
-                    }
+                    self.print_tool_result(&name, &detail, note.as_deref(), failed, elapsed);
                 }
             }
         }
@@ -218,23 +270,110 @@ impl Renderer {
     /// Clip untrusted tool text to the remaining terminal width.
     fn fit(&self, text: &str, used: usize) -> String {
         let width = (console::Term::stderr().size().1 as usize).saturating_sub(used);
-        crate::input::layout::clip(&safe(text), width.clamp(12, 120))
+        crate::input::layout::ellipsize(&safe(text), width.clamp(12, 88))
+    }
+    fn print_tool_result(
+        &self,
+        name: &str,
+        detail: &str,
+        note: Option<&str>,
+        failed: bool,
+        elapsed: f64,
+    ) {
+        const LABEL_WIDTH: usize = 12;
+        let width = (console::Term::stderr().size().1 as usize).clamp(20, 100);
+        let label = crate::input::layout::ellipsize(&tool_label(name), LABEL_WIDTH);
+        let label = format!(
+            "{}{}",
+            label,
+            " ".repeat(LABEL_WIDTH.saturating_sub(display_width(&label)))
+        );
+        let exit_failed = name == "shell" && note.is_some_and(|note| note.starts_with("exit "));
+        let warning = failed || exit_failed;
+        let icon = if warning {
+            theme::warning("!")
+        } else {
+            theme::success("✓")
+        };
+        let inline_note = note.filter(|note| !failed && display_width(note) <= 28);
+        let mut metadata = inline_note
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<Vec<_>>();
+        if elapsed >= 0.1 {
+            metadata.push(short_duration(elapsed));
+        }
+        let metadata = metadata.join(" · ");
+        let fixed = 4 + 2 + LABEL_WIDTH;
+        let metadata_space = usize::from(!metadata.is_empty()) * 2;
+        let detail_width = width
+            .saturating_sub(fixed + display_width(&metadata) + metadata_space)
+            .max(1);
+        let detail = crate::input::layout::ellipsize(&safe(detail), detail_width);
+
+        if width >= 52 {
+            let gap = if metadata.is_empty() {
+                0
+            } else {
+                width
+                    .saturating_sub(fixed + display_width(&detail) + display_width(&metadata))
+                    .max(2)
+            };
+            eprintln!(
+                "    {icon} {label}{detail}{}{}",
+                " ".repeat(gap),
+                theme::muted(&metadata)
+            );
+        } else {
+            eprintln!("    {icon} {}  {detail}", label.trim_end());
+            if !metadata.is_empty() {
+                eprintln!("        {}", theme::muted(&metadata));
+            }
+        }
+
+        if let Some(note) = note.filter(|note| Some(*note) != inline_note) {
+            for line in crate::input::layout::wrap(&safe(note), width.saturating_sub(8).max(12)) {
+                eprintln!("        {}", theme::muted(&line));
+            }
+        }
     }
     fn clear_spinner(&mut self) {
         if let Some(spinner) = self.spinner.take() {
             spinner.finish_and_clear();
         }
+        self.model_activity = None;
     }
-    fn start_spinner(&mut self, message: String) {
+    fn start_spinner(&mut self, message: String, tracks_activity: bool) {
         let spinner = indicatif::ProgressBar::new_spinner();
-        spinner.set_style(
+        let style = if tracks_activity {
+            let activity = ModelActivity::new();
+            let display = activity.clone();
+            self.model_activity = Some(activity);
+            indicatif::ProgressStyle::with_template(
+                "  {spinner:.cyan} {msg}  {elapsed:.dim} · {activity:.dim}",
+            )
+            .expect("static progress template")
+            .with_key(
+                "activity",
+                move |state: &indicatif::ProgressState, writer: &mut dyn std::fmt::Write| {
+                    let _ = writer.write_str(&display.label(state.elapsed()));
+                },
+            )
+        } else {
+            self.model_activity = None;
             indicatif::ProgressStyle::with_template("  {spinner:.cyan} {msg}  {elapsed:.dim}")
                 .expect("static progress template")
-                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-        );
+        };
+        spinner.set_style(style.tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]));
         spinner.set_message(self.fit(&message, 14));
         spinner.enable_steady_tick(std::time::Duration::from_millis(120));
         self.spinner = Some(spinner);
+    }
+    fn record_model_activity(&self) {
+        if let (Some(activity), Some(spinner)) = (&self.model_activity, &self.spinner) {
+            activity.record(spinner.elapsed());
+            spinner.tick();
+        }
     }
     fn model_event(&mut self, event: Event) {
         match event {
@@ -242,13 +381,18 @@ impl Renderer {
             // the compaction notice quote the same number.
             Event::Prompt { bytes } => self.prompt_tokens = bytes.div_ceil(2),
             Event::Activity(activity) => {
+                if !matches!(activity, Activity::Connected) {
+                    self.record_model_activity();
+                }
                 let size = self.prompt_size();
                 if let Some(spinner) = &self.spinner {
                     let message = if self.compacting {
                         "Summarizing context · originals retained · ctrl+c cancel".to_owned()
                     } else {
                         match activity {
-                            Activity::Connected => format!("Reading {size} · ctrl+c cancel"),
+                            Activity::Connected => {
+                                format!("Waiting on {size} · ctrl+c cancel")
+                            }
                             Activity::Thinking => "Thinking · ctrl+c cancel".to_owned(),
                             Activity::PreparingTools => {
                                 "Preparing actions · ctrl+c cancel".to_owned()
@@ -259,9 +403,9 @@ impl Renderer {
                 }
             }
             Event::Attempt { number, maximum } => {
-                self.flush();
+                self.finish_stream();
                 self.started = false;
-                self.line_start = true;
+                self.reflow.reset();
                 self.pending.reset();
                 if self.interactive {
                     self.clear_spinner();
@@ -269,15 +413,15 @@ impl Renderer {
                         eprintln!(
                             "\n  {}",
                             theme::accent(&if number == 1 {
-                                "builder".to_owned()
+                                "Builder".to_owned()
                             } else {
-                                format!("builder · attempt {number}/{maximum}")
+                                format!("Builder · attempt {number}/{maximum}")
                             })
                         );
                         self.heading_printed = true;
                     }
                     let size = self.prompt_size();
-                    self.start_spinner(format!("Sending {size} · ctrl+c cancel"));
+                    self.start_spinner(format!("Sending {size} · ctrl+c cancel"), true);
                 }
             }
             Event::Delta(text) => {
@@ -293,9 +437,9 @@ impl Renderer {
             }
             // Reasoning stays out of the terminal; the spinner already says the
             // model is thinking, and the transcript keeps it for remote viewers.
-            Event::Reasoning(_) => {}
+            Event::Reasoning(_) => self.record_model_activity(),
             Event::Retry { delay_ms, reason } => {
-                self.flush();
+                self.finish_stream();
                 self.clear_spinner();
                 eprintln!("\n  {} {}", style("↻ reconnecting").yellow(), safe(&reason));
                 eprintln!(
@@ -314,19 +458,31 @@ impl Renderer {
             return;
         }
         let text = self.pending.take();
-        let mut out = io::stdout().lock();
-        for part in text.split_inclusive('\n') {
-            if self.line_start && part != "\n" {
-                let _ = out.write_all(b"  ");
-            }
-            let _ = out.write_all(part.as_bytes());
-            self.line_start = part.ends_with('\n');
+        let width = (console::Term::stdout().size().1 as usize)
+            .saturating_sub(4)
+            .clamp(12, 96);
+        let text = self.reflow.push(&text, width, "    ");
+        self.write_stream(&text);
+    }
+    fn finish_stream(&mut self) {
+        self.flush();
+        let width = (console::Term::stdout().size().1 as usize)
+            .saturating_sub(4)
+            .clamp(12, 96);
+        let text = self.reflow.finish(width, "    ");
+        self.write_stream(&text);
+    }
+    fn write_stream(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
         }
+        let mut out = io::stdout().lock();
+        let _ = out.write_all(text.as_bytes());
         let _ = out.flush();
         self.started = true;
     }
     pub fn finish(&mut self) {
-        self.flush();
+        self.finish_stream();
         self.clear_spinner();
         if self.started {
             println!();
@@ -335,8 +491,8 @@ impl Renderer {
             eprintln!(
                 "\n  {}\n",
                 theme::muted(&format!(
-                    "{:.1}s{}",
-                    self.started_at.elapsed().as_secs_f64(),
+                    "{}{}",
+                    long_duration(self.started_at.elapsed().as_secs_f64()),
                     if self.tools == 0 {
                         String::new()
                     } else {
@@ -345,6 +501,43 @@ impl Renderer {
                 ))
             );
         }
+    }
+}
+
+fn display_width(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(text)
+}
+
+fn token_count(tokens: usize) -> String {
+    if tokens < 1000 {
+        format!("{tokens} tokens")
+    } else {
+        let value = tokens as f64 / 1000.0;
+        format!("{value:.1}k tokens")
+    }
+}
+
+fn short_duration(seconds: f64) -> String {
+    if seconds < 10.0 {
+        format!("{seconds:.1}s")
+    } else if seconds < 60.0 {
+        format!("{seconds:.0}s")
+    } else {
+        long_duration(seconds)
+    }
+}
+
+fn long_duration(seconds: f64) -> String {
+    if seconds < 1.0 {
+        return "<1s".into();
+    }
+    if seconds < 60.0 {
+        return format!("{seconds:.1}s");
+    }
+    let seconds = seconds.round() as u64;
+    match seconds {
+        0..=3599 => format!("{}m {:02}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {:02}m", seconds / 3600, seconds % 3600 / 60),
     }
 }
 fn tool_label(name: &str) -> String {
@@ -376,4 +569,50 @@ pub fn approve(action: &Action) -> bool {
     let _ = io::stderr().flush();
     let mut answer = String::new();
     io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "Y" | "yes")
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+
+    #[test]
+    fn reasoning_reports_live_data_without_resetting_total_elapsed_time() {
+        let mut renderer = Renderer::new(false);
+        renderer.start_spinner("Sending".into(), true);
+        renderer
+            .spinner
+            .as_ref()
+            .unwrap()
+            .set_draw_target(indicatif::ProgressDrawTarget::hidden());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let elapsed = renderer.spinner.as_ref().unwrap().elapsed();
+        renderer.model_event(Event::Activity(Activity::Thinking));
+        renderer.model_event(Event::Reasoning("streamed fragment".into()));
+        assert!(renderer.spinner.as_ref().unwrap().elapsed() >= elapsed);
+        let current = renderer.spinner.as_ref().unwrap().elapsed();
+        assert_eq!(
+            renderer.model_activity.as_ref().unwrap().label(current),
+            "receiving now"
+        );
+        renderer.model_event(Event::Activity(Activity::PreparingTools));
+        assert!(renderer.spinner.as_ref().unwrap().elapsed() >= elapsed);
+    }
+
+    #[test]
+    fn activity_label_distinguishes_waiting_receiving_and_silence() {
+        let activity = ModelActivity::new();
+        assert_eq!(
+            activity.label(std::time::Duration::from_secs(10)),
+            "waiting for response"
+        );
+        activity.record(std::time::Duration::from_secs(10));
+        assert_eq!(
+            activity.label(std::time::Duration::from_secs(11)),
+            "receiving now"
+        );
+        assert_eq!(
+            activity.label(std::time::Duration::from_secs(52)),
+            "no data for 42s"
+        );
+    }
 }
