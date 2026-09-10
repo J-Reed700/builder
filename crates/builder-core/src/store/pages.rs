@@ -138,6 +138,11 @@ impl Store {
         search: &str,
     ) -> Result<Vec<ChatSession>> {
         ensure!(search.len() <= 256, "Chat search must be at most 256 bytes");
+        // Session creation stores canonical paths. Preserve lookup of archived
+        // sessions when their workspace has since been removed.
+        let workspace = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.to_path_buf());
         // Prefix match by path component, without LIKE escaping concerns.
         let scope = if within {
             "(s.workspace=?1 OR substr(s.workspace,1,length(?1)+1)=?1||'/')"

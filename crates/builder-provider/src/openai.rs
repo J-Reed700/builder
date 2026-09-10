@@ -16,6 +16,22 @@ pub struct OpenAiCompatible {
 }
 
 #[derive(Debug)]
+enum MissingResponse {
+    Empty,
+    ReasoningOnly,
+}
+impl std::fmt::Display for MissingResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match self {
+            Self::Empty => "Empty model response: endpoint finished without an answer or tool call",
+            Self::ReasoningOnly => "Model returned only reasoning, without an answer or tool call",
+        };
+        write!(f, "{reason}. No response was committed")
+    }
+}
+impl std::error::Error for MissingResponse {}
+
+#[derive(Debug)]
 struct Failure {
     reason: String,
     retry: bool,
@@ -23,6 +39,14 @@ struct Failure {
     output_limit: bool,
 }
 impl Failure {
+    fn validation(error: anyhow::Error) -> Self {
+        if error.is::<MissingResponse>() {
+            Self::transient(error.to_string())
+        } else {
+            Self::permanent(error.to_string())
+        }
+    }
+
     fn finish(error: anyhow::Error) -> Self {
         Self {
             output_limit: error.is::<OutputLimit>(),
@@ -202,8 +226,7 @@ impl OpenAiCompatible {
             check_finish(choice["finish_reason"].as_str()).map_err(Failure::finish)?;
             let mut message: Message = serde_json::from_value(choice["message"].clone())
                 .map_err(|e| Failure::permanent(e.to_string()))?;
-            validate(&message, has_reasoning(&choice["message"]))
-                .map_err(|e| Failure::permanent(e.to_string()))?;
+            validate(&message, has_reasoning(&choice["message"])).map_err(Failure::validation)?;
             if let Some(text) = reasoning_text(&choice["message"]) {
                 emit(Event::Reasoning(text.to_owned()));
                 message.reasoning = Some(text.to_owned());
@@ -373,6 +396,7 @@ impl OpenAiCompatible {
             );
             outbound.splice(..leading, [system]);
         }
+        let prompt_bytes = serde_json::to_vec(&outbound)?.len();
         let mut body = json!({"model": self.profile.model, "messages": outbound, "stream": self.profile.stream, "max_tokens": max_output_tokens});
         if self.profile.tools && !tools.is_empty() {
             body["tools"] = json!(tools);
@@ -390,7 +414,7 @@ impl OpenAiCompatible {
             body[key] = value.clone();
         }
         emit(Event::Prompt {
-            bytes: serde_json::to_vec(messages)?.len(),
+            bytes: prompt_bytes,
         });
         // Identical immutable request body on every attempt. Partial output never
         // enters the durable conversation and can never dispatch a tool.
@@ -445,7 +469,7 @@ fn assemble(
 ) -> std::result::Result<Message, Failure> {
     check_finish(reason).map_err(Failure::finish)?;
     message.tool_calls = calls.into_values().collect();
-    validate(&message, thinking).map_err(|e| Failure::permanent(e.to_string()))?;
+    validate(&message, thinking).map_err(Failure::validation)?;
     Ok(message)
 }
 fn has_reasoning(value: &Value) -> bool {
@@ -466,9 +490,9 @@ fn validate(message: &Message, thinking: bool) -> Result<()> {
             .is_some_and(|s| !s.trim().is_empty())
             || !message.tool_calls.is_empty(),
         if thinking {
-            "Model returned only reasoning, without an answer or tool call. Reduce or disable thinking in the endpoint profile and check the server chat template before /retry. No response was committed"
+            MissingResponse::ReasoningOnly
         } else {
-            "Empty model response: endpoint finished without an answer or tool call. Check the server chat template and model settings before /retry. No response was committed"
+            MissingResponse::Empty
         }
     );
     let mut ids = std::collections::HashSet::new();

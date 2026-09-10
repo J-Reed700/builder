@@ -372,3 +372,40 @@ fn chat_metadata_migration_preserves_transcript_claims_and_archive_state() {
             .is_empty()
     );
 }
+
+#[test]
+fn provider_conformance_is_bounded_and_replaced_by_fingerprint() {
+    let home = tempfile::tempdir().unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    store
+        .save_provider_conformance(
+            "fingerprint",
+            "local",
+            "http://localhost:11434/v1",
+            "model",
+            &serde_json::json!({"normal_generation":"passed"}),
+        )
+        .unwrap();
+    store
+        .save_provider_conformance(
+            "fingerprint",
+            "local",
+            "http://localhost:11434/v1",
+            "model",
+            &serde_json::json!({"normal_generation":"failed"}),
+        )
+        .unwrap();
+    let connection = rusqlite::Connection::open(home.path().join("builder.sqlite3")).unwrap();
+    let (count, report): (usize, String) = connection
+        .query_row(
+            "SELECT COUNT(*),MAX(report) FROM provider_conformance WHERE fingerprint='fingerprint'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&report).unwrap()["normal_generation"],
+        "failed"
+    );
+}
