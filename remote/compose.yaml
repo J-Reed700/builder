@@ -1,3 +1,6 @@
+# Default project name; `docker compose -p` still overrides it (the smoke test does).
+name: builder-remote
+
 services:
   builder-web:
     build: .

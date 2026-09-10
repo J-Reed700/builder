@@ -55,7 +55,7 @@ async fn app(cli: Cli) -> Result<()> {
         })?;
         let listener = tokio::net::TcpListener::bind(listen).await?;
         eprintln!(
-            "Remote control: http://{}\nWorkspace: {}\nToken file: {}\nKeep this process running. Use HTTPS at your public reverse proxy.",
+            "Remote control: http://{}\nWorkspace root: {}\nToken file: {}\nKeep this process running. Use HTTPS at your public reverse proxy.",
             listener.local_addr()?,
             remote.workspace().display(),
             remote.token_path().display()

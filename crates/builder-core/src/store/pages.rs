@@ -117,11 +117,37 @@ impl Store {
         archived: bool,
         search: &str,
     ) -> Result<Vec<ChatSession>> {
+        self.chat_sessions(workspace, false, offset, archived, search)
+    }
+    /// Chats whose workspace is `root` or any directory below it.
+    pub fn chat_sessions_within(
+        &self,
+        root: &Path,
+        offset: u32,
+        archived: bool,
+        search: &str,
+    ) -> Result<Vec<ChatSession>> {
+        self.chat_sessions(root, true, offset, archived, search)
+    }
+    fn chat_sessions(
+        &self,
+        workspace: &Path,
+        within: bool,
+        offset: u32,
+        archived: bool,
+        search: &str,
+    ) -> Result<Vec<ChatSession>> {
         ensure!(search.len() <= 256, "Chat search must be at most 256 bytes");
-        let mut stmt = self.conn.prepare("SELECT s.id,s.title,s.profile,s.workspace,s.updated_at,COALESCE(m.archived,0)
+        // Prefix match by path component, without LIKE escaping concerns.
+        let scope = if within {
+            "(s.workspace=?1 OR substr(s.workspace,1,length(?1)+1)=?1||'/')"
+        } else {
+            "s.workspace=?1"
+        };
+        let mut stmt = self.conn.prepare(&format!("SELECT s.id,s.title,s.profile,s.workspace,s.updated_at,COALESCE(m.archived,0)
             FROM sessions s LEFT JOIN chat_metadata m ON m.session_id=s.id
-            WHERE s.workspace=?1 AND COALESCE(m.archived,0)=?2 AND instr(lower(s.title || ' ' || s.id), lower(?3))>0
-            ORDER BY s.updated_at DESC,s.id LIMIT 50 OFFSET ?4")?;
+            WHERE {scope} AND COALESCE(m.archived,0)=?2 AND instr(lower(s.title || ' ' || s.id), lower(?3))>0
+            ORDER BY s.updated_at DESC,s.id LIMIT 50 OFFSET ?4"))?;
         Ok(stmt
             .query_map(
                 params![workspace.to_string_lossy(), archived, search, offset],

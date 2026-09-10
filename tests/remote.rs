@@ -146,17 +146,24 @@ impl Host {
         value
     }
     async fn phase(&self, expected: &[&str]) -> Value {
+        let last = Mutex::new(Value::Null);
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let value = self.get("status").await;
                 if expected.contains(&value["state"]["phase"].as_str().unwrap()) {
                     return value["state"].clone();
                 }
+                *last.lock().unwrap() = value;
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         })
         .await
-        .expect("Expected remote phase")
+        .unwrap_or_else(|_| {
+            panic!(
+                "Expected remote phase {expected:?}; last status {}",
+                last.lock().unwrap()
+            )
+        })
     }
 }
 
@@ -883,4 +890,146 @@ async fn remote_reloads_the_separate_config_directory_without_moving_chat_data()
     control.shutdown().await;
     server.abort();
     host.control.shutdown().await;
+}
+
+#[tokio::test]
+async fn chats_open_in_folders_under_the_root_and_never_outside() {
+    let host = Host::new(
+        vec![write_call(), answer("Done in folder")],
+        ApprovalMode::Trust,
+    )
+    .await;
+    let project = host.workspace.path().join("apps/web");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(host.workspace.path().join(".hidden")).unwrap();
+    std::fs::write(project.join("AGENTS.md"), "Folder rules apply").unwrap();
+    // Folder browsing shows only real subdirectories and never leaves the root.
+    let listing = host.get("folders").await;
+    assert_eq!(listing["folders"], json!(["apps"]));
+    assert_eq!(listing["path"], "");
+    assert!(listing["parent"].is_null());
+    let listing = host.get("folders?path=apps").await;
+    assert_eq!(listing["folders"], json!(["web"]));
+    assert_eq!(listing["parent"], "");
+    for bad in ["..", "apps/../..", "missing", "/etc", ".git"] {
+        let response = host
+            .client
+            .get(format!("{}/api/folders?path={bad}", host.url))
+            .header("x-builder-token", &host.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 409, "{bad}");
+    }
+    // A rejected folder never creates a chat or contacts the model.
+    for bad in ["..", "missing", ".git", "apps/web/AGENTS.md"] {
+        let response = host.post("run", json!({"request_id":uuid::Uuid::new_v4().to_string(),"session":null,"workspace":bad,"operation":{"action":"message","prompt":"Do the fixture task"}})).await;
+        assert_eq!(response.status(), 409, "{bad}");
+    }
+    assert!(
+        host.get("sessions").await["sessions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(host.requests.lock().unwrap().is_empty());
+    // A chat opened in a subfolder runs its tools there and reads that folder's AGENTS.md.
+    let response = host.post("run", json!({"request_id":uuid::Uuid::new_v4().to_string(),"session":null,"workspace":"apps/web","operation":{"action":"message","prompt":"Do the fixture task"}})).await;
+    assert_eq!(response.status(), 202);
+    let run: Value = response.json().await.unwrap();
+    host.phase(&["complete"]).await;
+    assert_eq!(
+        std::fs::read_to_string(project.join("result.txt")).unwrap(),
+        "approved"
+    );
+    assert!(!host.workspace.path().join("result.txt").exists());
+    let id = run["session"].as_str().unwrap();
+    let info = host.get(&format!("sessions/{id}")).await;
+    assert_eq!(info["folder"], "apps/web");
+    let history = host.get(&format!("sessions/{id}/messages")).await;
+    assert!(
+        history["entries"][0]["message"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Folder rules apply")
+    );
+    let sessions = host.get("sessions").await;
+    assert_eq!(sessions["sessions"][0]["folder"], "apps/web");
+    // A saved chat keeps its folder; a follow-up cannot move it.
+    let moved = host.post("run", json!({"request_id":uuid::Uuid::new_v4().to_string(),"session":id,"workspace":"","operation":{"action":"message","prompt":"again"}})).await;
+    assert_eq!(moved.status(), 409);
+    let same = host.post("run", json!({"request_id":uuid::Uuid::new_v4().to_string(),"session":id,"workspace":"apps/web","operation":{"action":"message","prompt":"again"}})).await;
+    assert_eq!(same.status(), 202);
+    host.phase(&["complete"]).await;
+    // Chats created by the CLI inside the root are listed too; the root itself is a valid folder.
+    let mut store = Store::open(host.home.path()).unwrap();
+    let cli = store
+        .create("cli chat", "local", &project, "system")
+        .unwrap();
+    let root_chat = host.post("run", json!({"request_id":uuid::Uuid::new_v4().to_string(),"session":null,"workspace":".","operation":{"action":"message","prompt":"Do the fixture task"}})).await;
+    assert_eq!(root_chat.status(), 202);
+    host.phase(&["complete"]).await;
+    let listed = host.get("sessions").await;
+    let folders: Vec<(String, String)> = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["id"].as_str().unwrap().to_owned(),
+                s["folder"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert!(
+        folders
+            .iter()
+            .any(|(id, folder)| id == &cli && folder == "apps/web")
+    );
+    assert!(folders.iter().any(|(_, folder)| folder.is_empty()));
+    assert_eq!(folders.len(), 3);
+}
+
+#[tokio::test]
+async fn browser_selects_approval_mode_per_run_and_read_only_host_is_a_ceiling() {
+    // An asking host lets the browser auto-approve one run and ask on the next.
+    // Distinct call IDs: Builder refuses a tool call ID reused within one chat.
+    let second = json!({"role":"assistant","tool_calls":[{"id":"write2","type":"function","function":{"name":"write_file","arguments":json!({"path":"result.txt","content":"approved"}).to_string()}}]});
+    let host = Host::new(
+        vec![write_call(), answer("Auto"), second, answer("Asked")],
+        ApprovalMode::Ask,
+    )
+    .await;
+    let response = host.post("run", json!({"request_id":uuid::Uuid::new_v4().to_string(),"session":null,"approval":"trust","operation":{"action":"message","prompt":"Do the fixture task"}})).await;
+    assert_eq!(response.status(), 202);
+    let run: Value = response.json().await.unwrap();
+    let state = host.phase(&["complete"]).await;
+    assert_eq!(state["approval_mode"], "trust");
+    assert_eq!(
+        std::fs::read_to_string(host.workspace.path().join("result.txt")).unwrap(),
+        "approved"
+    );
+    std::fs::remove_file(host.workspace.path().join("result.txt")).unwrap();
+    let id = run["session"].as_str().unwrap();
+    let response = host.post("run", json!({"request_id":uuid::Uuid::new_v4().to_string(),"session":id,"approval":"ask","operation":{"action":"message","prompt":"Again"}})).await;
+    assert_eq!(response.status(), 202);
+    let state = host.phase(&["awaiting_approval"]).await;
+    assert_eq!(state["approval_mode"], "ask");
+    assert!(!host.workspace.path().join("result.txt").exists());
+    let bogus = host.post("run", json!({"request_id":uuid::Uuid::new_v4().to_string(),"session":null,"approval":"yolo","operation":{"action":"message","prompt":"x"}})).await;
+    assert_eq!(bogus.status(), 409);
+    // A read-only host refuses escalation before contacting the model.
+    let locked = Host::new(vec![write_call()], ApprovalMode::ReadOnly).await;
+    assert_eq!(locked.get("status").await["approval_locked"], true);
+    for mode in ["trust", "ask"] {
+        let response = locked.post("run", json!({"request_id":uuid::Uuid::new_v4().to_string(),"session":null,"approval":mode,"operation":{"action":"message","prompt":"x"}})).await;
+        assert_eq!(response.status(), 409, "{mode}");
+    }
+    assert!(locked.requests.lock().unwrap().is_empty());
+    assert!(
+        locked.get("sessions").await["sessions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }

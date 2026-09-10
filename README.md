@@ -161,29 +161,37 @@ builder remote on your host → workspace + model endpoint + SQLite
 builder -C /path/to/project remote
 ```
 
-Open **http://127.0.0.1:7432**. Read the access token from the file printed by Builder and paste it into the login form. The token is retained only in that browser tab's memory.
+Open **http://127.0.0.1:7432**. Read the access token from the file printed by Builder and paste it into the login form. Leave **Remember this browser** checked to skip the login on later visits; Disconnect forgets it.
 
 ### Docker behind your reverse proxy
 
-Start the host process with the exact public browser origin:
+Two things run, and they listen on different ports:
+
+| Piece | Where | Port | Who connects to it |
+| --- | --- | --- | --- |
+| `builder remote` host process | on your machine, outside Docker | 7432 | only the web container |
+| `builder-web` container (nginx) | Docker, from `remote/compose.yaml` | 8080 | your reverse proxy / Pangolin |
+
+The `http://127.0.0.1:7432` address from the local section is the host process bound to loopback; Docker cannot reach it, and it is not what your proxy targets. The container reaches the host over the Docker bridge, so it does not have to be in the same Compose project as Pangolin. The two only need to share a Docker network so the proxy can address the container by name.
+
+**1. One command on the host** (Linux with systemd and Docker; no sudo). Run it from the Builder source folder, and replace the three example values with your own domain, project directory, and the Docker network your proxy container is on:
 
 ```sh
-builder -C /path/to/project remote \
-  --listen 0.0.0.0:7432 \
-  --origin https://builder.example.com
+cd /path/to/builder            # the folder you cloned or extracted
+docker network ls              # find the network Pangolin's newt / your proxy is on
+remote/install-host-service.sh \
+  --origin https://builder.example.com \
+  --workspace /path/to/project \
+  --proxy-network your-proxy-network
 ```
 
-In a second terminal, from the downloaded Builder folder:
+This starts `builder remote` as a `builder-remote` systemd user service listening on the docker0 gateway (`172.17.0.1:7432` by default), writes `remote/.env` with the matching upstream and network, and runs `docker compose up -d --build` for the web container. The `--workspace` directory is the root; each chat then picks a folder under it. Settings live in `~/.config/builder/remote.env` and `remote/.env`; edit and re-run the script, or `systemctl --user restart builder-remote`. Omit `--proxy-network` when the proxy runs on the host itself. Without systemd, do it by hand: `builder -C /path/to/project remote --listen 0.0.0.0:7432 --origin https://builder.example.com`, then `cd remote && docker compose up -d --build`.
 
-```sh
-docker compose -f remote/compose.yaml up -d --build
-```
+**2. Proxy:** add a resource in Pangolin (or your proxy) for the origin from step 1, targeting **`http://builder-web:8080`**. A proxy running on the host itself uses `http://127.0.0.1:8080` instead and does not need the network override.
 
-Point your existing HTTPS reverse proxy at **port 8080** of the web container. The Compose file publishes it on `127.0.0.1:8080` by default. If the reverse proxy is another container, connect it to the same Docker network and target `builder-web:8080`. The detailed guide covers Linux, Docker Desktop, private network binds, and troubleshooting.
+The browser is a chat manager: create and switch between conversations, keep separate drafts, search, rename, archive/restore, and export transcripts. Up to **four chats can run independently**, each with its own live output, approval card, pause, and retry controls. Each run chooses its permissions: ask before changes, auto-approve everything, or read only; a host started read-only cannot be raised from the browser. You can also cancel a saved turn, rewind the last turn, and compact context while keeping the original transcript. Choose a configured model profile when starting a new chat.
 
-The browser is a chat manager: create and switch between conversations, keep separate drafts, search, rename, archive/restore, and export transcripts. Up to **four chats can run independently**, each with its own live output, approval card, pause, and retry controls. You can also cancel a saved turn, rewind the last turn, and compact context while keeping the original transcript. Choose a configured model profile when starting a new chat.
-
-Chats share the host workspace and its files. Close an already-open terminal session before driving that same session remotely; its lock is respected. A browser disconnect leaves runs active.
+The directory passed with `-C` is the host **workspace root**. Each new chat picks a folder under that root from the browser, so separate projects get separate chats without separate host processes; a saved chat keeps its folder. Chats created by the CLI inside the root appear in the same list. Close an already-open terminal session before driving that same session remotely; its lock is respected. A browser disconnect leaves runs active.
 
 **The token controls your host's Builder process.** Keep port 7432 on the private host/container network and expose only the web interface through HTTPS and your proxy's access controls. The container does not need your source tree, provider keys, home directory, or Docker socket mounted. Shell tools still run with the host user's permissions.
 

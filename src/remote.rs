@@ -64,6 +64,8 @@ struct ApprovalRequest {
 #[derive(Default, Serialize)]
 struct Snapshot {
     phase: Phase,
+    /// Approval mode this run was started with.
+    approval_mode: Option<&'static str>,
     run_id: Option<String>,
     session: Option<String>,
     preview: String,
@@ -154,6 +156,7 @@ impl RemoteControl {
             .route("/api/sessions/{id}/messages", get(history))
             .route("/api/sessions/{id}", get(chat_info).post(manage_chat))
             .route("/api/profiles", get(profiles))
+            .route("/api/folders", get(folders))
             .route("/api/run", post(start))
             .route("/api/pause", post(pause))
             .route("/api/approval", post(approval))
@@ -341,7 +344,32 @@ async fn status(State(shared): State<Arc<Shared>>) -> Response {
         .last()
         .cloned()
         .unwrap_or_else(|| json!(Snapshot::default()));
-    Json(json!({"workspace":shared.options.workspace, "approval_mode":match shared.options.approval { ApprovalMode::Ask=>"ask", ApprovalMode::ReadOnly=>"read-only", ApprovalMode::Trust=>"trust" }, "state":latest,"states":states,"max_concurrent_runs":MAX_RUNS})).into_response()
+    Json(json!({"workspace":shared.options.workspace, "root":shared.options.workspace, "approval_mode":approval_name(shared.options.approval), "approval_locked":shared.options.approval==ApprovalMode::ReadOnly, "state":latest,"states":states,"max_concurrent_runs":MAX_RUNS})).into_response()
+}
+fn approval_name(mode: ApprovalMode) -> &'static str {
+    match mode {
+        ApprovalMode::Ask => "ask",
+        ApprovalMode::ReadOnly => "read-only",
+        ApprovalMode::Trust => "trust",
+    }
+}
+/// The browser may pick the approval mode for each run. A host started with
+/// `--approval read-only` is a hard ceiling: remote inspection stays read-only.
+fn run_approval(options: &RemoteOptions, requested: Option<&str>) -> Result<ApprovalMode> {
+    let mode = match requested {
+        None => options.approval,
+        Some("ask") => ApprovalMode::Ask,
+        Some("read-only") => ApprovalMode::ReadOnly,
+        Some("trust" | "auto") => ApprovalMode::Trust,
+        Some(other) => {
+            anyhow::bail!("Unknown approval mode {other:?}; use ask, read-only, or trust")
+        }
+    };
+    ensure!(
+        options.approval != ApprovalMode::ReadOnly || mode == ApprovalMode::ReadOnly,
+        "This host was started read-only; changes and shell commands stay disabled"
+    );
+    Ok(mode)
 }
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -358,13 +386,21 @@ async fn sessions(
     Query(query): Query<SessionQuery>,
 ) -> Response {
     read(shared, move |store, options| {
-        let sessions = store.chat_sessions_page(
+        let sessions = store.chat_sessions_within(
             &options.workspace,
             query.offset,
             query.archived,
             &query.search,
         )?;
         let next = (sessions.len() == 50).then_some(query.offset.saturating_add(50));
+        let sessions: Vec<Value> = sessions
+            .iter()
+            .map(|chat| {
+                let mut value = serde_json::to_value(chat).unwrap();
+                value["folder"] = json!(folder_name(options, &chat.session.workspace));
+                value
+            })
+            .collect();
         Ok(json!({"sessions":sessions,"next_offset":next}))
     })
     .await
@@ -411,11 +447,70 @@ fn scoped_session(
     id: &str,
 ) -> Result<builder_core::store::Session> {
     let session = store.session(id)?;
+    // A chat may live in any folder at or below the host root, so the boundary
+    // is a prefix check rather than an exact match (see `chat_sessions_within`).
     ensure!(
-        session.workspace == options.workspace,
+        session.workspace.starts_with(&options.workspace),
         "Session is outside the exposed workspace"
     );
     Ok(session)
+}
+
+/// Path of a chat folder relative to the host root; empty for the root itself.
+fn folder_name(options: &RemoteOptions, workspace: &FilePath) -> String {
+    workspace
+        .strip_prefix(&options.workspace)
+        .map(|relative| relative.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Resolve a browser-supplied folder to an existing directory inside the root.
+/// Reuses the tool workspace boundary, so `..`, symlink escapes, and `.git`
+/// internals are rejected the same way file tools reject them.
+fn chat_folder(options: &RemoteOptions, folder: Option<&str>) -> Result<PathBuf> {
+    let folder = folder.unwrap_or("").trim();
+    ensure!(folder.len() <= 4096, "Folder path is too long");
+    let root = Workspace::new(&options.workspace)?;
+    let resolved = root.resolve(folder)?;
+    ensure!(
+        resolved.is_dir(),
+        "Chat folder must be an existing directory inside the workspace"
+    );
+    Ok(resolved)
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FolderQuery {
+    #[serde(default)]
+    path: String,
+}
+/// Subdirectories the browser may pick as a chat folder.
+async fn folders(State(shared): State<Arc<Shared>>, Query(query): Query<FolderQuery>) -> Response {
+    read(shared, move |_store, options| {
+        let directory = chat_folder(options, Some(&query.path))?;
+        let path = folder_name(options, &directory);
+        let parent = (directory != options.workspace).then(|| {
+            directory
+                .parent()
+                .map(|parent| folder_name(options, parent))
+                .unwrap_or_default()
+        });
+        let mut names: Vec<String> = std::fs::read_dir(&directory)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| {
+                !name.starts_with('.')
+                    && !matches!(name.as_str(), "node_modules" | "target" | "__pycache__")
+            })
+            .collect();
+        names.sort_unstable_by_key(|name| name.to_lowercase());
+        let limited = names.len() > 500;
+        names.truncate(500);
+        Ok(json!({"path":path,"parent":parent,"folders":names,"limited":limited}))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -432,6 +527,10 @@ struct RunRequest {
     session: Option<String>,
     operation: RunAction,
     profile: Option<String>,
+    /// Folder inside the host root for a new chat; ignored (but checked) for saved chats.
+    workspace: Option<String>,
+    /// `ask`, `read-only`, or `trust` for this run; defaults to the host's `--approval`.
+    approval: Option<String>,
 }
 
 async fn start(State(shared): State<Arc<Shared>>, Json(request): Json<RunRequest>) -> Response {
@@ -522,14 +621,29 @@ async fn start(State(shared): State<Arc<Shared>>, Json(request): Json<RunRequest
                 .or_else(|| existing.as_ref().map(|s| s.profile.as_str())),
         )?;
         ensure!(profile.supports_chat(), "Select a chat profile");
+        let approval = run_approval(options, request.approval.as_deref())?;
+        // A saved chat is pinned to the folder it was created in; a new chat
+        // resolves its folder from the request (the host root when omitted).
+        let workspace = match &existing {
+            Some(session) => {
+                if request.workspace.is_some() {
+                    ensure!(
+                        chat_folder(options, request.workspace.as_deref())? == session.workspace,
+                        "A saved chat keeps its folder"
+                    );
+                }
+                session.workspace.clone()
+            }
+            None => chat_folder(options, request.workspace.as_deref())?,
+        };
         let session = if let Some(session) = existing {
             session.id
         } else {
             let RunAction::Message { prompt } = &request.operation else {
                 anyhow::bail!("Retry requires a saved session");
             };
-            let mut system = format!("{SYSTEM}\n\nWorkspace: {}", options.workspace.display());
-            let instructions = options.workspace.join("AGENTS.md");
+            let mut system = format!("{SYSTEM}\n\nWorkspace: {}", workspace.display());
+            let instructions = workspace.join("AGENTS.md");
             match std::fs::File::open(instructions) {
                 Ok(file) => {
                     let mut content = String::new();
@@ -542,24 +656,25 @@ async fn start(State(shared): State<Arc<Shared>>, Json(request): Json<RunRequest
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
-            store.create(prompt, &name, &options.workspace, &system)?
+            store.create(prompt, &name, &workspace, &system)?
         };
         let guard = store.lock(&session)?;
         Ok((
-            store, guard, config, profile, session, request, permit, gate,
+            store, guard, config, profile, session, request, workspace, approval, permit, gate,
         ))
     })
     .await;
-    let (store, guard, config, profile, session, request, permit, gate) = match prepared {
-        Ok(Ok(prepared)) => prepared,
-        Ok(Err(error)) => return failure(error),
-        Err(_) => {
-            return problem(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not prepare session",
-            );
-        }
-    };
+    let (store, guard, config, profile, session, request, workspace, approval, permit, gate) =
+        match prepared {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(error)) => return failure(error),
+            Err(_) => {
+                return problem(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not prepare session",
+                );
+            }
+        };
     let run_id = request.request_id.clone();
     let (cancel, receiver) = watch::channel(false);
     if shared.closing.load(Ordering::Acquire) {
@@ -568,6 +683,7 @@ async fn start(State(shared): State<Arc<Shared>>, Json(request): Json<RunRequest
     let run = Arc::new(Run {
         snapshot: Mutex::new(Snapshot {
             phase: Phase::Running,
+            approval_mode: Some(approval_name(approval)),
             run_id: Some(run_id.clone()),
             session: Some(session.clone()),
             cancel: Some(cancel),
@@ -615,6 +731,8 @@ async fn start(State(shared): State<Arc<Shared>>, Json(request): Json<RunRequest
                             config,
                             profile,
                             request,
+                            workspace,
+                            approval,
                         },
                         receiver,
                         started,
@@ -683,6 +801,8 @@ struct RunInput {
     config: Config,
     profile: builder_core::config::Profile,
     request: RunRequest,
+    workspace: PathBuf,
+    approval: ApprovalMode,
 }
 
 async fn drive(
@@ -697,6 +817,8 @@ async fn drive(
         config,
         profile,
         request,
+        workspace,
+        approval,
     } = input;
     let session = run.snapshot.lock().unwrap().session.clone().unwrap();
     let agent = Agent {
@@ -707,9 +829,9 @@ async fn drive(
             .max_rounds
             .unwrap_or(profile.pipeline.max_rounds),
         profile,
-        workspace: Workspace::new(&shared.options.workspace)?,
+        workspace: Workspace::new(&workspace)?,
         session: session.clone(),
-        approval: shared.options.approval,
+        approval,
     };
     if let RunAction::Message { prompt } = &request.operation
         && let Err(error) = agent.submit(&mut store, prompt)
@@ -924,7 +1046,8 @@ async fn chat_info(State(shared): State<Arc<Shared>>, Path(id): Path<String>) ->
         let session = scoped_session(store, options, &id)?;
         let draft = store.composer_draft(&id)?;
         let draft_too_large = draft.as_ref().is_some_and(|value| value.len()>65536);
-        Ok(json!({"session":session,"archived":store.chat_archived(&id)?,"pending":store.chat_pending(&id)?,"tip":store.chat_tip(&id)?,"draft":if draft_too_large {None}else{draft},"draft_too_large":draft_too_large}))
+        let folder = folder_name(options, &session.workspace);
+        Ok(json!({"session":session,"folder":folder,"archived":store.chat_archived(&id)?,"pending":store.chat_pending(&id)?,"tip":store.chat_tip(&id)?,"draft":if draft_too_large {None}else{draft},"draft_too_large":draft_too_large}))
     }).await
 }
 

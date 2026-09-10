@@ -73,16 +73,28 @@ pub enum ToolRunState {
 impl Store {
     pub fn open(home: &Path) -> Result<Self> {
         crate::config::ensure_home(home)?;
+        let path = home.join("builder.sqlite3");
         let mut options = File::options();
-        options.create(true).write(true).truncate(false);
+        options.create_new(true).write(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        // Seed with private permissions before SQLite creates its WAL files.
-        options.open(home.join("builder.sqlite3"))?;
-        let conn = Connection::open(home.join("builder.sqlite3"))?;
+        // Seed a new database with private permissions; SQLite copies them to
+        // its WAL and shm files. Never open an existing database here: POSIX
+        // drops every advisory lock this process holds on a file whenever any
+        // descriptor for it is closed, so opening and closing the file beside
+        // a live SQLite connection released that connection's WAL-mode shared
+        // lock. A second Builder process could then checkpoint and truncate the
+        // WAL underneath it, and the next read failed with SQLITE_IOERR_SHORT_READ
+        // ("disk I/O error: Error code 522 ... file truncated?").
+        match options.open(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        let conn = Connection::open(&path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; BEGIN IMMEDIATE;")?;
         // Read the version under the write lock so simultaneous launches cannot

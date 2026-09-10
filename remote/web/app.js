@@ -3,6 +3,13 @@ const $ = id => document.getElementById(id);
 let token = '', selected = null, states = [], info = null, nextBefore = null, nextSessions = null;
 let polling = false, epoch = 0, connection = 0, historyKey = '', items = [], sessionItems = [], viewLimited = false;
 let exportUrl = null;
+let newFolder = '', browsePath = '', browseVersion = 0;
+const folderLabel = folder => folder || 'workspace root';
+// On phones the chat list is a drawer; on wider screens the attribute has no visible effect.
+function setDrawer(open) { $('side').setAttribute('data-open', String(open)); $('menu').setAttribute('aria-expanded', String(open)); }
+// Desktop scrolls the conversation pane; phones scroll the page itself, so keep both at the latest message.
+function atEnd() { const pane = document.querySelector('.conversation'), page = document.scrollingElement; return pane.scrollHeight - pane.scrollTop - pane.clientHeight < 90 && (!page || page.scrollHeight - page.scrollTop - page.clientHeight < 90); }
+function scrollToEnd() { const pane = document.querySelector('.conversation'), page = document.scrollingElement; pane.scrollTop = pane.scrollHeight; if (page) page.scrollTop = page.scrollHeight; }
 let listVersion = 0, runsKey = '', searchTimer, dialogAction = null, dialogChat = null, dialogTip = null;
 const drafts = new Map(), posting = new Set();
 const draftKey = () => selected || 'new';
@@ -46,6 +53,8 @@ function controls() {
   $('compact').disabled ||= !!archived || !!info?.pending;
   $('archive-chat').textContent = archived ? 'Restore chat' : 'Archive';
   $('profile').disabled = !!selected || pending;
+  $('folder').disabled = !!selected || pending;
+  $('folder').textContent = folderLabel(selected ? (info ? info.folder : '…') : newFolder); $('folder').title = selected ? 'Saved chats keep their folder' : 'Choose the folder this chat works in';
   if (info?.session?.profile) $('profile').value = info.session.profile;
   const count = states.filter(s => active(s) || s.phase === 'maintaining').length;
   $('running-count').textContent = `${count} of 4 chats running · drafts stay in this tab`;
@@ -66,7 +75,7 @@ function prose(content) {
   return div;
 }
 function renderMessages() {
-  const pane = document.querySelector('.conversation'), bottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 90;
+  const bottom = atEnd();
   const expanded = new Set([...$('messages').querySelectorAll('article:has(details[open])')].map(el => el.dataset.seq));
   const fragment = document.createDocumentFragment();
   for (const entry of items) {
@@ -79,7 +88,7 @@ function renderMessages() {
     fragment.append(article);
   }
   $('messages').replaceChildren(fragment); $('older').hidden = nextBefore === null || viewLimited; controls();
-  if (bottom) pane.scrollTop = pane.scrollHeight;
+  if (bottom) scrollToEnd();
 }
 async function history(older = false) {
   if (!selected || viewLimited) return;
@@ -100,7 +109,7 @@ function renderSessions() {
   for (const s of sessionItems) {
     const button = document.createElement('button'), title = document.createElement('span'), detail = document.createElement('small'), run = states.find(r => r.session === s.id);
     title.className = 'chat-name'; title.textContent = s.title; button.title = s.title;
-    detail.textContent = run ? phaseLabel(run.phase) : s.profile;
+    detail.textContent = run ? phaseLabel(run.phase) : (s.folder ? s.folder + ' · ' : '') + s.profile;
     if (drafts.has(s.id)) detail.textContent += ' · Draft';
     button.className = (s.id === selected ? 'selected ' : '') + (run?.approval ? 'attention' : '');
     button.setAttribute('aria-current', s.id === selected ? 'page' : 'false');
@@ -125,11 +134,12 @@ async function metadata() {
 }
 async function openSession(id, title) {
   if (!saveDraft()) return;
+  setDrawer(false);
   selected = id; epoch++; info = null; viewLimited = false; items = []; nextBefore = null; historyKey = '';
   $('prompt').value = drafts.get(draftKey()) || ''; $('title').textContent = title || 'What are we building?';
   renderMessages(); renderSessions();
   try {
-    if (id) { const version = epoch; await Promise.all([history(), metadata()]); if (version !== epoch) return; if (info?.draft && !drafts.has(id) && !$('prompt').value && drafts.size < 64) { drafts.set(id, info.draft); $('prompt').value = info.draft; } if (info?.draft_too_large) error('The saved composer draft exceeds the browser limit. Recover it on the host CLI.'); document.querySelector('.conversation').scrollTop = document.querySelector('.conversation').scrollHeight; }
+    if (id) { const version = epoch; await Promise.all([history(), metadata()]); if (version !== epoch) return; if (info?.draft && !drafts.has(id) && !$('prompt').value && drafts.size < 64) { drafts.set(id, info.draft); $('prompt').value = info.draft; } if (info?.draft_too_large) error('The saved composer draft exceeds the browser limit. Recover it on the host CLI.'); scrollToEnd(); }
   } catch (e) { error(e.message); }
   if (!id) $('prompt').focus();
 }
@@ -139,7 +149,9 @@ async function refresh() {
   try {
     const result = await api('status'); if (!token) return;
     states = result.states; $('workspace').textContent = result.workspace; $('workspace').title = result.workspace;
-    $('permission').textContent = { ask: 'Changes need approval', 'read-only': 'Read only', trust: 'Auto · all tools approved' }[result.approval_mode];
+    const current = state().approval_mode || $('approval-mode').value;
+    $('permission').textContent = { ask: 'Changes need approval', 'read-only': 'Read only', trust: 'Auto · all tools approved' }[current];
+    if (result.approval_locked) { $('approval-mode').value = 'read-only'; $('approval-mode').disabled = true; $('approval-mode').title = 'The host was started read-only'; }
     controls(); renderSessions();
     const allKey = states.map(s => s.run_id + ':' + s.phase).join('|');
     if (allKey !== runsKey) { runsKey = allKey; await sessions(); }
@@ -147,17 +159,25 @@ async function refresh() {
     if (selected && (busy() || key !== historyKey)) { const version = epoch; await Promise.all([history(), metadata()]); if (version === epoch) historyKey = key; }
   } catch (e) { if (token) error(e.message + ' · No action is automatically resubmitted.'); } finally { polling = false; }
 }
-$('connect').onsubmit = async event => {
-  event.preventDefault(); const version = ++connection; token = $('token').value.trim(); $('token').value = '';
+// The token is a host credential. It is stored only when the user asks, in this browser's local storage, so a return visit reconnects without pasting it again.
+const TOKEN_KEY = 'builder-remote-token';
+function rememberToken(value) { try { if (value) localStorage.setItem(TOKEN_KEY, value); else localStorage.removeItem(TOKEN_KEY); } catch { /* Storage unavailable: the token stays in tab memory only. */ } }
+function savedToken() { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; } }
+async function connect(value, remember) {
+  const version = ++connection; token = value;
   try {
     const [result, profiles] = await Promise.all([api('status'), api('profiles')]); states = result.states;
+    rememberToken(remember ? token : '');
+    $('approval-mode').value = result.approval_locked ? 'read-only' : result.approval_mode; $('approval-mode').disabled = !!result.approval_locked;
     $('profile').replaceChildren(...profiles.profiles.map(p => { const option = document.createElement('option'); option.value = p.name; option.textContent = `${p.name} · ${p.model}`; return option; })); $('profile').value = profiles.default_profile;
     $('login').hidden = true; $('app').hidden = false; $('error').hidden = true; await sessions();
     const latest = states.at(-1); if (latest?.session) await openSession(latest.session); else await openSession(null); await refresh();
-  } catch (e) { if (version !== connection) return; token = ''; $('app').hidden = true; $('login').hidden = false; error(e.message); }
-};
-$('disconnect').onclick = () => { token = ''; connection++; epoch++; listVersion++; selected = null; items = []; states = []; info = null; sessionItems = []; drafts.clear(); posting.clear(); $('manage-dialog').close(); $('export-dialog').close(); $('app').hidden = true; $('login').hidden = false; $('messages').replaceChildren(); $('sessions').replaceChildren(); $('prompt').value = ''; $('error').hidden = true; };
+  } catch (e) { if (version !== connection) return; token = ''; if (remember && /token/i.test(e.message)) rememberToken(''); $('app').hidden = true; $('login').hidden = false; error(e.message); }
+}
+$('connect').onsubmit = event => { event.preventDefault(); const value = $('token').value.trim(); $('token').value = ''; connect(value, $('remember').checked); };
+$('disconnect').onclick = () => { token = ''; rememberToken(''); newFolder = ''; setDrawer(false); $('folder-dialog').close(); connection++; epoch++; listVersion++; selected = null; items = []; states = []; info = null; sessionItems = []; drafts.clear(); posting.clear(); $('manage-dialog').close(); $('export-dialog').close(); $('app').hidden = true; $('login').hidden = false; $('messages').replaceChildren(); $('sessions').replaceChildren(); $('prompt').value = ''; $('error').hidden = true; };
 $('new').onclick = () => openSession(null);
+$('menu').onclick = () => setDrawer(true); $('drawer-close').onclick = () => setDrawer(false);
 $('more-sessions').onclick = () => sessions(true).catch(e => error(e.message));
 $('search').oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => sessions().catch(e => error(e.message)), 250); };
 $('chat-filter').onchange = () => sessions().catch(e => error(e.message));
@@ -174,7 +194,7 @@ async function run(action) {
     if (selected === id) await openSession(result.session);
     await sessions(); await refresh();
   }
-  try { await accepted(await api('run', { request_id, session: id, profile: id ? null : $('profile').value, operation: action })); }
+  try { await accepted(await api('run', { request_id, session: id, profile: id ? null : $('profile').value, workspace: id ? null : newFolder, approval: $('approval-mode').value, operation: action })); }
   catch (e) {
     if (version !== connection) return;
     error(e.message + ' · Check this chat before sending again.');
@@ -183,7 +203,8 @@ async function run(action) {
   } finally { posting.delete(key); controls(); }
 }
 $('composer').onsubmit = e => { e.preventDefault(); const prompt = $('prompt').value; if (prompt.trim()) run({ action: 'message', prompt }); };
-$('prompt').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('composer').requestSubmit(); } };
+const touch = () => typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+$('prompt').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !touch()) { e.preventDefault(); $('composer').requestSubmit(); } };
 $('retry').onclick = () => run({ action: 'retry' });
 $('compact').onclick = () => showDialog('compact', 'Compact context?', 'Builder will summarize older context for this chat. The complete original transcript stays saved and exportable.', 'Compact');
 $('pause').onclick = async () => { const run_id = state().run_id; try { await api('pause', { run_id }); await refresh(); } catch (e) { error(e.message); } };
@@ -225,7 +246,26 @@ $('export').onclick = async () => {
   } catch (e) { if (version === connection) error(e.message); } finally { $('export').disabled = false; }
 };
 $('close-export').onclick = () => $('export-dialog').close();
+async function browse(path) {
+  const version = ++browseVersion;
+  try {
+    const listing = await api('folders?path=' + encodeURIComponent(path));
+    if (version !== browseVersion) return;
+    browsePath = listing.path; $('folder-path').textContent = folderLabel(listing.path); $('folder-up').disabled = listing.parent === null;
+    $('folder-up').onclick = () => browse(listing.parent ?? '');
+    const fragment = document.createDocumentFragment();
+    for (const name of listing.folders) { const button = document.createElement('button'); button.type = 'button'; button.textContent = name + '/'; button.onclick = () => browse(listing.path ? listing.path + '/' + name : name); fragment.append(button); }
+    if (!listing.folders.length) { const p = document.createElement('p'); p.textContent = 'No subfolders here.'; fragment.append(p); }
+    if (listing.limited) { const p = document.createElement('p'); p.textContent = 'Only the first 500 folders are shown.'; fragment.append(p); }
+    $('folder-list').replaceChildren(fragment);
+    if (!$('folder-dialog').open) $('folder-dialog').showModal();
+  } catch (e) { error(e.message); if (!$('folder-dialog').open) newFolder = ''; }
+}
+$('folder').onclick = () => browse(newFolder);
+$('folder-cancel').onclick = () => $('folder-dialog').close();
+$('folder-use').onclick = () => { newFolder = browsePath; $('folder-dialog').close(); controls(); $('prompt').focus(); };
 $('export-dialog').onclose = () => { if (exportUrl) URL.revokeObjectURL(exportUrl); exportUrl = null; $('download-transcript').removeAttribute('href'); $('export-text').value = ''; };
 $('copy-transcript').onclick = async () => { try { await navigator.clipboard.writeText($('export-text').value); $('copy-transcript').textContent = 'Copied'; } catch { $('export-text').select(); error('Clipboard unavailable. Copy the selected transcript text manually.'); } };
 document.querySelectorAll('[data-prompt]').forEach(button => { button.onclick = () => { $('prompt').value = button.dataset.prompt; saveDraft(); $('prompt').focus(); }; });
 setInterval(refresh, 1200);
+if (savedToken()) connect(savedToken(), true);
