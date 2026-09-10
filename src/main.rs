@@ -12,7 +12,7 @@ use builder_core::{
 use builder_provider::OpenAiCompatible;
 use builder_tools::Workspace;
 use clap::Parser;
-use cli::{Cli, Command, ConfigCommand, MemoryCommand, PipelineCommand};
+use cli::{Cli, Command, ConfigCommand, MemoryCommand, PipelineCommand, RemoteCommand};
 use console::style;
 use std::io::{self, IsTerminal, Read};
 
@@ -39,11 +39,20 @@ async fn app(cli: Cli) -> Result<()> {
         );
     }
     let mut config = Config::load(&config_home)?;
-    if let Some(Command::Remote { listen, origin }) = &cli.command {
+    if let Some(Command::Remote {
+        command,
+        listen,
+        origin,
+    }) = &cli.command
+    {
         ensure!(
             cli.pipeline.is_empty(),
             "Save pipeline settings with config pipeline set before starting remote control"
         );
+        let public_origin = match command {
+            Some(RemoteCommand::Connect { gateway, .. }) => gateway.clone(),
+            None => origin.clone().unwrap_or_else(|| format!("http://{listen}")),
+        };
         let remote = builder::remote::RemoteControl::new(builder::remote::RemoteOptions {
             home,
             config_home,
@@ -51,21 +60,46 @@ async fn app(cli: Cli) -> Result<()> {
             profile: cli.profile.clone(),
             approval: cli.approval_mode(),
             max_rounds: cli.max_rounds.map(usize::from),
-            origin: origin.clone().unwrap_or_else(|| format!("http://{listen}")),
+            origin: public_origin,
         })?;
-        let listener = tokio::net::TcpListener::bind(listen).await?;
-        eprintln!(
-            "Remote control: http://{}\nWorkspace root: {}\nToken file: {}\nKeep this process running. Use HTTPS at your public reverse proxy.",
-            listener.local_addr()?,
-            remote.workspace().display(),
-            remote.token_path().display()
-        );
-        axum::serve(listener, remote.router())
-            .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
-            })
-            .await?;
-        remote.shutdown().await;
+        match command {
+            Some(RemoteCommand::Connect {
+                gateway,
+                code,
+                pair_only,
+            }) => {
+                eprintln!("Workspace root: {}", remote.workspace().display());
+                let result = tokio::select! {
+                    result = builder::remote_connect::serve(
+                        &remote,
+                        builder::remote_connect::ConnectOptions {
+                            gateway: gateway.clone(),
+                            code: code.clone(),
+                            home: remote.token_path().parent().unwrap().to_owned(),
+                            pair_only: *pair_only,
+                        },
+                    ) => result,
+                    _ = tokio::signal::ctrl_c() => Ok(()),
+                };
+                remote.shutdown().await;
+                result?;
+            }
+            None => {
+                let listener = tokio::net::TcpListener::bind(listen).await?;
+                eprintln!(
+                    "Remote control: http://{}\nWorkspace root: {}\nToken file: {}\nKeep this process running. Use HTTPS at your public reverse proxy.",
+                    listener.local_addr()?,
+                    remote.workspace().display(),
+                    remote.token_path().display()
+                );
+                axum::serve(listener, remote.router())
+                    .with_graceful_shutdown(async {
+                        let _ = tokio::signal::ctrl_c().await;
+                    })
+                    .await?;
+                remote.shutdown().await;
+            }
+        }
         return Ok(());
     }
     if !cli.pipeline.is_empty() {
@@ -426,7 +460,33 @@ async fn app(cli: Cli) -> Result<()> {
                         ui::safe(&profile.model)
                     );
                 }
-                println!("Discovery does not verify generation or tool-call support.");
+                println!("Running active generation, JSON, and tool-call probes…");
+                let conformance = builder::doctor::conformance(&provider, profile.tools).await;
+                let conformance_value = serde_json::to_value(&conformance)?;
+                let conformance_identity = serde_json::to_vec(&(
+                    &profile.base_url,
+                    &profile.model,
+                    profile.stream,
+                    profile.tools,
+                    profile.context_tokens,
+                    profile.max_output_tokens,
+                    profile.max_attempts,
+                    profile.connect_timeout_secs,
+                    profile.idle_timeout_secs,
+                    profile.request_timeout_secs,
+                    &profile.completion,
+                ))?;
+                store.save_provider_conformance(
+                    &builder_core::memory::digest(&conformance_identity),
+                    &profile_name,
+                    &profile.base_url,
+                    &profile.model,
+                    &conformance_value,
+                )?;
+                println!(
+                    "Active conformance (saved by endpoint/model fingerprint):\n{}",
+                    ui::safe(&serde_json::to_string_pretty(&conformance_value)?)
+                );
             }
         } else {
             println!("{}", ui::safe(&serde_json::to_string_pretty(&models)?));
@@ -554,6 +614,9 @@ async fn app(cli: Cli) -> Result<()> {
         || !io::stdout().is_terminal();
     loop {
         let messages = store.messages(&agent.session)?;
+        if memory_task.is_none() && !pending(&messages) {
+            memory_task = start_memory_task(&agent, &home, &config);
+        }
         let used = estimate_tokens(&messages);
         let percent = used.saturating_mul(100) / agent.profile.context_tokens;
         let status = format!(
@@ -676,8 +739,38 @@ async fn app(cli: Cli) -> Result<()> {
             }
             "/status" => {
                 let messages = store.messages(&agent.session)?;
+                let index_status = builder::code_index::status(&store, &agent.workspace)?;
+                let coverage =
+                    builder::code_index::coverage(&store, &agent.workspace, agent.memory.as_ref())?;
+                let query_summary = builder::code_index::query_summary(&store, &agent.workspace)?;
+                let update_mode = memory_task.as_ref().map_or_else(
+                    || configured_index_update_mode(&agent.profile),
+                    MemoryTask::index_update_description,
+                );
+                let index = index_status
+                    .map(|status| {
+                        let vectors = coverage
+                            .map(|(indexed, total)| format!(" · semantic {indexed}/{total}"))
+                            .unwrap_or_default();
+                        format!(
+                            "generation {} · {} files · {} chunks{} · skipped {} · {} · refreshed {} · updates {} · queries {} ({} abstained, {} stale suppressed, {}ms average)",
+                            status.generation,
+                            status.files,
+                            status.chunks,
+                            vectors,
+                            status.skipped,
+                            status.status,
+                            status.completed_at,
+                            update_mode,
+                            query_summary.queries,
+                            query_summary.abstentions,
+                            query_summary.stale_suppressions,
+                            query_summary.average_elapsed_ms,
+                        )
+                    })
+                    .unwrap_or_else(|| "not built yet".into());
                 println!(
-                    "\nSession: {}\nMessages: {}\nEstimated history tokens: {} / {} ({} reserved for output; tool schemas extra)\nState: {}\nStorage: {}\nModel: {}\nAgent rounds per run: {}\nProgress guard: focus after {} tool calls; tool-free conclusion at {}; full context preserved\nFailure guard: recover after {} consecutive failures; {} recovery rounds\nTool limits: {} per response; {} completed identical shell calls\nCompaction: {}\n",
+                    "\nSession: {}\nMessages: {}\nEstimated history tokens: {} / {} ({} reserved for output; tool schemas extra)\nState: {}\nStorage: {}\nModel: {}\nCode index: {}\nAgent rounds per run: {}\nProgress guard: focus after {} tool calls; tool-free conclusion at {}; full context preserved\nFailure guard: recover after {} consecutive failures; {} recovery rounds\nTool limits: {} per response; {} completed identical shell calls\nCompaction: {}\n",
                     agent.session,
                     messages.len(),
                     estimate_tokens(&messages),
@@ -690,6 +783,7 @@ async fn app(cli: Cli) -> Result<()> {
                     },
                     home.display(),
                     ui::safe(&agent.profile.model),
+                    ui::safe(&index),
                     agent.max_rounds,
                     agent.profile.pipeline.progress_check_calls,
                     agent.profile.pipeline.max_no_progress_calls(),
@@ -871,6 +965,76 @@ fn restored_answer(messages: &[Message]) -> Option<&str> {
 struct MemoryTask {
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
     stopped: tokio::sync::oneshot::Receiver<()>,
+    index_updates: std::sync::Arc<std::sync::Mutex<IndexUpdateState>>,
+}
+
+#[derive(Debug, Clone)]
+enum IndexUpdateState {
+    Starting,
+    Watching,
+    PeriodicOnly,
+    WatchUnavailable(String),
+}
+
+impl MemoryTask {
+    fn index_update_description(&self) -> String {
+        let state = self
+            .index_updates
+            .lock()
+            .map(|state| state.clone())
+            .unwrap_or_else(|_| {
+                IndexUpdateState::WatchUnavailable("worker state unavailable".into())
+            });
+        match state {
+            IndexUpdateState::Starting => "background index worker starting".into(),
+            IndexUpdateState::Watching => {
+                "live filesystem watch + periodic full-scan fallback".into()
+            }
+            IndexUpdateState::PeriodicOnly => "periodic full scans (watch disabled)".into(),
+            IndexUpdateState::WatchUnavailable(error) => {
+                format!("periodic full-scan fallback (watch unavailable: {error})")
+            }
+        }
+    }
+}
+
+fn configured_index_update_mode(profile: &Profile) -> String {
+    if !profile.pipeline.code_index_background {
+        return "foreground search refresh only".into();
+    }
+    if profile.pipeline.code_index_watch {
+        format!(
+            "watch configured at {}ms + full scan {}s; worker idle or paused",
+            profile.pipeline.code_index_debounce_ms, profile.pipeline.code_index_refresh_secs
+        )
+    } else {
+        format!(
+            "full scan configured every {}s; worker idle or paused",
+            profile.pipeline.code_index_refresh_secs
+        )
+    }
+}
+
+fn start_code_watch(
+    root: &std::path::Path,
+    state: &std::sync::Arc<std::sync::Mutex<IndexUpdateState>>,
+) -> Option<builder::code_index::CodeIndexWatch> {
+    match builder::code_index::CodeIndexWatch::new(root) {
+        Ok(watch) => {
+            if let Ok(mut state) = state.lock() {
+                *state = IndexUpdateState::Watching;
+            }
+            Some(watch)
+        }
+        Err(error) => {
+            let mut text = error.to_string().replace(['\r', '\n'], " ");
+            text.truncate(text.floor_char_boundary(160));
+            if let Ok(mut state) = state.lock() {
+                *state = IndexUpdateState::WatchUnavailable(text);
+            }
+            None
+        }
+    }
 }
 
 async fn stop_memory_task(task: &mut Option<MemoryTask>) {
@@ -891,7 +1055,11 @@ fn start_memory_task(
     home: &std::path::Path,
     config: &Config,
 ) -> Option<MemoryTask> {
-    agent.memory.as_ref()?;
+    if agent.memory.is_none()
+        && !(agent.profile.pipeline.code_index && agent.profile.pipeline.code_index_background)
+    {
+        return None;
+    }
     let home = home.to_path_buf();
     let config = config.clone();
     let profile = agent.profile.clone();
@@ -899,6 +1067,14 @@ fn start_memory_task(
     let session = agent.session.clone();
     let (cancel, cancelled) = tokio::sync::oneshot::channel();
     let (stopped, stopped_rx) = tokio::sync::oneshot::channel();
+    let index_updates = std::sync::Arc::new(std::sync::Mutex::new(
+        if profile.pipeline.code_index && profile.pipeline.code_index_background {
+            IndexUpdateState::Starting
+        } else {
+            IndexUpdateState::PeriodicOnly
+        },
+    ));
+    let worker_index_updates = index_updates.clone();
     std::thread::Builder::new()
         .name("builder-memory".into())
         .spawn(move || {
@@ -910,9 +1086,9 @@ fn start_memory_task(
                 return;
             };
             runtime.block_on(async move {
-                let Ok(Some(memory)) = builder::memory::MemoryRuntime::from_config(&config) else {
-                    return;
-                };
+                let memory = builder::memory::MemoryRuntime::from_config(&config)
+                    .ok()
+                    .flatten();
                 let Ok(provider) = OpenAiCompatible::new(profile.clone()) else {
                     return;
                 };
@@ -922,16 +1098,66 @@ fn start_memory_task(
                 let Ok(mut store) = Store::open(&home) else {
                     return;
                 };
-                tokio::select! {
-                    _ = cancelled => {}
-                    _ = memory.maintain(
-                        &provider,
-                        &mut store,
-                        &session,
-                        &workspace,
-                        profile.context_tokens,
-                    ) => {}
-                }
+                let maintenance = async {
+                    let mut code_watch = if profile.pipeline.code_index
+                        && profile.pipeline.code_index_background
+                        && profile.pipeline.code_index_watch
+                    {
+                        start_code_watch(workspace.root(), &worker_index_updates)
+                    } else {
+                        if let Ok(mut state) = worker_index_updates.lock() {
+                            *state = IndexUpdateState::PeriodicOnly;
+                        }
+                        None
+                    };
+                    if profile.pipeline.code_index && profile.pipeline.code_index_background {
+                        let _ = builder::code_index::maintain(
+                            &mut store,
+                            &workspace,
+                            memory.as_ref(),
+                            &profile.pipeline,
+                            code_watch.as_mut(),
+                        )
+                        .await;
+                    }
+                    if let Some(memory) = &memory {
+                        let _ = memory
+                            .maintain(
+                                &provider,
+                                &mut store,
+                                &session,
+                                &workspace,
+                                profile.context_tokens,
+                            )
+                            .await;
+                    }
+                    if profile.pipeline.code_index && profile.pipeline.code_index_background {
+                        loop {
+                            if let Some(watch) = &mut code_watch {
+                                let _ = watch
+                                    .wait(
+                                        profile.pipeline.code_index_refresh_secs,
+                                        profile.pipeline.code_index_debounce_ms,
+                                    )
+                                    .await;
+                            } else {
+                                tokio::time::sleep(std::time::Duration::from_secs(
+                                    profile.pipeline.code_index_refresh_secs,
+                                ))
+                                .await;
+                            }
+                            let _ = builder::code_index::maintain(
+                                &mut store,
+                                &workspace,
+                                memory.as_ref(),
+                                &profile.pipeline,
+                                code_watch.as_mut(),
+                            )
+                            .await;
+                        }
+                    }
+                };
+                tokio::select! { _ = cancelled => {}, _ = maintenance => {} }
             });
             runtime.shutdown_background();
             let _ = stopped.send(());
@@ -940,6 +1166,7 @@ fn start_memory_task(
     Some(MemoryTask {
         cancel: Some(cancel),
         stopped: stopped_rx,
+        index_updates,
     })
 }
 
@@ -1045,5 +1272,25 @@ mod tests {
             Message::text(Role::User, "current instruction"),
         ];
         assert_eq!(restored_answer(&pending_turn), None);
+    }
+
+    #[test]
+    fn unavailable_filesystem_watch_is_reported_as_periodic_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("removed");
+        let state = std::sync::Arc::new(std::sync::Mutex::new(IndexUpdateState::Starting));
+        assert!(start_code_watch(&missing, &state).is_none());
+        let state = state.lock().unwrap().clone();
+        assert!(matches!(state, IndexUpdateState::WatchUnavailable(_)));
+
+        let (_cancel, stopped) = tokio::sync::oneshot::channel();
+        let task = MemoryTask {
+            cancel: None,
+            stopped,
+            index_updates: std::sync::Arc::new(std::sync::Mutex::new(state)),
+        };
+        let description = task.index_update_description();
+        assert!(description.contains("periodic full-scan fallback"));
+        assert!(description.contains("watch unavailable"));
     }
 }

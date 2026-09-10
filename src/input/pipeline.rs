@@ -86,6 +86,166 @@ const FIELDS: &[(&str, &str, &str)] = &[
         "Run bounded independent source analyses and synthesis.",
     ),
     (
+        "phase_routing",
+        "Phase-based tool schemas",
+        "Shrink research operations from typed durable progress; does not classify prompt wording or model names.",
+    ),
+    (
+        "code_index",
+        "Code index",
+        "Enable checkout-scoped structural, lexical, graph and semantic code retrieval.",
+    ),
+    (
+        "code_index_background",
+        "Background indexing",
+        "Refresh the complete code index while the interactive composer is idle.",
+    ),
+    (
+        "code_index_watch",
+        "Watch code changes",
+        "Use recursive filesystem events for prompt refreshes; periodic scans remain the correctness fallback.",
+    ),
+    (
+        "code_index_semantic",
+        "Semantic code retrieval",
+        "Embed code chunks locally when embeddings are enabled; lexical and structural retrieval remain available on failure.",
+    ),
+    (
+        "code_index_auto_context",
+        "Automatic code context",
+        "Include a small current, source-validated lexical code packet with a new request when the index has support.",
+    ),
+    (
+        "code_index_telemetry",
+        "Retrieval telemetry",
+        "Store bounded query/rank metadata for evaluation; source excerpts and model output are not copied.",
+    ),
+    (
+        "code_history",
+        "Repository history",
+        "Index recent local Git commits and changed paths as historical ranking evidence.",
+    ),
+    (
+        "code_index_max_files",
+        "Index files",
+        "1–50000 source files per complete index generation.",
+    ),
+    (
+        "code_index_max_file_bytes",
+        "Index file size (bytes)",
+        "1024–2097152 bytes per source file; oversized files are excluded and counted.",
+    ),
+    (
+        "code_index_max_bytes",
+        "Index total size (bytes)",
+        "1024–268435456 source bytes. Exceeding this keeps the previous complete generation.",
+    ),
+    (
+        "code_index_max_chunks",
+        "Index chunks",
+        "1–100000 structural chunks. Exceeding this keeps the previous complete generation.",
+    ),
+    (
+        "code_index_refresh_secs",
+        "Index refresh (seconds)",
+        "1–3600 seconds between bounded fallback scans, including when filesystem events are unavailable.",
+    ),
+    (
+        "code_index_debounce_ms",
+        "Index debounce (milliseconds)",
+        "50–10000 milliseconds to combine bursts of filesystem events before rebuilding.",
+    ),
+    (
+        "code_index_embedding_timeout_secs",
+        "Code embedding timeout (seconds)",
+        "1–600 seconds per local or remote code-embedding batch.",
+    ),
+    (
+        "code_index_embedding_batch",
+        "Code embedding batch size",
+        "1–128 missing content-addressed vectors generated together while idle.",
+    ),
+    (
+        "code_search_results",
+        "Code search results",
+        "1–20 fresh, diversified chunks returned to the model.",
+    ),
+    (
+        "code_index_lexical_candidates",
+        "Lexical candidate pool",
+        "1–500 FTS5/BM25 candidates considered before fusion.",
+    ),
+    (
+        "code_index_exact_candidates",
+        "Exact candidate pool",
+        "1–500 exact symbol and reference candidates considered before fusion.",
+    ),
+    (
+        "code_index_dense_candidates",
+        "Semantic candidate pool",
+        "1–500 embedding candidates considered after the semantic score floor.",
+    ),
+    (
+        "code_index_history_results",
+        "History candidate pool",
+        "1–100 Git history matches considered as path-ranking evidence.",
+    ),
+    (
+        "code_index_chunks_per_file",
+        "Chunks per result file",
+        "1–8 chunks from one file allowed in a diversified code-search result.",
+    ),
+    (
+        "code_index_auto_candidates",
+        "Automatic candidate pool",
+        "1–200 lexical candidates considered for automatic current-code context.",
+    ),
+    (
+        "code_index_auto_files",
+        "Automatic context files",
+        "1–12 source-validated files included in automatic current-code context.",
+    ),
+    (
+        "code_index_min_similarity_percent",
+        "Minimum semantic score (%)",
+        "0–100 minimum cosine similarity for semantic-only candidates; lexical matches are unaffected.",
+    ),
+    (
+        "code_index_graph_hops",
+        "Symbol graph hops",
+        "0–3 bounded exact declaration/reference expansion hops per code search.",
+    ),
+    (
+        "code_index_graph_symbols",
+        "Graph symbols per hop",
+        "1–32 unique frontier symbols expanded at each graph hop.",
+    ),
+    (
+        "code_index_graph_candidates",
+        "Graph candidates per hop",
+        "1–200 exact symbol/reference candidates considered at each hop.",
+    ),
+    (
+        "code_history_commits",
+        "History commits",
+        "1–5000 recent commits retained for checkout-local history retrieval.",
+    ),
+    (
+        "code_history_timeout_secs",
+        "History timeout (seconds)",
+        "1–30 seconds for bounded local Git history capture.",
+    ),
+    (
+        "memory_min_similarity_percent",
+        "Memory semantic score (%)",
+        "0–100 minimum cosine similarity before dense memory retrieval is trusted.",
+    ),
+    (
+        "memory_min_margin_percent",
+        "Memory semantic margin (%)",
+        "0–100 minimum top-versus-runner-up similarity margin; lexical matches remain available.",
+    ),
+    (
         "candidate_attempts",
         "Candidate attempts",
         "1–20 claimed candidate attempts per user turn.",
@@ -568,7 +728,10 @@ mod tests {
     #[test]
     fn number_editor_validates_and_navigation_reaches_save() {
         let mut menu = Menu::new(&PipelineSettings::default());
-        menu.selected = 15;
+        menu.selected = FIELDS
+            .iter()
+            .position(|(key, _, _)| *key == "candidate_attempts")
+            .unwrap();
         menu.activate();
         menu.key(key(KeyCode::Char('0')));
         menu.key(key(KeyCode::Enter));

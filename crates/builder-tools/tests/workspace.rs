@@ -459,6 +459,14 @@ fn result_note_reports_failure_and_nonzero_exit() {
         None
     );
     assert_eq!(
+        builder_tools::result_note("shell", "exit: exit status: 0\nstdout:\nok\nstderr:\n"),
+        None
+    );
+    assert_eq!(
+        builder_tools::result_note("shell", "exit: exit status: 7\nstdout:\n\nstderr:\nboom\n"),
+        Some("exit 7".into())
+    );
+    assert_eq!(
         builder_tools::result_note("read_file", "ERROR: No such file: a.rs"),
         Some("No such file: a.rs".into())
     );

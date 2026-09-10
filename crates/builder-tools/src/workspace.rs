@@ -169,6 +169,7 @@ impl Workspace {
     pub async fn execute(&self, action: &Action) -> Result<String> {
         let output = match action {
             Action::Research { .. }
+            | Action::CodeSearch { .. }
             | Action::MemorySearch { .. }
             | Action::MemoryGet { .. }
             | Action::MemoryUpsert { .. }

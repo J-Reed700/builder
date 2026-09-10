@@ -67,6 +67,7 @@ SQLite WAL and full synchronization protect committed writes within the guarante
 | HTTP 408, 429, 500, 502, 503, 504 | Bounded exponential backoff with jitter / numeric Retry-After |
 | HTTP 400, 401, 403, other nonretryable status | Stop immediately; keep pending turn |
 | Invalid SSE or invalid tool arguments | Stop without dispatching the response |
+| Successful finish with empty or reasoning-only output | Discard attempt output; retry identical committed input within configured `max_attempts`; pause on exhaustion |
 | `length` or unsupported finish reason | Stop; do not commit incomplete output |
 | Normal finish reason then EOF | Accept for compatible servers that omit `[DONE]` |
 | Exhausted retry budget | Return actionable error; session remains resumable |
@@ -299,6 +300,60 @@ Freshness checks, permission rules and original transcript persistence are uncha
 The `/memory` menu installs/selects local mode, keyword-only mode, or disables memory;
 its selection applies immediately and persists atomically. CLI setup commits configuration
 only after verified model installation and successful local inference.
+
+### Checkout code index
+
+Code capture belongs to `builder-tools`, durable generations and vectors belong to
+`builder-core`, and watcher/embedding/ranking policy belongs to the application.
+This preserves the application → provider/tools → core dependency direction and
+keeps provider details outside the agent state machine.
+
+An application-owned recursive filesystem watcher is RAII-bound to the idle
+maintenance thread. Its bounded one-item channel deliberately coalesces event
+bursts; a configurable debounce combines editor save sequences. Generated and
+dependency directories do not wake the scanner. Watch events are an acceleration,
+not a correctness contract: configurable periodic complete scans remain active,
+and explicit indexed search synchronously reconciles the current checkout.
+
+A capture either satisfies every configured file/byte/chunk bound or fails. The
+store publishes its files, chunks, FTS rows, state and new generation in one SQLite
+transaction. It never exposes a prefix or mixes generations. If capture or
+publication fails, the previous complete generation remains queryable and the
+state records the bounded error. Deletions disappear on a successful replacement.
+Canonical checkout paths scope all lexical, structural and dense artifacts.
+
+Chunks carry their file digest, content digest, language, line range, declarations
+and identifier references. Vectors are keyed by content digest plus the complete
+embedding fingerprint, so unchanged content is reusable and model migrations do
+not compare incompatible spaces. Missing vectors are a durable queue drained by
+cancellable, bounded local batches during idle time. Exact/FTS retrieval remains
+available during an embedding outage or partial vector generation.
+
+Application ranking fuses exact/path signals, FTS5/BM25, an exact persisted
+declaration/reference graph, separately labelled Git-history path priors and
+similarity-above-threshold dense candidates. Common languages use bundled
+Tree-sitter syntax trees while bounded fallback extraction covers the rest. It diversifies by path,
+clips output, reports the independent ranks, and can abstain. Immediately before
+return, each selected path is read and hashed through `Workspace`; raced or stale
+chunks are withheld and removed. Returned code is navigation evidence and cannot
+satisfy verification without current reads and checks.
+
+Retrieval telemetry is a separate bounded table. It records query metadata,
+candidate/return counts, result paths, semantic coverage, stale suppressions and
+elapsed time, without duplicating source excerpts or model output. Git commit
+subjects and changed paths occupy their own FTS table and are always returned as
+historical leads. Current chunks introduced through history still pass the same
+live source-digest check.
+
+The agent selects phase-specific research schemas from typed completed actions and
+durable `ToolOutcome` values after the latest user message. It does not inspect
+prompt phrases, model names or assistant prose. A new instruction resets the phase.
+The `/settings` switch can restore the full configured research schema.
+
+`builder doctor` performs ordinary generation, JSON-object, native tool and
+parallel tool-call probes through the provider interface. Results are stored by a
+non-secret endpoint/model/settings fingerprint. They establish wire-protocol
+conformance for those calls, not model intelligence or task completion.
 
 The per-run generation budget defaults to 100 rounds and is configurable from
 `/settings` (1–1000). The profile persists this limit independently of the research
