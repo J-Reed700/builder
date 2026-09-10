@@ -173,7 +173,6 @@ pub fn packet_with_settings(
     procedures_enabled: bool,
     settings: &PipelineSettings,
 ) -> Result<Message> {
-    let mut state = status_with_settings(store, session, workspace, settings)?;
     let records = store.research_records_limited(&scope(workspace), settings.retrieval_records)?;
     let latest = store.latest_user_seq(session)?;
     let phase = records
@@ -191,13 +190,33 @@ pub fn packet_with_settings(
             _ => None,
         })
         .unwrap_or(builder_core::research::Phase::Locate);
+    packet_with_settings_for_phase(
+        store,
+        session,
+        workspace,
+        procedures_enabled,
+        settings,
+        &phase,
+    )
+}
+
+pub fn packet_with_settings_for_phase(
+    store: &Store,
+    session: &str,
+    workspace: &Workspace,
+    procedures_enabled: bool,
+    settings: &PipelineSettings,
+    phase: &builder_core::research::Phase,
+) -> Result<Message> {
+    let mut state = status_with_settings(store, session, workspace, settings)?;
+    let records = store.research_records_limited(&scope(workspace), settings.retrieval_records)?;
     let query = execution::clip(&store.research_user_query(session)?, 1000);
     state["phase"] = json!(phase);
     state["procedural_memory"] = if procedures_enabled
         && settings.procedures
         && settings.auto_recall
     {
-        recall(&records, workspace, &query, &phase, settings)?
+        recall(&records, workspace, &query, phase, settings)?
     } else {
         json!({"enabled":false,"reason":"Automatic recall is disabled by memory or pipeline settings"})
     };

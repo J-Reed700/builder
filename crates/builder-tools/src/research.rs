@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use builder_core::config::PipelineSettings;
 use builder_core::{
     memory::digest,
-    research::{Artifact, Observation, Patch, Selector},
+    research::{Artifact, Observation, Patch, Phase, Selector},
 };
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, io::Read};
@@ -439,21 +439,89 @@ impl<'ast> Visit<'ast> for Symbols<'_> {
 }
 
 pub fn definition_with_settings(settings: &PipelineSettings) -> Value {
+    definition_with_operations(settings, &settings.operations())
+}
+
+pub fn definition_with_phase(settings: &PipelineSettings, phase: &Phase) -> Value {
+    let allowed = match phase {
+        Phase::Locate => &[
+            "plan",
+            "observe",
+            "symbols",
+            "semantic",
+            "recall",
+            "history_search",
+            "history_read",
+            "analyze",
+            "status",
+        ][..],
+        Phase::Diagnose => &[
+            "plan",
+            "observe",
+            "symbols",
+            "semantic",
+            "hypothesis",
+            "verify",
+            "recall",
+            "history_search",
+            "history_read",
+            "analyze",
+            "status",
+        ],
+        Phase::Implement => &[
+            "plan",
+            "observe",
+            "symbols",
+            "semantic",
+            "hypothesis",
+            "verify",
+            "candidate_test",
+            "candidate_apply",
+            "recall",
+            "history_search",
+            "history_read",
+            "analyze",
+            "status",
+        ],
+        Phase::Verify => &[
+            "observe",
+            "symbols",
+            "semantic",
+            "hypothesis",
+            "verify",
+            "candidate_test",
+            "candidate_apply",
+            "review",
+            "finish",
+            "learn",
+            "recall",
+            "status",
+        ],
+    };
+    let operations = settings
+        .operations()
+        .into_iter()
+        .filter(|operation| allowed.contains(operation))
+        .collect::<Vec<_>>();
+    definition_with_operations(settings, &operations)
+}
+
+fn definition_with_operations(settings: &PipelineSettings, operations: &[&str]) -> Value {
     let mut definition = definition();
     definition["function"]["parameters"]["properties"]["request"]["properties"]["operation"]["enum"] =
-        json!(settings.operations());
+        json!(operations);
     definition["function"]["parameters"]["properties"]["request"]["anyOf"]
         .as_array_mut()
         .expect("operation variants")
         .retain(|variant| {
-            settings.operations().contains(
+            operations.contains(
                 &variant["properties"]["operation"]["enum"][0]
                     .as_str()
                     .expect("operation"),
             )
         });
     let mut descriptions = Vec::new();
-    for operation in settings.operations() {
+    for &operation in operations {
         descriptions.push(match operation {
             "plan"=>"plan(criteria): fixed acceptance criteria for this user turn",
             "observe"=>"observe(artifacts): source evidence; selectors file, json_pointer(pointer), anchor(text)",
@@ -474,10 +542,50 @@ pub fn definition_with_settings(settings: &PipelineSettings) -> Value {
             _=>"status(): current criteria, checks and finish state",
         });
     }
+    let limits = json!({
+        "candidate_attempts":settings.candidate_attempts,
+        "analysis_artifacts":settings.analysis_artifacts,
+        "analysis_timeout_secs":settings.analysis_timeout_secs,
+        "analysis_output_tokens":settings.analysis_output_tokens,
+        "command_timeout_secs":settings.command_timeout_secs,
+        "semantic_timeout_secs":settings.semantic_timeout_secs,
+        "diagnostic_wait_secs":settings.diagnostic_wait_secs,
+        "history_page_bytes":settings.history_page_bytes,
+        "history_search_results":settings.history_search_results,
+        "procedure_results":settings.procedure_results,
+    });
     definition["function"]["description"] = json!(format!(
         "Research results include record_id; copy the returned ID when citing evidence, hypotheses, candidates or verification. Never invent numeric IDs. Enabled research operations: {}. Artifacts: {{path,selector:{{kind:file|json_pointer|anchor,...}}}}. Evidence must be current; declare dependencies. Policy and limits: {}",
         descriptions.join("; "),
-        serde_json::to_string(settings).unwrap_or_default()
+        limits
     ));
     definition
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::*;
+
+    #[test]
+    fn phase_schema_exposes_only_phase_appropriate_typed_operations() {
+        let settings = PipelineSettings::default();
+        let locate = definition_with_phase(&settings, &Phase::Locate);
+        let locate_operations = locate["function"]["parameters"]["properties"]["request"]
+            ["properties"]["operation"]["enum"]
+            .as_array()
+            .unwrap();
+        assert!(locate_operations.contains(&json!("observe")));
+        assert!(!locate_operations.contains(&json!("candidate_apply")));
+        assert!(!locate_operations.contains(&json!("finish")));
+
+        let verify = definition_with_phase(&settings, &Phase::Verify);
+        let verify_operations = verify["function"]["parameters"]["properties"]["request"]
+            ["properties"]["operation"]["enum"]
+            .as_array()
+            .unwrap();
+        assert!(verify_operations.contains(&json!("verify")));
+        assert!(verify_operations.contains(&json!("review")));
+        assert!(verify_operations.contains(&json!("finish")));
+        assert!(!verify_operations.contains(&json!("history_search")));
+    }
 }

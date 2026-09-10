@@ -691,7 +691,7 @@ async fn cli_run_override_changes_the_actual_model_request_without_saving() {
             .unwrap();
     assert!(!operations.contains(&json!("semantic")));
     assert!(!operations.contains(&json!("analyze")));
-    assert!(operations.contains(&json!("verify")));
+    assert!(operations.contains(&json!("plan")));
     server.abort();
 }
 
