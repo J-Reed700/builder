@@ -117,17 +117,25 @@ impl LocalEmbedding {
         }
     }
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let mut vectors = self.embed_batch(vec![text.to_owned()]).await?;
+        Ok(vectors.remove(0))
+    }
+    pub async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
         ensure!(
-            !text.is_empty() && text.len() <= 8192,
-            "Embedding input must be 1–8192 bytes"
+            !texts.is_empty()
+                && texts.len() <= 128
+                && texts
+                    .iter()
+                    .all(|text| !text.is_empty() && text.len() <= 8192),
+            "Embedding batch must contain 1–128 inputs of 1–8192 bytes"
         );
         let root = self
             .root
             .clone()
             .context("Local embeddings are not installed; open /memory and choose local setup")?;
+        let expected = texts.len();
         let mut guard = self.model.clone().lock_owned().await;
-        let text = text.to_owned();
-        tokio::task::spawn_blocking(move || -> Result<Vec<f32>> {
+        tokio::task::spawn_blocking(move || -> Result<Vec<Vec<f32>>> {
             if guard.is_none() {
                 let tokenizer = TokenizerFiles {
                     tokenizer_file: checked_file(&root, "tokenizer.json")?,
@@ -145,21 +153,22 @@ impl LocalEmbedding {
                         .with_intra_threads(2),
                 )?);
             }
-            let mut vectors = guard
+            let vectors = guard
                 .as_mut()
                 .context("Local model unavailable")?
-                .embed(vec![text], Some(1))?;
+                .embed(texts, Some(32))?;
             ensure!(
-                vectors.len() == 1,
+                vectors.len() == expected,
                 "Local model returned an unexpected batch"
             );
-            let vector = vectors.remove(0);
-            validate_vector(&vector)?;
-            ensure!(
-                vector.len() == DIMENSIONS,
-                "Local embedding dimensions changed"
-            );
-            Ok(vector)
+            for vector in &vectors {
+                validate_vector(vector)?;
+                ensure!(
+                    vector.len() == DIMENSIONS,
+                    "Local embedding dimensions changed"
+                );
+            }
+            Ok(vectors)
         })
         .await
         .context("Local embedding worker failed")?

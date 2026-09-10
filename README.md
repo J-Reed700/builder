@@ -47,7 +47,7 @@ base_url = "http://localhost:11434/v1"
 model = "qwen3:8b"
 ```
 
-Replace the URL and model ID with those from your server, then run `builder doctor`. It checks configuration, storage, and model discovery; `builder models` lists the advertised model IDs. A successful discovery check does not prove generation or tool calling works.
+Replace the URL and model ID with those from your server, then run `builder doctor`. It checks configuration, storage, model discovery, ordinary generation, JSON-object output, one native tool call, and a parallel tool-call batch; results are saved by endpoint/model fingerprint. `builder models` only lists the advertised model IDs.
 
 `XDG_CONFIG_HOME` changes the config root: `$XDG_CONFIG_HOME/builder/config.toml`. On Windows the default is `%USERPROFILE%\.config\builder\config.toml`. `builder config init` creates a default file if needed and prints its exact path. `--home DIR` / `BUILDER_HOME` keeps both config and data under that directory for a portable installation.
 
@@ -80,7 +80,7 @@ Alternatively, set `Authorization = "Basic YOUR_BASE64_VALUE"` directly in the f
 
 **Basic Auth goes in `headers.Authorization`, not `api_key`.** Builder sends that header for model discovery, chat, retries, and embeddings. It takes precedence over bearer auth. An embedding model in another profile needs its own `headers` section. For an API-key endpoint instead, put `api_key = { env = "MODEL_API_KEY" }` inside the profile and omit the Basic Auth header.
 
-Start `builder remote` from a shell or service that has `BUILDER_BASIC_AUTH` set. Model credentials belong to the **host process**; they are not Docker web-container settings. A Basic Auth login protecting your public web page is separate from the model endpoint's Basic Auth and Builder's host access token. [Remote proxy setup →](docs/REMOTE_CONTROL.md#tokens-and-permissions)
+Start `builder remote` or `builder remote connect` from a shell or service that has `BUILDER_BASIC_AUTH` set. Model credentials belong to the host process and never enter Builder Gateway. Pangolin SSO is a separate browser login. [Remote setup →](docs/REMOTE_CONTROL.md)
 
 ### Already configured OpenCode or Continue?
 
@@ -138,9 +138,23 @@ Local setup downloads about **91 MB** once, verifies the pinned files, and check
 
 Relevant notes carry source evidence. Changed or rewound sources invalidate old findings. Memory can survive compaction and help another conversation in the same checkout; it never grants tool permissions. Automatic foreground recall uses fast keyword lookup, while explicit search combines keyword and semantic rankings. [Memory setup, retention, and limits →](docs/MEMORY.md)
 
+## Repository intelligence
+
+While a chat is idle, Builder indexes the current checkout into source-hashed,
+structural chunks. Exact identifiers and paths, FTS5/BM25, reference expansion,
+and optional local vectors feed the `code_search` tool. Filesystem events prompt
+debounced refreshes, periodic complete scans recover missed events, and every
+selected result is checked against the current file hash before it reaches the
+model. Failed scans keep the last complete generation, while lexical retrieval
+continues if embeddings are unavailable. Configure the watcher, refresh rate,
+embedding batches, retrieval limits, and all index bounds from `/settings`; inspect
+generation and semantic coverage with `/status`.
+
+[Index lifecycle, ranking, freshness, and settings →](docs/CODE_INDEX.md)
+
 ## Remote control
 
-Run Builder on your host and open its interface from a browser. Docker serves the web interface and proxies requests to the host process. Code, model credentials, SQLite, embeddings, and tool execution remain with Builder on the host.
+Deploy Builder Gateway beside Pangolin/Newt, then connect Builder from the project you want to control. Builder makes an outbound encrypted connection, so the computer needs no public listener, Docker bridge address, or inbound firewall rule. Code, model credentials, SQLite, embeddings, and tool execution remain on that computer.
 
 ```text
 Your browser
@@ -149,51 +163,61 @@ Your browser
 Pangolin / your reverse proxy
     │ private network
     ▼
-Docker: Builder web interface
-    │ authenticated HTTP over the local/private network
-    ▼
-builder remote on your host → workspace + model endpoint + SQLite
+Docker: Builder Gateway
+    ▲
+    │ outbound authenticated WebSocket
+    │
+Builder on your computer → workspace + model endpoint + SQLite
 ```
 
-### Local browser, no Docker required
+### Gateway behind Pangolin
+
+If Pangolin/Newt already has a Compose project, merge the image-only gateway files into that project. It joins the existing default network, so Newt can reach `builder-gateway:8080` by service name:
 
 ```sh
-builder -C /path/to/project remote
+# Put BUILDER_GATEWAY_ORIGIN and BUILDER_DOMAIN in the existing stack's .env.
+docker compose -f compose.yml \
+  -f /path/to/builder/remote/compose.yaml \
+  -f /path/to/builder/remote/pangolin-labels.yaml \
+  up -d builder-gateway
 ```
 
-Open **http://127.0.0.1:7432**. Read the access token from the file printed by Builder and paste it into the login form. Leave **Remember this browser** checked to skip the login on later visits; Disconnect forgets it.
+This pulls `ghcr.io/j-reed700/builder-gateway:latest`; it does not build Builder or mount its source. You can instead copy the `builder-gateway` service and `builder-gateway-data` volume from those two small files directly into an existing Compose file.
 
-### Docker behind your reverse proxy
-
-Two things run, and they listen on different ports:
-
-| Piece | Where | Port | Who connects to it |
-| --- | --- | --- | --- |
-| `builder remote` host process | on your machine, outside Docker | 7432 | only the web container |
-| `builder-web` container (nginx) | Docker, from `remote/compose.yaml` | 8080 | your reverse proxy / Pangolin |
-
-The `http://127.0.0.1:7432` address from the local section is the host process bound to loopback; Docker cannot reach it, and it is not what your proxy targets. The container reaches the host over the Docker bridge, so it does not have to be in the same Compose project as Pangolin. The two only need to share a Docker network so the proxy can address the container by name.
-
-**1. One command on the host** (Linux with systemd and Docker; no sudo). Run it from the Builder source folder, and replace the three example values with your own domain, project directory, and the Docker network your proxy container is on:
+For a standalone gateway stack:
 
 ```sh
-cd /path/to/builder            # the folder you cloned or extracted
-docker network ls              # find the network Pangolin's newt / your proxy is on
+cp remote/.env.example remote/.env
+# Set BUILDER_GATEWAY_ORIGIN and BUILDER_DOMAIN in remote/.env, then:
+cd remote
+docker compose -f compose.yaml -f pangolin-labels.yaml up -d
+```
+
+Open the public URL, sign in through Pangolin, and click **Generate connect command**. Run the command in your project directory:
+
+```sh
+cd /path/to/project
+builder remote connect https://builder.example.com --code CODE_FROM_DASHBOARD
+```
+
+The one-time code enrolls the computer. Its device credential is saved with owner-only permissions and reconnects automatically. The gateway stores only a hash of that credential. Generate another command from the same signed-in account to replace the paired computer.
+
+On Linux, the included installer pairs once and creates a systemd user service:
+
+```sh
 remote/install-host-service.sh \
-  --origin https://builder.example.com \
-  --workspace /path/to/project \
-  --proxy-network your-proxy-network
+  --gateway https://builder.example.com \
+  --code CODE_FROM_DASHBOARD \
+  --workspace /path/to/project
 ```
-
-This starts `builder remote` as a `builder-remote` systemd user service listening on the docker0 gateway (`172.17.0.1:7432` by default), writes `remote/.env` with the matching upstream and network, and runs `docker compose up -d --build` for the web container. The `--workspace` directory is the root; each chat then picks a folder under it. Settings live in `~/.config/builder/remote.env` and `remote/.env`; edit and re-run the script, or `systemctl --user restart builder-remote`. Omit `--proxy-network` when the proxy runs on the host itself. Without systemd, do it by hand: `builder -C /path/to/project remote --listen 0.0.0.0:7432 --origin https://builder.example.com`, then `cd remote && docker compose up -d --build`.
-
-**2. Proxy:** add a resource in Pangolin (or your proxy) for the origin from step 1, targeting **`http://builder-web:8080`**. A proxy running on the host itself uses `http://127.0.0.1:8080` instead and does not need the network override.
 
 The browser is a chat manager: create and switch between conversations, keep separate drafts, search, rename, archive/restore, and export transcripts. Up to **four chats can run independently**, each with its own live output, approval card, pause, and retry controls. Each run chooses its permissions: ask before changes, auto-approve everything, or read only; a host started read-only cannot be raised from the browser. You can also cancel a saved turn, rewind the last turn, and compact context while keeping the original transcript. Choose a configured model profile when starting a new chat.
 
 The directory passed with `-C` is the host **workspace root**. Each new chat picks a folder under that root from the browser, so separate projects get separate chats without separate host processes; a saved chat keeps its folder. Chats created by the CLI inside the root appear in the same list. Close an already-open terminal session before driving that same session remotely; its lock is respected. A browser disconnect leaves runs active.
 
-**The token controls your host's Builder process.** Keep port 7432 on the private host/container network and expose only the web interface through HTTPS and your proxy's access controls. The container does not need your source tree, provider keys, home directory, or Docker socket mounted. Shell tools still run with the host user's permissions.
+Pangolin SSO controls browser access. The declarative resource allows only `/api/gateway/connect` to bypass interactive SSO; Builder authenticates that route with the one-time pairing code or saved device credential. The gateway container has no source-tree, provider-key, Builder-home, or Docker-socket mount. Shell tools still run with the host user's permissions.
+
+For a browser on the same computer with no Docker or Pangolin, `builder -C /path/to/project remote` still serves the direct interface at `http://127.0.0.1:7432` and uses the printed local token file.
 
 [Complete remote setup and API behavior →](docs/REMOTE_CONTROL.md)
 
@@ -214,6 +238,8 @@ SQLite data and tool output are local plaintext. Relevant conversation and memor
 | [CLI and configuration](docs/CLI_GUIDE.md) | Commands, permissions, imports, auth, context, and settings |
 | [Remote control](docs/REMOTE_CONTROL.md) | Docker, Pangolin/proxies, networking, tokens, and recovery |
 | [Memory](docs/MEMORY.md) | Local and remote embeddings, provenance, revisions, and retrieval |
+| [Code index](docs/CODE_INDEX.md) | Structural chunks, filesystem updates, hybrid ranking, freshness, and controls |
+| [Agent roadmap](docs/AGENT_ROADMAP_2026.md) | September 2026 capability audit, current research, and prioritized repository-intelligence work |
 | [Research runtime](docs/RESEARCH_RUNTIME.md) | Evidence, candidate experiments, verification, and feature switches |
 | [Architecture](ARCHITECTURE.md) | Crate boundaries and persistence invariants |
 | [Model evaluations](docs/LLM_EVALUATIONS.md) | Live fixtures and their limitations |

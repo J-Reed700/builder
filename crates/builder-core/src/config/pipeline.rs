@@ -21,6 +21,14 @@ pub struct PipelineSettings {
     pub auto_recall: bool,
     pub history: bool,
     pub analysis: bool,
+    pub phase_routing: bool,
+    pub code_index: bool,
+    pub code_index_background: bool,
+    pub code_index_watch: bool,
+    pub code_index_semantic: bool,
+    pub code_index_auto_context: bool,
+    pub code_index_telemetry: bool,
+    pub code_history: bool,
     pub max_rounds: usize,
     pub progress_check_calls: usize,
     pub progress_recovery_rounds: usize,
@@ -43,6 +51,30 @@ pub struct PipelineSettings {
     pub history_search_results: usize,
     pub procedure_results: usize,
     pub retrieval_records: usize,
+    pub code_index_max_files: usize,
+    pub code_index_max_file_bytes: usize,
+    pub code_index_max_bytes: usize,
+    pub code_index_max_chunks: usize,
+    pub code_index_refresh_secs: u64,
+    pub code_index_debounce_ms: u64,
+    pub code_index_embedding_timeout_secs: u64,
+    pub code_index_embedding_batch: usize,
+    pub code_search_results: usize,
+    pub code_index_lexical_candidates: usize,
+    pub code_index_exact_candidates: usize,
+    pub code_index_dense_candidates: usize,
+    pub code_index_history_results: usize,
+    pub code_index_chunks_per_file: usize,
+    pub code_index_auto_candidates: usize,
+    pub code_index_auto_files: usize,
+    pub code_index_min_similarity_percent: usize,
+    pub code_index_graph_hops: usize,
+    pub code_index_graph_symbols: usize,
+    pub code_index_graph_candidates: usize,
+    pub code_history_commits: usize,
+    pub code_history_timeout_secs: u64,
+    pub memory_min_similarity_percent: usize,
+    pub memory_min_margin_percent: usize,
 }
 impl Default for PipelineSettings {
     fn default() -> Self {
@@ -62,6 +94,14 @@ impl Default for PipelineSettings {
             auto_recall: true,
             history: true,
             analysis: true,
+            phase_routing: true,
+            code_index: true,
+            code_index_background: true,
+            code_index_watch: true,
+            code_index_semantic: true,
+            code_index_auto_context: true,
+            code_index_telemetry: true,
+            code_history: true,
             max_rounds: 100,
             progress_check_calls: 12,
             progress_recovery_rounds: 88,
@@ -84,6 +124,30 @@ impl Default for PipelineSettings {
             history_search_results: 16,
             procedure_results: 4,
             retrieval_records: 256,
+            code_index_max_files: 20_000,
+            code_index_max_file_bytes: 2 * 1024 * 1024,
+            code_index_max_bytes: 64 * 1024 * 1024,
+            code_index_max_chunks: 100_000,
+            code_index_refresh_secs: 30,
+            code_index_debounce_ms: 500,
+            code_index_embedding_timeout_secs: 60,
+            code_index_embedding_batch: 16,
+            code_search_results: 10,
+            code_index_lexical_candidates: 100,
+            code_index_exact_candidates: 100,
+            code_index_dense_candidates: 100,
+            code_index_history_results: 20,
+            code_index_chunks_per_file: 2,
+            code_index_auto_candidates: 40,
+            code_index_auto_files: 4,
+            code_index_min_similarity_percent: 25,
+            code_index_graph_hops: 2,
+            code_index_graph_symbols: 16,
+            code_index_graph_candidates: 80,
+            code_history_commits: 500,
+            code_history_timeout_secs: 5,
+            memory_min_similarity_percent: 25,
+            memory_min_margin_percent: 3,
         }
     }
 }
@@ -138,6 +202,101 @@ impl PipelineSettings {
             ("history_search_results", self.history_search_results, 1, 16),
             ("procedure_results", self.procedure_results, 1, 4),
             ("retrieval_records", self.retrieval_records, 1, 256),
+            ("code_index_max_files", self.code_index_max_files, 1, 50_000),
+            (
+                "code_index_max_file_bytes",
+                self.code_index_max_file_bytes,
+                1024,
+                2 * 1024 * 1024,
+            ),
+            (
+                "code_index_max_bytes",
+                self.code_index_max_bytes,
+                1024,
+                256 * 1024 * 1024,
+            ),
+            (
+                "code_index_max_chunks",
+                self.code_index_max_chunks,
+                1,
+                100_000,
+            ),
+            (
+                "code_index_embedding_batch",
+                self.code_index_embedding_batch,
+                1,
+                128,
+            ),
+            ("code_search_results", self.code_search_results, 1, 20),
+            (
+                "code_index_lexical_candidates",
+                self.code_index_lexical_candidates,
+                1,
+                500,
+            ),
+            (
+                "code_index_exact_candidates",
+                self.code_index_exact_candidates,
+                1,
+                500,
+            ),
+            (
+                "code_index_dense_candidates",
+                self.code_index_dense_candidates,
+                1,
+                500,
+            ),
+            (
+                "code_index_history_results",
+                self.code_index_history_results,
+                1,
+                100,
+            ),
+            (
+                "code_index_chunks_per_file",
+                self.code_index_chunks_per_file,
+                1,
+                8,
+            ),
+            (
+                "code_index_auto_candidates",
+                self.code_index_auto_candidates,
+                1,
+                200,
+            ),
+            ("code_index_auto_files", self.code_index_auto_files, 1, 12),
+            (
+                "code_index_min_similarity_percent",
+                self.code_index_min_similarity_percent,
+                0,
+                100,
+            ),
+            ("code_index_graph_hops", self.code_index_graph_hops, 0, 3),
+            (
+                "code_index_graph_symbols",
+                self.code_index_graph_symbols,
+                1,
+                32,
+            ),
+            (
+                "code_index_graph_candidates",
+                self.code_index_graph_candidates,
+                1,
+                200,
+            ),
+            ("code_history_commits", self.code_history_commits, 1, 5000),
+            (
+                "memory_min_similarity_percent",
+                self.memory_min_similarity_percent,
+                0,
+                100,
+            ),
+            (
+                "memory_min_margin_percent",
+                self.memory_min_margin_percent,
+                0,
+                100,
+            ),
         ] {
             ensure!(
                 (min..=max).contains(&value),
@@ -155,6 +314,22 @@ impl PipelineSettings {
                 "pipeline.{name} must be between 1 and 120"
             );
         }
+        ensure!(
+            (1..=3600).contains(&self.code_index_refresh_secs),
+            "pipeline.code_index_refresh_secs must be between 1 and 3600"
+        );
+        ensure!(
+            (50..=10_000).contains(&self.code_index_debounce_ms),
+            "pipeline.code_index_debounce_ms must be between 50 and 10000"
+        );
+        ensure!(
+            (1..=600).contains(&self.code_index_embedding_timeout_secs),
+            "pipeline.code_index_embedding_timeout_secs must be between 1 and 600"
+        );
+        ensure!(
+            (1..=30).contains(&self.code_history_timeout_secs),
+            "pipeline.code_history_timeout_secs must be between 1 and 30"
+        );
         Ok(())
     }
 

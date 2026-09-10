@@ -1,4 +1,6 @@
 //! Typed tool registry, workspace boundaries, and bounded execution.
+pub mod code_index;
+pub mod git_history;
 pub mod research;
 pub mod semantic;
 mod workspace;
@@ -29,6 +31,11 @@ pub enum Action {
         query: String,
         #[serde(default)]
         glob: Option<String>,
+    },
+    CodeSearch {
+        query: String,
+        #[serde(default)]
+        limit: Option<usize>,
     },
     WriteFile {
         path: String,
@@ -113,6 +120,7 @@ impl Action {
             }
             Self::ReadFile { path, .. } => format!("read · {path}"),
             Self::Search { query, .. } => format!("search · {query}"),
+            Self::CodeSearch { query, .. } => format!("code index · {query}"),
             Self::WriteFile { path, content } => {
                 format!("write · {path} ({} bytes)\n{content}", content.len())
             }
@@ -128,6 +136,13 @@ pub fn definitions() -> Vec<Value> {
     definitions_with_pipeline(&builder_core::config::PipelineSettings::default())
 }
 pub fn definitions_with_pipeline(settings: &builder_core::config::PipelineSettings) -> Vec<Value> {
+    definitions_with_pipeline_and_phase(settings, None)
+}
+
+pub fn definitions_with_pipeline_and_phase(
+    settings: &builder_core::config::PipelineSettings,
+    phase: Option<&builder_core::research::Phase>,
+) -> Vec<Value> {
     let mut tools = vec![
         schema(
             "list_files",
@@ -167,7 +182,18 @@ pub fn definitions_with_pipeline(settings: &builder_core::config::PipelineSettin
         ),
     ];
     if settings.enabled {
-        tools.push(crate::research::definition_with_settings(settings));
+        tools.push(match phase {
+            Some(phase) => crate::research::definition_with_phase(settings, phase),
+            None => crate::research::definition_with_settings(settings),
+        });
+    }
+    if settings.code_index {
+        tools.push(schema(
+            "code_search",
+            "Search the current checkout's structural code index. Combines exact symbols and paths, FTS5 lexical ranking, symbol-reference graph expansion, and local semantic vectors when available. Results are source-hash validated, diversified, bounded navigation leads; read the returned current range before editing. If the index abstains, use a targeted literal search instead of repeating the same query.",
+            json!({"query":{"type":"string","minLength":1,"maxLength":1000},"limit":{"type":"integer","minimum":1,"maximum":20}}),
+            &["query"],
+        ));
     }
     tools
 }
@@ -198,6 +224,7 @@ pub fn call_summary(name: &str, arguments: &str) -> String {
             (query, "") => query.to_owned(),
             (query, glob) => format!("{query} in {glob}"),
         },
+        "code_search" => field("query").to_owned(),
         "write_file" | "edit_file" => field("path").to_owned(),
         "shell" => field("command").to_owned(),
         "memory_search" => field("query").to_owned(),
@@ -241,10 +268,16 @@ pub fn result_note(name: &str, result: &str) -> Option<String> {
             .strip_prefix("exit: ")
             .and_then(|rest| rest.split('\n').next())
         {
-            Some("0") | None => return None,
-            Some(code) => format!("exit {code}"),
+            Some("0" | "exit status: 0" | "exit code: 0") | None => return None,
+            Some(status) => format!(
+                "exit {}",
+                status
+                    .strip_prefix("exit status: ")
+                    .or_else(|| status.strip_prefix("exit code: "))
+                    .unwrap_or(status)
+            ),
         },
-        "read_file" | "search" | "list_files" => {
+        "read_file" | "search" | "list_files" | "code_search" => {
             let lines = result.lines().filter(|line| !line.is_empty()).count();
             format!("{lines} lines")
         }
