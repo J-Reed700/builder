@@ -1,0 +1,229 @@
+[
+  {
+    "id": "private-payload",
+    "workspace": "workspace",
+    "query": "serialize_conversation",
+    "relevant": [
+      {
+        "path": "transport.rs",
+        "lines": [
+          3,
+          7
+        ]
+      }
+    ],
+    "source_hashes": {
+      "transport.rs": "c703c40617a66c4ddca4fa65bd6ec6fb0a63906e84f90cfac9db138f14f91689",
+      "cache.py": "4e88e75399cbc48e057986e619cb5cf22320f84dd0109225c39e77ffea2f3baa",
+      "collision.ts": "ffe2340e10fbd99a7fbd454dd38fbd993782dd25c77bce9c6b01515d8aa7789a",
+      "distractors.rs": "79a5d0a321bf164a405a22e4e736ac47839a7c092b03687a5467f939a44f0fa3",
+      "retry.go": "5da4cbc420dc1904ca8e710047fb79200dfc1bd5f13579af7ac7b5e3943db4a5"
+    },
+    "expectation": {
+      "kind": "retrieve",
+      "thresholds": {
+        "min_line_recall": 1,
+        "min_excerpt_line_recall": 1,
+        "min_passage_reciprocal_rank": 0.2
+      }
+    }
+  },
+  {
+    "id": "cache-expiry",
+    "workspace": "workspace",
+    "query": "expire_session_cache",
+    "relevant": [
+      {
+        "path": "cache.py",
+        "lines": [
+          1,
+          3
+        ]
+      }
+    ],
+    "source_hashes": {
+      "transport.rs": "c703c40617a66c4ddca4fa65bd6ec6fb0a63906e84f90cfac9db138f14f91689",
+      "cache.py": "4e88e75399cbc48e057986e619cb5cf22320f84dd0109225c39e77ffea2f3baa",
+      "collision.ts": "ffe2340e10fbd99a7fbd454dd38fbd993782dd25c77bce9c6b01515d8aa7789a",
+      "distractors.rs": "79a5d0a321bf164a405a22e4e736ac47839a7c092b03687a5467f939a44f0fa3",
+      "retry.go": "5da4cbc420dc1904ca8e710047fb79200dfc1bd5f13579af7ac7b5e3943db4a5"
+    },
+    "expectation": {
+      "kind": "retrieve",
+      "thresholds": {
+        "min_line_recall": 1,
+        "min_excerpt_line_recall": 1,
+        "min_passage_reciprocal_rank": 0.2
+      }
+    }
+  },
+  {
+    "id": "body-collision",
+    "workspace": "workspace",
+    "query": "resolve_boss_collision",
+    "relevant": [
+      {
+        "path": "collision.ts",
+        "lines": [
+          1,
+          4
+        ]
+      }
+    ],
+    "source_hashes": {
+      "transport.rs": "c703c40617a66c4ddca4fa65bd6ec6fb0a63906e84f90cfac9db138f14f91689",
+      "cache.py": "4e88e75399cbc48e057986e619cb5cf22320f84dd0109225c39e77ffea2f3baa",
+      "collision.ts": "ffe2340e10fbd99a7fbd454dd38fbd993782dd25c77bce9c6b01515d8aa7789a",
+      "distractors.rs": "79a5d0a321bf164a405a22e4e736ac47839a7c092b03687a5467f939a44f0fa3",
+      "retry.go": "5da4cbc420dc1904ca8e710047fb79200dfc1bd5f13579af7ac7b5e3943db4a5"
+    },
+    "expectation": {
+      "kind": "retrieve",
+      "thresholds": {
+        "min_line_recall": 1,
+        "min_excerpt_line_recall": 1,
+        "min_passage_reciprocal_rank": 0.2
+      }
+    }
+  },
+  {
+    "id": "retry-backoff",
+    "workspace": "workspace",
+    "query": "retry_transport",
+    "relevant": [
+      {
+        "path": "retry.go",
+        "lines": [
+          3,
+          6
+        ]
+      }
+    ],
+    "source_hashes": {
+      "transport.rs": "c703c40617a66c4ddca4fa65bd6ec6fb0a63906e84f90cfac9db138f14f91689",
+      "cache.py": "4e88e75399cbc48e057986e619cb5cf22320f84dd0109225c39e77ffea2f3baa",
+      "collision.ts": "ffe2340e10fbd99a7fbd454dd38fbd993782dd25c77bce9c6b01515d8aa7789a",
+      "distractors.rs": "79a5d0a321bf164a405a22e4e736ac47839a7c092b03687a5467f939a44f0fa3",
+      "retry.go": "5da4cbc420dc1904ca8e710047fb79200dfc1bd5f13579af7ac7b5e3943db4a5"
+    },
+    "expectation": {
+      "kind": "retrieve",
+      "thresholds": {
+        "min_line_recall": 1,
+        "min_excerpt_line_recall": 1,
+        "min_passage_reciprocal_rank": 0.2
+      }
+    }
+  },
+  {
+    "id": "cache-description",
+    "workspace": "workspace",
+    "query": "remove expired session cache entries",
+    "relevant": [
+      {
+        "path": "cache.py",
+        "lines": [
+          1,
+          3
+        ]
+      }
+    ],
+    "source_hashes": {
+      "transport.rs": "c703c40617a66c4ddca4fa65bd6ec6fb0a63906e84f90cfac9db138f14f91689",
+      "cache.py": "4e88e75399cbc48e057986e619cb5cf22320f84dd0109225c39e77ffea2f3baa",
+      "collision.ts": "ffe2340e10fbd99a7fbd454dd38fbd993782dd25c77bce9c6b01515d8aa7789a",
+      "distractors.rs": "79a5d0a321bf164a405a22e4e736ac47839a7c092b03687a5467f939a44f0fa3",
+      "retry.go": "5da4cbc420dc1904ca8e710047fb79200dfc1bd5f13579af7ac7b5e3943db4a5"
+    },
+    "expectation": {
+      "kind": "retrieve",
+      "thresholds": {
+        "min_line_recall": 1,
+        "min_excerpt_line_recall": 1,
+        "min_passage_reciprocal_rank": 0.2
+      }
+    }
+  },
+  {
+    "id": "collision-description",
+    "workspace": "workspace",
+    "query": "resolve overlap between player and boss bodies",
+    "relevant": [
+      {
+        "path": "collision.ts",
+        "lines": [
+          1,
+          4
+        ]
+      }
+    ],
+    "source_hashes": {
+      "transport.rs": "c703c40617a66c4ddca4fa65bd6ec6fb0a63906e84f90cfac9db138f14f91689",
+      "cache.py": "4e88e75399cbc48e057986e619cb5cf22320f84dd0109225c39e77ffea2f3baa",
+      "collision.ts": "ffe2340e10fbd99a7fbd454dd38fbd993782dd25c77bce9c6b01515d8aa7789a",
+      "distractors.rs": "79a5d0a321bf164a405a22e4e736ac47839a7c092b03687a5467f939a44f0fa3",
+      "retry.go": "5da4cbc420dc1904ca8e710047fb79200dfc1bd5f13579af7ac7b5e3943db4a5"
+    },
+    "expectation": {
+      "kind": "retrieve",
+      "thresholds": {
+        "min_line_recall": 1,
+        "min_excerpt_line_recall": 1,
+        "min_passage_reciprocal_rank": 0.2
+      }
+    }
+  },
+  {
+    "id": "cross-file-cache-and-retry",
+    "workspace": "workspace",
+    "query": "expire_session_cache retry_transport",
+    "relevant": [
+      {
+        "path": "cache.py",
+        "lines": [
+          1,
+          3
+        ]
+      },
+      {
+        "path": "retry.go",
+        "lines": [
+          3,
+          6
+        ]
+      }
+    ],
+    "source_hashes": {
+      "transport.rs": "c703c40617a66c4ddca4fa65bd6ec6fb0a63906e84f90cfac9db138f14f91689",
+      "cache.py": "4e88e75399cbc48e057986e619cb5cf22320f84dd0109225c39e77ffea2f3baa",
+      "collision.ts": "ffe2340e10fbd99a7fbd454dd38fbd993782dd25c77bce9c6b01515d8aa7789a",
+      "distractors.rs": "79a5d0a321bf164a405a22e4e736ac47839a7c092b03687a5467f939a44f0fa3",
+      "retry.go": "5da4cbc420dc1904ca8e710047fb79200dfc1bd5f13579af7ac7b5e3943db4a5"
+    },
+    "expectation": {
+      "kind": "retrieve",
+      "thresholds": {
+        "min_file_recall": 1,
+        "min_line_recall": 1,
+        "min_excerpt_line_recall": 1,
+        "min_passage_reciprocal_rank": 0.2
+      }
+    }
+  },
+  {
+    "id": "unrelated-negative",
+    "workspace": "workspace",
+    "query": "xylophonic_zeppelin_flux",
+    "relevant": [],
+    "source_hashes": {
+      "transport.rs": "c703c40617a66c4ddca4fa65bd6ec6fb0a63906e84f90cfac9db138f14f91689",
+      "cache.py": "4e88e75399cbc48e057986e619cb5cf22320f84dd0109225c39e77ffea2f3baa",
+      "collision.ts": "ffe2340e10fbd99a7fbd454dd38fbd993782dd25c77bce9c6b01515d8aa7789a",
+      "distractors.rs": "79a5d0a321bf164a405a22e4e736ac47839a7c092b03687a5467f939a44f0fa3",
+      "retry.go": "5da4cbc420dc1904ca8e710047fb79200dfc1bd5f13579af7ac7b5e3943db4a5"
+    },
+    "expectation": {
+      "kind": "abstain"
+    }
+  }
+]

@@ -1,0 +1,3 @@
+# Source hashes must remain identical across CI operating systems.
+workspace/* text eol=lf
+cases.json text eol=lf
