@@ -19,9 +19,8 @@ pub fn banner(profile: &str, model: &str, workspace: &std::path::Path, session: 
         .clamp(1, 76);
     let fit = |text: &str| crate::input::layout::clip(&safe(text), width);
     eprintln!(
-        "\n  {}  {}  {}",
-        theme::accent("✦"),
-        style("builder").bold(),
+        "\n  {}  {}",
+        theme::accent("builder"),
         theme::muted(env!("CARGO_PKG_VERSION"))
     );
     let profile = if profile.is_empty() { model } else { profile };
@@ -32,11 +31,9 @@ pub fn banner(profile: &str, model: &str, workspace: &std::path::Path, session: 
             || workspace.display().to_string(),
             |path| format!("~/{}", path.display()),
         );
-    eprintln!(
-        "  {}",
-        theme::title(&fit(&format!("{workspace} · {session}")))
-    );
-    eprintln!("  {}\n", theme::muted(&fit(&format!("{profile} · {mode}"))));
+    eprintln!("  {}", theme::title(&fit(&workspace)));
+    eprintln!("  {}", theme::muted(&fit(&format!("{profile} · {mode}"))));
+    eprintln!("  {}\n", theme::muted(&fit(&format!("session {session}"))));
 }
 pub struct Renderer {
     interactive: bool,
@@ -231,11 +228,11 @@ impl Renderer {
     fn start_spinner(&mut self, message: String) {
         let spinner = indicatif::ProgressBar::new_spinner();
         spinner.set_style(
-            indicatif::ProgressStyle::with_template("  {spinner:.magenta} {msg}  {elapsed:.dim}")
+            indicatif::ProgressStyle::with_template("  {spinner:.cyan} {msg}  {elapsed:.dim}")
                 .expect("static progress template")
-                .tick_strings(&["◜", "◠", "◝", "◞", "◡", "◟"]),
+                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
         );
-        spinner.set_message(message);
+        spinner.set_message(self.fit(&message, 14));
         spinner.enable_steady_tick(std::time::Duration::from_millis(120));
         self.spinner = Some(spinner);
     }
@@ -247,19 +244,18 @@ impl Renderer {
             Event::Activity(activity) => {
                 let size = self.prompt_size();
                 if let Some(spinner) = &self.spinner {
-                    spinner.set_message(if self.compacting {
+                    let message = if self.compacting {
                         "Summarizing context · originals retained · ctrl+c cancel".to_owned()
                     } else {
                         match activity {
-                            Activity::Connected => format!(
-                                "Endpoint accepted the request · reading {size} · no output yet · ctrl+c cancel"
-                            ),
-                            Activity::Thinking => "Model is thinking · ctrl+c cancel".to_owned(),
+                            Activity::Connected => format!("Reading {size} · ctrl+c cancel"),
+                            Activity::Thinking => "Thinking · ctrl+c cancel".to_owned(),
                             Activity::PreparingTools => {
-                                "Model is preparing tool calls · ctrl+c cancel".to_owned()
+                                "Preparing actions · ctrl+c cancel".to_owned()
                             }
                         }
-                    });
+                    };
+                    spinner.set_message(self.fit(&message, 14));
                 }
             }
             Event::Attempt { number, maximum } => {
@@ -273,17 +269,15 @@ impl Renderer {
                         eprintln!(
                             "\n  {}",
                             theme::accent(&if number == 1 {
-                                "✦ builder".to_owned()
+                                "builder".to_owned()
                             } else {
-                                format!("✦ builder · attempt {number}/{maximum}")
+                                format!("builder · attempt {number}/{maximum}")
                             })
                         );
                         self.heading_printed = true;
                     }
                     let size = self.prompt_size();
-                    self.start_spinner(format!(
-                        "Sending {size} to the endpoint · a local server processes the whole prompt before its first token · ctrl+c cancel"
-                    ));
+                    self.start_spinner(format!("Sending {size} · ctrl+c cancel"));
                 }
             }
             Event::Delta(text) => {

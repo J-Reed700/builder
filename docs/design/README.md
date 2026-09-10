@@ -1,5 +1,9 @@
 # Terminal design
 
+The [September 10 refinement](refinement/README.md) documents the current browser
+and terminal direction, research, and review captures. The notes and images
+below are the September 8 baseline.
+
 Builder uses a quiet, inline workspace: one lavender accent, neutral rules,
 ordinary terminal foreground for content, and a consistent left alignment.
 The terminal supplies the background and font. No alternate screen is used for

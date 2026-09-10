@@ -13,7 +13,7 @@ async function uncertainReply(kind) {
   let posts = 0, acceptedId;
   const context = vm.createContext({
     crypto: webcrypto, AbortSignal, setInterval() {},
-    document: { getElementById: get, createElement: element, createDocumentFragment: element, querySelectorAll: () => [] },
+    document: { getElementById: get, createElement: element, createDocumentFragment: element, querySelectorAll: () => [], addEventListener() {} },
     async fetch(path, options) {
       if (options.method === 'POST') {
         posts++;

@@ -105,20 +105,14 @@ impl Screen {
             let offset = layout.cursor.0.saturating_sub(visible - 1);
             let border_width = self.width.saturating_sub(6) as usize;
             let mut lines = vec![format!(
-                "  {}",
-                theme::border(&"─".repeat(border_width + 2))
+                "  {} {}",
+                theme::accent("Message"),
+                theme::border(&"─".repeat(border_width.saturating_sub(6)))
             )];
             for index in 0..visible {
                 let text = layout.lines.get(offset + index).map_or("", String::as_str);
                 let plain = if buffer.is_empty() && index == 0 {
-                    clip(
-                        if content_width < 45 {
-                            "Ask Builder…"
-                        } else {
-                            "Ask Builder to build, fix, or explore…"
-                        },
-                        content_width,
-                    )
+                    clip("Ask Builder…", content_width)
                 } else {
                     safe(text)
                 };
@@ -241,6 +235,8 @@ fn paint_status(status: &str) -> String {
     let (state, details) = status.split_once(" · ").unwrap_or((status, ""));
     let state = if state.starts_with("Paused") {
         theme::warning(state)
+    } else if state == "Saved" {
+        theme::success(state)
     } else {
         theme::muted(state)
     };

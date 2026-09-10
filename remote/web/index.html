@@ -1,10 +1,250 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Builder · Remote</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Builder · Remote</title>
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer>
+</script>
+</head>
 <body>
-<section id="login" class="login"><div class="brand">▰ builder <span>REMOTE</span></div><h1>Your workspace.<br>Within reach.</h1><p>Connect to Builder running on your computer. Your code and tools stay there.</p><form id="connect"><label for="token">Host access token</label><input id="token" type="password" autocomplete="off" required placeholder="Paste the token from your host"><label class="remember"><input id="remember" type="checkbox" checked> Remember this browser</label><button>Connect to workspace <span>↗</span></button></form><p class="hint">Find the token in the file printed by <code>builder remote</code>. When remembered, it is kept in this browser’s local storage and reconnects automatically; Disconnect forgets it. Otherwise it stays in this tab’s memory until you disconnect or reload.</p></section>
+<section id="login" class="login">
+<div class="brand">
+<svg class="icon brand-icon" viewBox="0 0 24 24" aria-hidden="true">
+<path d="m12 3 9 5-9 5-9-5 9-5Z"/>
+<path d="m3 12 9 5 9-5M3 16l9 5 9-5"/>
+</svg>builder <span class="brand-tag">REMOTE</span>
+</div>
+<div class="login-intro">
+<h1>Connect to your workspace</h1>
+<p>Enter your host token to open your projects and conversations.</p>
+</div>
+<form id="connect">
+<label for="token">Host access token</label>
+<input id="token" type="password" autocomplete="off" required placeholder="Paste the token from your host">
+<label class="remember">
+<input id="remember" type="checkbox" checked> Remember this browser</label>
+<button>Connect to workspace <svg class="icon " viewBox="0 0 24 24" aria-hidden="true">
+<path d="M7 17 17 7M7 7h10v10"/>
+</svg>
+</button>
+</form>
+<p class="hint">Find the token in the file printed by <code>builder remote</code>. When remembered, it is kept in this browser’s local storage and reconnects automatically; Disconnect forgets it. Otherwise it stays in this tab’s memory until you disconnect or reload.</p>
+</section>
 <div id="app" class="shell" hidden>
-<aside id="side" data-open="false"><div class="side-top"><div class="brand">▰ builder <span>REMOTE</span></div><button id="menu" class="quiet" type="button" aria-controls="drawer" aria-expanded="false">☰ Chats</button></div><button id="new" class="primary">＋ New conversation</button><div id="drawer" class="drawer"><div class="drawer-head"><span class="section-label">CONVERSATIONS</span><button id="drawer-close" class="quiet" type="button">✕ Close</button></div><div class="chat-filters"><label for="search" class="sr-only">Search chats</label><input id="search" type="search" maxlength="256" placeholder="Search chats…"><label for="chat-filter" class="sr-only">Chat list</label><select id="chat-filter"><option value="false">Active chats</option><option value="true">Archived chats</option></select><span id="running-count" class="hint"></span></div><nav id="sessions" aria-label="Saved conversations"></nav><button id="more-sessions" class="quiet" hidden>More conversations</button><div class="aside-footer"><span class="dot"></span> Connected to your host<button id="disconnect" class="quiet">Disconnect</button></div></div></aside>
-<main><header><div><div class="section-label">HOST WORKSPACE</div><div id="workspace"></div></div><div id="permission" class="badge"></div></header><section class="conversation"><div class="title-row"><div><span class="eyebrow">BUILD FROM ANYWHERE</span><h1 id="title">What are we building?</h1></div><label class="archive"><input id="archived" type="checkbox"> Include rewound messages</label></div><div id="chat-tools" class="chat-tools" hidden><button id="rename" class="quiet">Rename</button><button id="archive-chat" class="quiet">Archive</button><button id="rewind" class="quiet">Rewind last turn</button><button id="compact" class="quiet">Compact context</button><button id="export" class="quiet">Export transcript</button></div><div id="empty"><div class="mark">▰</div><h2>Pick up where you left off.</h2><p>Start a task or open a saved conversation.<br>Pick a folder under your host workspace for each new chat.</p><div class="suggestions"><button data-prompt="Explain how this repository is organized.">Explore this project ↗</button><button data-prompt="Review the code and identify a useful improvement. Ask before making changes.">Find the next improvement ↗</button></div></div><button id="older" class="quiet" hidden>Load earlier messages</button><div id="messages"></div><p id="chat-error" role="status" hidden></p><section id="live" hidden><div class="message-label">BUILDER <span>LIVE PREVIEW · NOT YET SAVED</span></div><details id="thinking-live" class="thinking" hidden><summary>Thinking</summary><pre id="thinking"></pre></details><pre id="preview"></pre></section><section id="approval" hidden><div class="eyebrow">YOUR APPROVAL IS REQUIRED</div><h2>Allow this action on your host?</h2><pre id="action"></pre><p>Applies to this action only. Unanswered requests are denied after two minutes.</p><button id="deny" class="quiet">Deny</button><button id="allow">Allow once</button></section></section><footer><div class="status-line"><span id="phase">Ready</span><span id="activity"></span><button id="pause" class="quiet" hidden>Pause run</button><button id="cancel-turn" class="quiet" hidden>Cancel saved turn</button><button id="retry" class="quiet" hidden>Retry saved turn</button></div><form id="composer"><label for="prompt" class="sr-only">Message Builder</label><textarea id="prompt" rows="3" maxlength="65536" placeholder="Give Builder a task…"></textarea><div class="composer-bottom"><div class="composer-options"><label class="profile-label" for="profile"><span class="option-name">Model profile</span> <select id="profile"></select></label><span class="profile-label"><span class="option-name">Folder</span> <button id="folder" type="button" class="folder" title="Choose the folder this chat works in">workspace root</button></span><label class="profile-label" for="approval-mode"><span class="option-name">Permissions</span> <select id="approval-mode"><option value="ask">Ask before changes</option><option value="trust">Auto-approve all tools</option><option value="read-only">Read only</option></select></label></div><button id="send" type="submit">Send ↑</button></div></form><p class="hint"><span class="desktop-only">Enter to send · Shift + Enter for a new line. </span>Closing this tab leaves the host run active; use Pause to stop it.</p></footer></main>
-</div><dialog id="manage-dialog"><form id="manage-form"><h2 id="dialog-title"></h2><p id="dialog-description"></p><label id="rename-label" for="chat-name">Chat name</label><input id="chat-name" maxlength="80" autocomplete="off"><div class="dialog-actions"><button id="dialog-cancel" class="quiet" type="button">Keep chat</button><button id="dialog-confirm" type="submit">Save</button></div></form></dialog><dialog id="folder-dialog"><h2>Choose a folder</h2><p>New chats work inside this folder on your host. Only directories under the host workspace can be chosen.</p><div class="folder-bar"><button id="folder-up" class="quiet" type="button">↑ Up</button><span id="folder-path"></span></div><nav id="folder-list" aria-label="Subfolders"></nav><div class="dialog-actions"><button id="folder-cancel" class="quiet" type="button">Cancel</button><button id="folder-use" type="button">Use this folder</button></div></dialog><dialog id="export-dialog"><h2>Transcript ready</h2><p>Your saved messages are ready as JSON. If your browser does not support downloads, copy the text below.</p><a id="download-transcript">Download JSON ↓</a><details><summary>Text version</summary><label for="export-text" class="sr-only">Exported transcript JSON</label><textarea id="export-text" readonly rows="6"></textarea><button id="copy-transcript" class="quiet">Copy transcript</button></details><div class="dialog-actions"><button id="close-export">Done</button></div></dialog><div id="error" role="alert" hidden></div>
-</body></html>
+<aside id="side" data-open="false">
+<div class="side-top" id="side-top">
+<div class="brand">
+<svg class="icon brand-icon" viewBox="0 0 24 24" aria-hidden="true">
+<path d="m12 3 9 5-9 5-9-5 9-5Z"/>
+<path d="m3 12 9 5 9-5M3 16l9 5 9-5"/>
+</svg>builder <span class="brand-tag">REMOTE</span>
+</div>
+<button id="menu" class="quiet" type="button" aria-controls="drawer" aria-expanded="false">☰ Chats</button>
+</div>
+<button id="new">
+<svg class="icon " viewBox="0 0 24 24" aria-hidden="true">
+<path d="M12 5v14M5 12h14"/>
+</svg>
+<span>New conversation</span>
+</button>
+<div id="drawer" class="drawer">
+<div class="drawer-head">
+<span class="section-label">CONVERSATIONS</span>
+<button id="drawer-close" class="quiet" type="button">✕ Close</button>
+</div>
+<div class="chat-filters">
+<label for="search" class="sr-only">Search chats</label>
+<div class="search-field">
+<svg class="icon " viewBox="0 0 24 24" aria-hidden="true">
+<circle cx="10.5" cy="10.5" r="6.5"/>
+<path d="m16 16 4 4"/>
+</svg>
+<input id="search" type="search" maxlength="256" placeholder="Search conversations">
+</div>
+<label for="chat-filter" class="sr-only">Chat list</label>
+<select id="chat-filter">
+<option value="false">Active chats</option>
+<option value="true">Archived chats</option>
+</select>
+<span id="running-count" class="hint">
+</span>
+</div>
+<nav id="sessions" aria-label="Saved conversations">
+</nav>
+<button id="more-sessions" class="quiet" hidden>More conversations</button>
+<div class="aside-footer">
+<span class="host-connection">
+<span class="dot">
+</span>Connected to your host</span>
+<button id="disconnect" class="quiet">Disconnect</button>
+</div>
+</div>
+</aside>
+<main id="workspace-main">
+<header>
+<div>
+<div class="section-label">HOST WORKSPACE</div>
+<div id="workspace">
+</div>
+</div>
+<div id="permission" class="badge">
+</div>
+</header>
+<div class="conversation-header">
+<div class="title-row">
+<h1 id="title">New conversation</h1>
+<details id="chat-tools" class="chat-tools" hidden>
+<summary>Conversation options</summary>
+<div class="chat-actions">
+<button id="rename" class="quiet">Rename</button>
+<button id="export" class="quiet">Export transcript</button>
+<button id="archive-chat" class="quiet">Archive</button>
+<button id="rewind" class="quiet">Rewind last turn</button>
+<button id="compact" class="quiet">Compact context</button>
+<label class="archive" id="archive-option" hidden>
+<input id="archived" type="checkbox"> Include rewound messages</label>
+</div>
+</details>
+</div>
+</div>
+<section class="conversation" aria-label="Conversation messages">
+<div id="empty">
+<h2>Start with a task.</h2>
+<p>Choose a project folder, then describe what you’d like to do.</p>
+<div class="suggestions">
+<button data-prompt="Explain how this repository is organized.">
+<svg class="icon " viewBox="0 0 24 24" aria-hidden="true">
+<path d="m8 7-5 5 5 5m8-10 5 5-5 5m-3-13-2 16"/>
+</svg>
+<span class="suggestion-arrow" aria-hidden="true">↗</span>
+<strong>Explore this project<small>Get oriented in the codebase.</small>
+</strong>
+</button>
+<button data-prompt="Review the code and identify a useful improvement. Ask before making changes.">
+<svg class="icon " viewBox="0 0 24 24" aria-hidden="true">
+<circle cx="10.5" cy="10.5" r="6.5"/>
+<path d="m16 16 4 4"/>
+</svg>
+<span class="suggestion-arrow" aria-hidden="true">↗</span>
+<strong>Find an improvement<small>See what could work better.</small>
+</strong>
+</button>
+</div>
+</div>
+<button id="older" class="quiet" hidden>Load earlier messages</button>
+<div id="messages">
+</div>
+<p id="chat-error" role="status" hidden>
+</p>
+<section id="live" hidden>
+<div class="message-label">BUILDER <span>LIVE PREVIEW · NOT YET SAVED</span>
+</div>
+<details id="thinking-live" class="thinking" hidden>
+<summary>Thinking</summary>
+<pre id="thinking">
+</pre>
+</details>
+<pre id="preview">
+</pre>
+</section>
+<section id="approval" hidden>
+<div class="eyebrow">YOUR APPROVAL IS REQUIRED</div>
+<h2>Allow this action on your host?</h2>
+<pre id="action">
+</pre>
+<p>Applies to this action only. Unanswered requests are denied after two minutes.</p>
+<button id="deny" class="quiet">Deny</button>
+<button id="allow">Allow once</button>
+</section>
+</section>
+<footer>
+<div class="status-line">
+<span id="phase" role="status" aria-live="polite">Ready</span>
+<span id="activity">
+</span>
+<button id="pause" class="quiet" hidden>Pause run</button>
+<button id="cancel-turn" class="quiet" hidden>Cancel saved turn</button>
+<button id="retry" class="quiet" hidden>Retry saved turn</button>
+</div>
+<form id="composer">
+<label for="prompt" class="sr-only">Message Builder</label>
+<textarea id="prompt" rows="3" maxlength="65536" placeholder="What would you like to build or change?">
+</textarea>
+<div class="composer-bottom">
+<div class="composer-options">
+<label class="profile-label" for="profile">
+<span class="option-name">Model profile</span> <select id="profile">
+</select>
+</label>
+<span class="profile-label">
+<span class="option-name">Folder</span> <button id="folder" type="button" class="folder" title="Choose the folder this chat works in">workspace root</button>
+</span>
+<label class="profile-label" for="approval-mode">
+<span class="option-name">Permissions</span> <select id="approval-mode">
+<option value="ask">Ask before changes</option>
+<option value="trust">Auto-approve all tools</option>
+<option value="read-only">Read only</option>
+</select>
+</label>
+</div>
+<button id="send" type="submit">Send <svg class="icon " viewBox="0 0 24 24" aria-hidden="true">
+<path d="M12 19V5m-6 6 6-6 6 6"/>
+</svg>
+</button>
+</div>
+</form>
+<p class="hint">
+<span class="desktop-only">Enter to send · Shift + Enter for a new line. </span>Runs continue when you close this tab. Pause stops the current run.</p>
+</footer>
+</main>
+</div>
+<dialog id="manage-dialog">
+<form id="manage-form">
+<h2 id="dialog-title">
+</h2>
+<p id="dialog-description">
+</p>
+<label id="rename-label" for="chat-name">Chat name</label>
+<input id="chat-name" maxlength="80" autocomplete="off">
+<div class="dialog-actions">
+<button id="dialog-cancel" class="quiet" type="button">Keep chat</button>
+<button id="dialog-confirm" type="submit">Save</button>
+</div>
+</form>
+</dialog>
+<dialog id="folder-dialog">
+<h2>Choose a folder</h2>
+<p>New chats work inside this folder on your host. Only directories under the host workspace can be chosen.</p>
+<div class="folder-bar">
+<button id="folder-up" class="quiet" type="button">↑ Up</button>
+<span id="folder-path">
+</span>
+</div>
+<nav id="folder-list" aria-label="Subfolders">
+</nav>
+<div class="dialog-actions">
+<button id="folder-cancel" class="quiet" type="button">Cancel</button>
+<button id="folder-use" type="button">Use this folder</button>
+</div>
+</dialog>
+<dialog id="export-dialog">
+<h2>Transcript ready</h2>
+<p>Your saved messages are ready as JSON. If your browser does not support downloads, copy the text below.</p>
+<a id="download-transcript">Download JSON ↓</a>
+<details>
+<summary>Text version</summary>
+<label for="export-text" class="sr-only">Exported transcript JSON</label>
+<textarea id="export-text" readonly rows="6">
+</textarea>
+<button id="copy-transcript" class="quiet">Copy transcript</button>
+</details>
+<div class="dialog-actions">
+<button id="close-export">Done</button>
+</div>
+</dialog>
+<div id="error" role="alert" hidden>
+</div>
+</body>
+</html>

@@ -5,8 +5,40 @@ let polling = false, epoch = 0, connection = 0, historyKey = '', items = [], ses
 let exportUrl = null;
 let newFolder = '', browsePath = '', browseVersion = 0;
 const folderLabel = folder => folder || 'workspace root';
-// On phones the chat list is a drawer; on wider screens the attribute has no visible effect.
-function setDrawer(open) { $('side').setAttribute('data-open', String(open)); $('menu').setAttribute('aria-expanded', String(open)); }
+// Keep keyboard focus in the phone drawer while the workspace is covered.
+let drawerOpen = false;
+function setDrawer(open) {
+  const wasOpen = drawerOpen; drawerOpen = open;
+  $('side').setAttribute('data-open', String(open)); $('menu').setAttribute('aria-expanded', String(open));
+  for (const id of ['workspace-main', 'side-top', 'new']) $(id).inert = open;
+  if (open) $('search').focus(); else if (wasOpen) $('menu').focus();
+}
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    if (drawerOpen) setDrawer(false);
+    if ($('chat-tools').open) { $('chat-tools').open = false; $('chat-tools').querySelector('summary').focus(); }
+  }
+  if (!drawerOpen || event.key !== 'Tab') return;
+  const focusable = [...$('drawer').querySelectorAll('button, input, select')].filter(el => !el.disabled && el.getClientRects().length);
+  const first = focusable[0], last = focusable.at(-1);
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+});
+document.addEventListener('pointerdown', event => {
+  const menu = $('chat-tools');
+  if (menu.open && !menu.contains(event.target)) menu.open = false;
+});
+document.addEventListener('click', event => {
+  if ($('chat-tools').contains(event.target) && event.target.closest('button')) $('chat-tools').open = false;
+});
+document.addEventListener('close', event => {
+  if (['manage-dialog', 'export-dialog'].includes(event.target.id) && !$('app').hidden && !$('chat-tools').hidden) {
+    $('chat-tools').querySelector('summary').focus();
+  }
+}, true);
+if (typeof matchMedia === 'function') matchMedia('(min-width: 561px)').addEventListener('change', event => {
+  if (event.matches && drawerOpen) { setDrawer(false); $('search').focus(); }
+});
 // Desktop scrolls the conversation pane; phones scroll the page itself, so keep both at the latest message.
 function atEnd() { const pane = document.querySelector('.conversation'), page = document.scrollingElement; return pane.scrollHeight - pane.scrollTop - pane.clientHeight < 90 && (!page || page.scrollHeight - page.scrollTop - page.clientHeight < 90); }
 function scrollToEnd() { const pane = document.querySelector('.conversation'), page = document.scrollingElement; pane.scrollTop = pane.scrollHeight; if (page) page.scrollTop = page.scrollHeight; }
@@ -47,6 +79,7 @@ function controls() {
   $('approval').hidden = !s.approval;
   if (s.approval) $('action').textContent = s.approval.description;
   $('chat-error').hidden = !s.error; $('chat-error').textContent = s.error || '';
+  $('archive-option').hidden = !selected;
   $('empty').hidden = items.length > 0 || busy(); $('chat-tools').hidden = !selected;
   for (const id of ['rename', 'archive-chat', 'rewind', 'compact']) $(id).disabled = pending || busy() || s.phase === 'maintaining' || !info;
   $('rewind').disabled ||= !!archived || !items.some(e => e.active && e.message.role === 'user');
@@ -141,8 +174,9 @@ async function metadata() {
 async function openSession(id, title) {
   if (!saveDraft()) return;
   setDrawer(false);
+  $('chat-tools').open = false;
   selected = id; epoch++; info = null; viewLimited = false; items = []; nextBefore = null; historyKey = '';
-  $('prompt').value = drafts.get(draftKey()) || ''; $('title').textContent = title || 'What are we building?';
+  $('prompt').value = drafts.get(draftKey()) || ''; $('title').textContent = title || 'New conversation';
   renderMessages(); renderSessions();
   try {
     if (id) { const version = epoch; await Promise.all([history(), metadata()]); if (version !== epoch) return; if (info?.draft && !drafts.has(id) && !$('prompt').value && drafts.size < 64) { drafts.set(id, info.draft); $('prompt').value = info.draft; } if (info?.draft_too_large) error('The saved composer draft exceeds the browser limit. Recover it on the host CLI.'); scrollToEnd(); }

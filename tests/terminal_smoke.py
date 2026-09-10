@@ -175,8 +175,8 @@ max_output_tokens = 1024
             terminal.expect(" explain", mark)
             print(f"Typing after large paste → repaint: {(time.monotonic() - start) * 1000:.1f} ms")
             terminal.send("\r")
-            terminal.expect("Endpoint accepted the request", mark)
-            terminal.expect("Model is thinking", mark)
+            terminal.expect("Reading a ~", mark)
+            terminal.expect("Thinking", mark)
             terminal.expect("Terminal paste verified.", mark)
             assert b"internal test reasoning" not in terminal.output
             terminal.expect("Ask Builder", mark)
