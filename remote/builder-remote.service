@@ -11,7 +11,7 @@ Wants=network-online.target
 Type=simple
 # BUILDER_REMOTE_WORKSPACE, BUILDER_REMOTE_GATEWAY,
 # optional BUILDER_REMOTE_ARGS / BUILDER_HOME / BUILDER_BASIC_AUTH.
-EnvironmentFile="@ENV_FILE@"
+EnvironmentFile=@ENV_FILE@
 ExecStart=@BUILDER_BIN@ -C ${BUILDER_REMOTE_WORKSPACE} remote connect ${BUILDER_REMOTE_GATEWAY} $BUILDER_REMOTE_ARGS
 # Builder shuts down cleanly on SIGINT (same as Ctrl+C in a terminal).
 KillSignal=SIGINT
