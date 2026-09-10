@@ -24,6 +24,10 @@ impl std::fmt::Display for Role {
 pub struct Message {
     pub role: Role,
     pub content: Option<String>,
+    /// The model's visible reasoning (`reasoning_content`), kept for the
+    /// transcript only. Providers strip it before sending history back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -35,6 +39,7 @@ impl Message {
         Self {
             role,
             content: Some(content.into()),
+            reasoning: None,
             tool_calls: vec![],
             tool_call_id: None,
         }

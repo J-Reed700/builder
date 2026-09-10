@@ -991,6 +991,43 @@ async fn chats_open_in_folders_under_the_root_and_never_outside() {
 }
 
 #[tokio::test]
+async fn reasoning_and_explanations_reach_the_browser_but_never_the_model() {
+    // A thinking model explains itself, calls a tool, then answers. The browser
+    // gets the explanation and the reasoning; the next model request gets neither.
+    let mut call = write_call();
+    call["content"] = json!("I will write the result file first.");
+    call["reasoning_content"] = json!("The user wants the file; write it before answering.");
+    let host = Host::new(vec![call, answer("Done")], ApprovalMode::Trust).await;
+    let response = host.post("run", json!({"request_id":uuid::Uuid::new_v4().to_string(),"session":null,"operation":{"action":"message","prompt":"Do the fixture task"}})).await;
+    assert_eq!(response.status(), 202);
+    let run: Value = response.json().await.unwrap();
+    host.phase(&["complete"]).await;
+    let id = run["session"].as_str().unwrap();
+    let history = host.get(&format!("sessions/{id}/messages")).await;
+    let assistant = history["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| &e["message"])
+        .find(|m| m["role"] == "assistant" && m.get("tool_calls").is_some())
+        .expect("tool-calling assistant message is in history");
+    assert_eq!(assistant["content"], "I will write the result file first.");
+    assert_eq!(
+        assistant["reasoning"],
+        "The user wants the file; write it before answering."
+    );
+    let requests = host.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let second = requests[1]["messages"].as_array().unwrap();
+    let echoed = second
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("assistant turn is replayed to the model");
+    assert_eq!(echoed["content"], "I will write the result file first.");
+    assert!(echoed.get("reasoning").is_none() && echoed.get("reasoning_content").is_none());
+}
+
+#[tokio::test]
 async fn browser_selects_approval_mode_per_run_and_read_only_host_is_a_ceiling() {
     // An asking host lets the browser auto-approve one run and ask on the next.
     // Distinct call IDs: Builder refuses a tool call ID reused within one chat.

@@ -2281,10 +2281,18 @@ async fn reasoning_activity_is_reported_without_becoming_conversation_content() 
     let provider = OpenAiCompatible::new(server.profile.clone()).unwrap();
     let mut activities = vec![];
     let mut visible = String::new();
+    let mut reasoning = String::new();
     let mut prompt_bytes = 0;
+    // History carrying earlier reasoning must reach the server without it.
+    let mut earlier = Message::text(Role::Assistant, "earlier answer");
+    earlier.reasoning = Some("earlier private reasoning".into());
     let result = provider
         .complete(
-            &[Message::text(Role::User, "hello")],
+            &[
+                Message::text(Role::User, "hello"),
+                earlier,
+                Message::text(Role::User, "continue"),
+            ],
             &[],
             &mut |event| match event {
                 Event::Prompt { bytes } => prompt_bytes = bytes,
@@ -2293,6 +2301,7 @@ async fn reasoning_activity_is_reported_without_becoming_conversation_content() 
                     assert!(!text.is_empty());
                     visible.push_str(&text);
                 }
+                Event::Reasoning(text) => reasoning.push_str(&text),
                 _ => {}
             },
         )
@@ -2302,6 +2311,15 @@ async fn reasoning_activity_is_reported_without_becoming_conversation_content() 
     assert_eq!(activities, [Activity::Connected, Activity::Thinking]);
     assert_eq!(visible, "final answer");
     assert_eq!(result.content.as_deref(), Some("final answer"));
+    // Reasoning is kept for the transcript, separately from the answer.
+    assert_eq!(reasoning, "private intermediate reasoningmore reasoning");
+    assert_eq!(result.reasoning.as_deref(), Some(reasoning.as_str()));
+    let sent = server.mock.requests.lock().unwrap();
+    assert_eq!(sent[0]["messages"][1]["content"], "earlier answer");
+    assert!(
+        !sent[0].to_string().contains("reasoning"),
+        "reasoning must never be sent back to the model"
+    );
 }
 
 #[tokio::test]

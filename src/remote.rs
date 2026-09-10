@@ -70,6 +70,8 @@ struct Snapshot {
     session: Option<String>,
     preview: String,
     preview_limited: bool,
+    /// Reasoning streamed for the response in progress, shown beside the preview.
+    thinking: String,
     notices: VecDeque<String>,
     approval: Option<ApprovalRequest>,
     error: Option<String>,
@@ -860,6 +862,7 @@ async fn drive(
         // A preview is never represented as a committed answer.
         state.preview.clear();
         state.preview_limited = false;
+        state.thinking.clear();
         match &result {
             None => state.phase = Phase::Paused,
             Some(Ok(())) => state.phase = Phase::Complete,
@@ -893,14 +896,21 @@ fn event_update(run: &Run, event: AgentEvent) {
                 state.preview_limited = true;
             }
         }
+        AgentEvent::Model(Event::Reasoning(text)) => {
+            if state.thinking.len() + text.len() <= 64 * 1024 {
+                state.thinking.push_str(&text);
+            }
+        }
         AgentEvent::Model(Event::Prompt { .. } | Event::Attempt { .. } | Event::Retry { .. }) => {
             state.preview.clear();
             state.preview_limited = false;
+            state.thinking.clear();
         }
         event => {
             let notice = match event {
                 AgentEvent::ToolStarted { name, .. } => {
                     state.preview.clear();
+                    state.thinking.clear();
                     format!("Running {name}")
                 }
                 AgentEvent::ToolFinished { name, failed, .. } => format!(

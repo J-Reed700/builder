@@ -204,6 +204,7 @@ async fn same_model_baseline_memory_and_research_ablation() -> Result<()> {
                     let message = Message {
                         role: builder_core::protocol::Role::Assistant,
                         content: None,
+                        reasoning: None,
                         tool_calls: vec![call],
                         tool_call_id: None,
                     };

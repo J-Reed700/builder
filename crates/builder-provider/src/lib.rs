@@ -18,11 +18,21 @@ pub enum Activity {
 
 #[derive(Debug)]
 pub enum Event {
-    Prompt { bytes: usize },
+    Prompt {
+        bytes: usize,
+    },
     Activity(Activity),
-    Attempt { number: u32, maximum: u32 },
+    Attempt {
+        number: u32,
+        maximum: u32,
+    },
     Delta(String),
-    Retry { delay_ms: u64, reason: String },
+    /// A fragment of the model's reasoning stream. Never conversation content.
+    Reasoning(String),
+    Retry {
+        delay_ms: u64,
+        reason: String,
+    },
 }
 
 /// A successful response is complete and validated, never a partial generation.

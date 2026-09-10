@@ -335,7 +335,7 @@ impl<P: Provider> Agent<P> {
                 .complete_with_budget(&messages, &definitions, output_budget, &mut |event| {
                     if force_conclusion {
                         match event {
-                            Event::Delta(_) => {}
+                            Event::Delta(_) | Event::Reasoning(_) => {}
                             event => emit(AgentEvent::Model(event)),
                         }
                     } else {

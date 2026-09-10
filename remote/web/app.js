@@ -43,7 +43,7 @@ function controls() {
   $('pause').hidden = !active(s) && s.phase !== 'maintaining';
   $('phase').textContent = archived ? 'Archived · restore this chat to continue' : pending ? 'Saving your request…' : phaseLabel(s.phase);
   $('activity').textContent = busy() ? s.notices?.at(-1) || '' : '';
-  $('live').hidden = !s.preview; $('preview').textContent = (s.preview || '') + (s.preview_limited ? '\n[Preview limit reached. The complete committed response will appear in history.]' : '');
+  $('live').hidden = !s.preview && !s.thinking; $('thinking-live').hidden = !s.thinking; $('thinking').textContent = s.thinking || ''; $('preview').textContent = (s.preview || '') + (s.preview_limited ? '\n[Preview limit reached. The complete committed response will appear in history.]' : '');
   $('approval').hidden = !s.approval;
   if (s.approval) $('action').textContent = s.approval.description;
   $('chat-error').hidden = !s.error; $('chat-error').textContent = s.error || '';
@@ -76,15 +76,21 @@ function prose(content) {
 }
 function renderMessages() {
   const bottom = atEnd();
-  const expanded = new Set([...$('messages').querySelectorAll('article:has(details[open])')].map(el => el.dataset.seq));
+  const expanded = new Set([...$('messages').querySelectorAll('details[open]')].map(el => el.dataset.key));
   const fragment = document.createDocumentFragment();
+  // Collapsed sections remember their open state across polls by seq and kind.
+  const fold = (seq, kind, title, text) => { const details = document.createElement('details'), summary = document.createElement('summary'), pre = document.createElement('pre'); details.dataset.key = seq + ':' + kind; details.className = kind; summary.textContent = title; pre.textContent = text; details.open = expanded.has(details.dataset.key); details.append(summary, pre); return details; };
   for (const entry of items) {
     const m = entry.message, article = document.createElement('article'); article.className = 'message ' + m.role; article.dataset.seq = String(entry.seq);
     const label = document.createElement('div'); label.className = 'message-label'; label.textContent = (m.role === 'assistant' ? 'BUILDER' : m.role.toUpperCase()) + (entry.active ? '' : ' · REWOUND'); article.append(label);
     if (!entry.active) article.setAttribute('aria-disabled', 'true');
-    const pre = document.createElement('pre'); pre.textContent = m.content || '';
-    if (m.tool_calls?.length) pre.textContent += '\n' + m.tool_calls.map(c => c.function.name + '\n' + c.function.arguments).join('\n\n');
-    if (m.role === 'tool' || m.role === 'system' || m.tool_calls?.length) { const details = document.createElement('details'), summary = document.createElement('summary'); summary.textContent = m.tool_calls?.map(c => c.function.name).join(', ') || (m.role === 'system' ? 'Workspace instructions' : 'Tool result'); details.open = expanded.has(String(entry.seq)); details.append(summary, pre); article.append(details); } else article.append(m.role === 'assistant' ? prose(m.content || '') : pre);
+    if (m.role === 'assistant') {
+      // Reasoning stays folded; the explanation the model wrote alongside its tool calls stays visible so the transcript reads as a narrative, not a list of calls.
+      if (m.reasoning) article.append(fold(entry.seq, 'thinking', 'Thinking', m.reasoning));
+      if (m.content?.trim()) article.append(prose(m.content));
+      if (m.tool_calls?.length) article.append(fold(entry.seq, 'calls', m.tool_calls.map(c => c.function.name).join(', '), m.tool_calls.map(c => c.function.name + '\n' + c.function.arguments).join('\n\n')));
+    } else if (m.role === 'tool' || m.role === 'system') article.append(fold(entry.seq, 'result', m.role === 'system' ? 'Workspace instructions' : 'Tool result', m.content || ''));
+    else { const pre = document.createElement('pre'); pre.textContent = m.content || ''; article.append(pre); }
     fragment.append(article);
   }
   $('messages').replaceChildren(fragment); $('older').hidden = nextBefore === null || viewLimited; controls();

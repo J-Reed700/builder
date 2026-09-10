@@ -200,10 +200,14 @@ impl OpenAiCompatible {
                 .map_err(|_| Failure::transient("Endpoint returned incomplete or invalid JSON"))?;
             let choice = &value["choices"][0];
             check_finish(choice["finish_reason"].as_str()).map_err(Failure::finish)?;
-            let message: Message = serde_json::from_value(choice["message"].clone())
+            let mut message: Message = serde_json::from_value(choice["message"].clone())
                 .map_err(|e| Failure::permanent(e.to_string()))?;
             validate(&message, has_reasoning(&choice["message"]))
                 .map_err(|e| Failure::permanent(e.to_string()))?;
+            if let Some(text) = reasoning_text(&choice["message"]) {
+                emit(Event::Reasoning(text.to_owned()));
+                message.reasoning = Some(text.to_owned());
+            }
             if let Some(content) = &message.content {
                 emit(Event::Delta(content.clone()));
             }
@@ -243,9 +247,16 @@ impl OpenAiCompatible {
                     finish = Some(reason.to_owned());
                 }
                 let delta = &choice["delta"];
-                if !thinking && has_reasoning(delta) {
-                    thinking = true;
-                    emit(Event::Activity(Activity::Thinking));
+                if let Some(text) = reasoning_text(delta) {
+                    if !thinking {
+                        thinking = true;
+                        emit(Event::Activity(Activity::Thinking));
+                    }
+                    message
+                        .reasoning
+                        .get_or_insert_with(String::new)
+                        .push_str(text);
+                    emit(Event::Reasoning(text.to_owned()));
                 }
                 if let Some(content) = delta["content"].as_str().filter(|s| !s.is_empty()) {
                     message.content.as_mut().unwrap().push_str(content);
@@ -340,6 +351,11 @@ impl OpenAiCompatible {
             .take_while(|m| m.role == Role::System)
             .count();
         let mut outbound = messages.to_vec();
+        // Reasoning is transcript-only: servers differ on whether they accept it
+        // back, and it would only inflate the prompt.
+        for message in &mut outbound {
+            message.reasoning = None;
+        }
         if leading > 1 {
             ensure!(
                 messages[..leading]
@@ -433,9 +449,12 @@ fn assemble(
     Ok(message)
 }
 fn has_reasoning(value: &Value) -> bool {
+    reasoning_text(value).is_some()
+}
+fn reasoning_text(value: &Value) -> Option<&str> {
     ["reasoning_content", "reasoning"]
         .iter()
-        .any(|key| value[*key].as_str().is_some_and(|s| !s.trim().is_empty()))
+        .find_map(|key| value[*key].as_str().filter(|s| !s.trim().is_empty()))
 }
 
 fn validate(message: &Message, thinking: bool) -> Result<()> {

@@ -180,6 +180,14 @@ impl<P: Provider> Agent<P> {
             before,
             context_tokens: self.profile.context_tokens,
         });
+        // The summarizer reads answers and tool traffic, not reasoning streams.
+        let older: Vec<Message> = older
+            .iter()
+            .map(|m| Message {
+                reasoning: None,
+                ..(*m).clone()
+            })
+            .collect();
         let serialized = serde_json::to_string(&older)?;
         let mut remaining = serialized.as_str();
         let mut notes = String::new();

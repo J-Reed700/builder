@@ -297,6 +297,9 @@ impl Renderer {
                     }
                 }
             }
+            // Reasoning stays out of the terminal; the spinner already says the
+            // model is thinking, and the transcript keeps it for remote viewers.
+            Event::Reasoning(_) => {}
             Event::Retry { delay_ms, reason } => {
                 self.flush();
                 self.clear_spinner();
