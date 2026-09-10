@@ -2,6 +2,12 @@
 
 Memory stores short findings with source evidence, rather than indexing entire pasted files. It automatically loads relevant findings and the session's proposed next action into a bounded reference packet. Original conversations remain on disk. Memory can help avoid repeated discovery; a saved interpretation can still be wrong, and passing small evaluations does not establish correctness on a large repository task.
 
+Compacted and rewound messages remain in the durable SQLite transcript outside
+the active model prompt. With the history pipeline enabled, the model can search
+that archive with `history_search` and page the exact original message with
+`history_read`. This is retrieval-backed external memory: only the requested
+page re-enters context, while the complete source record stays on disk.
+
 ## Enable and inspect
 
 Memory stores its notes and vectors in local SQLite. Embedding generation defaults to an on-device CPU model; it does not use the chat endpoint or automatically select a saved remote embedding profile.
@@ -35,7 +41,7 @@ A finding requires one to eight successful `read_file` IDs. Each read includes a
 
 The session task state is separate: proposed next action and open questions. Recent durable tool-result excerpts supply execution evidence. New user instructions suppress older task proposals. Neither memory text nor a proposal grants permission or constitutes proof of completed work. Exact edits still need current source anchors.
 
-Explicit memory search combines SQLite FTS5 keyword matches, exact keys/paths, and cosine vector rankings using reciprocal-rank fusion. It considers at most 10,000 current records per checkout and checks the top twenty candidates. Explicit search returns up to eight notes/6,000 bytes. The automatic foreground reference packet uses immediate lexical ranking plus exact keys/paths so embedding initialization or endpoint latency cannot delay the conversation. The packet, including preferences and task state, is bounded to 6,000 bytes by removing whole optional entries. This is selection of derived memory, not deletion or truncation of conversation history. The packet participates in normal context accounting.
+Explicit memory search combines SQLite FTS5 keyword matches, exact keys/paths, and cosine vector rankings using reciprocal-rank fusion. Agent searches accept dense ranking only when its top score and top-versus-runner-up margin satisfy the `/settings` values `memory_min_similarity_percent` and `memory_min_margin_percent`; otherwise retrieval explicitly reports semantic abstention and keeps supported lexical matches. This calibration is model-fingerprint-aware at storage time but the default thresholds are a conservative starting policy, not a benchmark-derived guarantee. It considers at most 10,000 current records per checkout and checks the top twenty candidates. Explicit search returns up to eight notes/6,000 bytes. The automatic foreground reference packet uses immediate lexical ranking plus exact keys/paths so embedding initialization or endpoint latency cannot delay the conversation. The packet, including preferences and task state, is bounded to 6,000 bytes by removing whole optional entries. This is selection of derived memory, not deletion or truncation of conversation history. The packet participates in normal context accounting.
 
 Local embeddings have a fifteen-second caller deadline, an 8,192-byte input limit, and fixed 384-dimensional output. Model initialization and inference are serialized; cancellation cannot queue additional blocking jobs behind an existing worker. Remote opt-in requests retain the three-second application deadline and bounded response validation. Missing vectors are a durable indexing queue: up to two current records are indexed per idle maintenance pass or via `memory index`. A timeout or endpoint error opens a circuit for the rest of that maintenance pass or explicit search. Idle indexing has an additional twelve-second deadline. Cancellation leaves missing vectors eligible for a later pass. An unavailable server does not destroy lexical memory. Vectors with another model namespace or incompatible dimensions are excluded.
 

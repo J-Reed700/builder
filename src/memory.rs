@@ -19,6 +19,15 @@ enum Embedding {
     Local(builder_provider::local_embedding::LocalEmbedding),
     Remote(Box<OpenAiCompatible>),
 }
+
+struct RankInput {
+    memories: Vec<Memory>,
+    keywords: Vec<String>,
+    vector: Option<Vec<f32>>,
+    minimum_similarity_percent: usize,
+    minimum_margin_percent: usize,
+}
+
 pub struct MemoryRuntime {
     embedding: Option<Embedding>,
     fingerprint: String,
@@ -152,6 +161,57 @@ impl MemoryRuntime {
             }
         }
     }
+    pub(crate) async fn embed_for_code_index(&self, text: &str, query: bool) -> Option<Vec<f32>> {
+        self.embed(text, query).await
+    }
+    pub(crate) async fn embed_code_batch(
+        &self,
+        texts: &[String],
+        timeout_secs: u64,
+    ) -> Option<Vec<Vec<f32>>> {
+        if self.embedding_failed.get() || texts.is_empty() {
+            return None;
+        }
+        let provider = self.embedding.as_ref()?;
+        let result = tokio::time::timeout(Duration::from_secs(timeout_secs.clamp(1, 600)), async {
+            match provider {
+                Embedding::Local(local) => local.embed_batch(texts.to_vec()).await,
+                Embedding::Remote(remote) => {
+                    let mut vectors = Vec::with_capacity(texts.len());
+                    for text in texts {
+                        vectors.push(
+                            remote
+                                .embed(&format!("{}{}", self.document_prefix, text))
+                                .await?,
+                        );
+                    }
+                    Ok(vectors)
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("Code embedding batch deadline exceeded")));
+        match result {
+            Ok(vectors) if vectors.len() == texts.len() => Some(vectors),
+            Ok(_) => {
+                *self.embedding_error.borrow_mut() =
+                    Some("Embedding provider returned an unexpected batch".into());
+                self.embedding_failed.set(true);
+                None
+            }
+            Err(error) => {
+                *self.embedding_error.borrow_mut() = Some(error.to_string());
+                self.embedding_failed.set(true);
+                None
+            }
+        }
+    }
+    pub(crate) fn embedding_fingerprint(&self) -> Option<&str> {
+        (!self.fingerprint.is_empty()).then_some(self.fingerprint.as_str())
+    }
+    pub(crate) fn current_embedding_error(&self) -> Option<String> {
+        self.embedding_error.borrow().clone()
+    }
     fn evidence(
         &self,
         store: &Store,
@@ -230,6 +290,33 @@ impl MemoryRuntime {
         })
     }
     pub async fn search(&self, store: &Store, workspace: &Workspace, query: &str) -> Result<Value> {
+        self.search_with_thresholds(store, workspace, query, 0, 0)
+            .await
+    }
+    pub async fn search_with_settings(
+        &self,
+        store: &Store,
+        workspace: &Workspace,
+        query: &str,
+        settings: &builder_core::config::PipelineSettings,
+    ) -> Result<Value> {
+        self.search_with_thresholds(
+            store,
+            workspace,
+            query,
+            settings.memory_min_similarity_percent,
+            settings.memory_min_margin_percent,
+        )
+        .await
+    }
+    async fn search_with_thresholds(
+        &self,
+        store: &Store,
+        workspace: &Workspace,
+        query: &str,
+        minimum_similarity_percent: usize,
+        minimum_margin_percent: usize,
+    ) -> Result<Value> {
         ensure!(query.len() <= 4000, "Memory query exceeds 4000 bytes");
         let scope = Self::scope(workspace);
         let memories = store.memory_list(&scope)?;
@@ -239,7 +326,18 @@ impl MemoryRuntime {
         } else {
             self.embed(query, true).await
         };
-        self.rank(store, workspace, query, memories, keywords, vector)
+        self.rank(
+            store,
+            workspace,
+            query,
+            RankInput {
+                memories,
+                keywords,
+                vector,
+                minimum_similarity_percent,
+                minimum_margin_percent,
+            },
+        )
     }
     fn search_lexical(&self, store: &Store, workspace: &Workspace, query: &str) -> Result<Value> {
         ensure!(query.len() <= 4000, "Memory query exceeds 4000 bytes");
@@ -248,9 +346,13 @@ impl MemoryRuntime {
             store,
             workspace,
             query,
-            store.memory_list(&scope)?,
-            store.memory_keywords(&scope, query)?,
-            None,
+            RankInput {
+                memories: store.memory_list(&scope)?,
+                keywords: store.memory_keywords(&scope, query)?,
+                vector: None,
+                minimum_similarity_percent: 0,
+                minimum_margin_percent: 0,
+            },
         )
     }
     fn rank(
@@ -258,10 +360,15 @@ impl MemoryRuntime {
         store: &Store,
         workspace: &Workspace,
         query: &str,
-        memories: Vec<Memory>,
-        keywords: Vec<String>,
-        vector: Option<Vec<f32>>,
+        input: RankInput,
     ) -> Result<Value> {
+        let RankInput {
+            memories,
+            keywords,
+            vector,
+            minimum_similarity_percent,
+            minimum_margin_percent,
+        } = input;
         let scope = Self::scope(workspace);
         let mut scored = Vec::new();
         for memory in memories {
@@ -290,8 +397,13 @@ impl MemoryRuntime {
             .filter_map(|(m, _, v)| v.map(|v| (m.key.clone(), v)))
             .collect::<Vec<_>>();
         dense.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let minimum_similarity = minimum_similarity_percent as f64 / 100.0;
+        let minimum_margin = minimum_margin_percent as f64 / 100.0;
+        let (semantic_confident, top_similarity, dense_margin) =
+            semantic_confidence(&dense, minimum_similarity, minimum_margin);
         let ranks = dense
             .into_iter()
+            .filter(|(_, similarity)| semantic_confident && *similarity >= minimum_similarity)
             .enumerate()
             .map(|(i, (key, _))| (key, i))
             .collect::<HashMap<_, _>>();
@@ -322,7 +434,7 @@ impl MemoryRuntime {
             notes.push(entry);
         }
         Ok(
-            json!({"notes":notes,"retrieval":if vector.is_some(){"hybrid"}else{"lexical"},"embedding_unavailable":self.embedding_failed.get(),"embedding_error":*self.embedding_error.borrow(),"limits":"8 notes / 6000 bytes; archived originals retained"}),
+            json!({"notes":notes,"retrieval":if vector.is_some()&&semantic_confident{"hybrid"}else{"lexical"},"semantic":{"available":vector.is_some(),"accepted":semantic_confident,"top_similarity":top_similarity,"top_margin":dense_margin,"minimum_similarity":minimum_similarity,"minimum_margin":minimum_margin},"embedding_unavailable":self.embedding_failed.get(),"embedding_error":*self.embedding_error.borrow(),"limits":"8 notes / 6000 bytes; archived originals retained"}),
         )
     }
     pub async fn packet(
@@ -387,9 +499,27 @@ impl MemoryRuntime {
         workspace: &Workspace,
         action: &Action,
     ) -> Result<String> {
+        self.execute_with_settings(store, session, workspace, action, None)
+            .await
+    }
+
+    pub async fn execute_with_settings(
+        &self,
+        store: &mut Store,
+        session: &str,
+        workspace: &Workspace,
+        action: &Action,
+        settings: Option<&builder_core::config::PipelineSettings>,
+    ) -> Result<String> {
         let scope = Self::scope(workspace);
         let value = match action {
-            Action::MemorySearch { query } => self.search(store, workspace, query).await?,
+            Action::MemorySearch { query } => match settings {
+                Some(settings) => {
+                    self.search_with_settings(store, workspace, query, settings)
+                        .await?
+                }
+                None => self.search(store, workspace, query).await?,
+            },
             Action::MemoryGet { key, revision } => {
                 let memory = store
                     .memory_get(&scope, key, *revision)?
@@ -525,10 +655,7 @@ impl MemoryRuntime {
             return Ok(false);
         }
         let through = store.memory_latest_seq(session)?;
-        // One optional generation per run. The durable cursor advances only
-        // after a batch is validated and saved, so a failed or cancelled
-        // attempt is reconsidered by a later idle pass instead of permanently
-        // orphaning its evidence.
+
         if self.extraction_attempt.get() > 0 {
             return Ok(false);
         }
@@ -701,6 +828,23 @@ fn bounded(text: &str, max: usize) -> String {
     }
     format!("{} [excerpt; original retained]", &text[..end])
 }
+
+fn semantic_confidence(
+    dense: &[(String, f64)],
+    minimum_similarity: f64,
+    minimum_margin: f64,
+) -> (bool, Option<f64>, Option<f64>) {
+    let top = dense.first().map(|(_, score)| *score);
+    let margin = top
+        .zip(dense.get(1).map(|(_, score)| *score))
+        .map(|(first, second)| first - second);
+    (
+        top.is_some_and(|score| score >= minimum_similarity)
+            && margin.is_none_or(|value| value >= minimum_margin),
+        top,
+        margin,
+    )
+}
 pub fn is_memory(action: &Action) -> bool {
     matches!(
         action,
@@ -749,7 +893,14 @@ pub fn definitions() -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::json_object;
+    use super::{json_object, semantic_confidence};
+
+    #[test]
+    fn semantic_memory_abstains_below_score_or_when_the_top_result_is_ambiguous() {
+        assert!(!semantic_confidence(&[("a".into(), 0.24)], 0.25, 0.03).0);
+        assert!(!semantic_confidence(&[("a".into(), 0.51), ("b".into(), 0.50)], 0.25, 0.03).0);
+        assert!(semantic_confidence(&[("a".into(), 0.61), ("b".into(), 0.40)], 0.25, 0.03).0);
+    }
 
     #[test]
     fn recovers_extraction_from_non_bare_json() {
