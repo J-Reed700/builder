@@ -1,0 +1,42 @@
+# Build output and release packages
+/target/
+/dist/
+
+# Local Builder config, credentials, state, and downloaded models
+/config.toml
+remote-token
+config-*.tmp
+.builder/
+*.sqlite3*
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+/models/
+*.onnx
+*.onnx_data
+*.gguf
+*.safetensors
+
+# Environment secrets; keep shareable templates
+.env
+.env.*
+!.env.example
+!.env.template
+!.env.*.example
+
+# Local dependency environments and caches
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Logs, editor temporary files, and OS metadata
+*.log
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini

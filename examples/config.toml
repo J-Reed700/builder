@@ -1,0 +1,22 @@
+# Save as ~/.config/builder/config.toml (or $XDG_CONFIG_HOME/builder/config.toml).
+# Edit this file directly. CLI configuration commands are optional helpers.
+default_profile = "local"
+
+[profiles.local]
+base_url = "http://localhost:11434/v1"
+model = "qwen3:8b"
+
+# A custom OpenAI-compatible endpoint behind HTTP Basic Auth.
+# Set BUILDER_BASIC_AUTH to the full header value: Basic <base64(username:password)>.
+[profiles.remote]
+base_url = "https://models.example.com/v1"
+model = "your-exact-model-id"
+context_tokens = 32768
+max_output_tokens = 4096
+
+[profiles.remote.headers]
+Authorization = { env = "BUILDER_BASIC_AUTH" }
+
+# An API-key endpoint instead uses this field inside its profile:
+# api_key = { env = "MODEL_API_KEY" }
+# An explicit Authorization header takes precedence over bearer/API-key auth.

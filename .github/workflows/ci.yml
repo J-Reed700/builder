@@ -1,0 +1,33 @@
+name: Rust
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Browser draft recovery regression
+        run: node tests/remote_web.cjs
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - name: Real terminal paste and resize regression
+        if: runner.os != 'Windows'
+        run: python3 tests/terminal_smoke.py
+      - name: Real terminal interruption and rewind regression
+        if: runner.os != 'Windows'
+        run: python3 tests/terminal_interrupt.py
+      - name: Real terminal compaction regression
+        if: runner.os != 'Windows'
+        run: python3 tests/terminal_compact.py
+      - name: Docker remote-to-host regression
+        if: runner.os == 'Linux'
+        run: python3 tests/remote_container.py target/debug/builder

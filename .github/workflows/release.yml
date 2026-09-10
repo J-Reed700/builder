@@ -1,0 +1,48 @@
+name: Release binaries
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  binary:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: Package Unix archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist/builder
+          cp target/release/builder install.sh LICENSE README.md ARCHITECTURE.md dist/builder/
+          cp -R remote docs examples dist/builder/
+          tar -czf builder-${{ matrix.target }}.tar.gz -C dist builder
+          shasum -a 256 builder-${{ matrix.target }}.tar.gz > builder-${{ matrix.target }}.tar.gz.sha256
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist/builder -Force
+          Copy-Item target/release/builder.exe,LICENSE,README.md,ARCHITECTURE.md dist/builder/
+          Copy-Item remote,docs,examples dist/builder/ -Recurse
+          Compress-Archive -Path dist/builder -DestinationPath builder-${{ matrix.target }}.zip
+          (Get-FileHash builder-${{ matrix.target }}.zip -Algorithm SHA256).Hash + '  builder-${{ matrix.target }}.zip' | Out-File builder-${{ matrix.target }}.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: builder-${{ matrix.target }}
+          path: |
+            builder-*.tar.gz*
+            builder-*.zip*

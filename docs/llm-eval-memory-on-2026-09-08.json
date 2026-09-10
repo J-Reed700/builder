@@ -1,0 +1,77 @@
+{
+  "cases": [
+    {
+      "case": "resume_findings",
+      "compactions": 1,
+      "elapsed_ms": 77864,
+      "failed_tools": 1,
+      "failures": [],
+      "model_requests_including_compaction": 8,
+      "passed": true,
+      "repeated_identical_read_bytes": 0,
+      "repetition": 1,
+      "serialized_prompt_bytes": 72602,
+      "tool_calls": 7
+    },
+    {
+      "case": "stale_handoff",
+      "compactions": 1,
+      "elapsed_ms": 57662,
+      "failed_tools": 0,
+      "failures": [],
+      "model_requests_including_compaction": 7,
+      "passed": true,
+      "repeated_identical_read_bytes": 0,
+      "repetition": 1,
+      "serialized_prompt_bytes": 53272,
+      "tool_calls": 6
+    },
+    {
+      "case": "user_correction",
+      "compactions": 0,
+      "elapsed_ms": 50559,
+      "failed_tools": 0,
+      "failures": [],
+      "model_requests_including_compaction": 6,
+      "passed": true,
+      "repeated_identical_read_bytes": 0,
+      "repetition": 1,
+      "serialized_prompt_bytes": 39813,
+      "tool_calls": 6
+    },
+    {
+      "case": "unknown_read_only",
+      "compactions": 1,
+      "elapsed_ms": 44117,
+      "failed_tools": 0,
+      "failures": [
+        "final answer does not match the requested facts/JSON contract"
+      ],
+      "model_requests_including_compaction": 5,
+      "passed": false,
+      "repeated_identical_read_bytes": 0,
+      "repetition": 1,
+      "serialized_prompt_bytes": 34452,
+      "tool_calls": 1
+    }
+  ],
+  "completion_options": {
+    "frequency_penalty": 0.0,
+    "min_p": 0.0,
+    "presence_penalty": 0.0,
+    "temperature": 0.6,
+    "top_k": 20,
+    "top_p": 0.85
+  },
+  "context_tokens": 81920,
+  "max_output_tokens": 8192,
+  "max_rounds": 20,
+  "memory": "on",
+  "mode": "compacted",
+  "model": "Qwen3.8-27B-Q5_K_S.gguf",
+  "passed": 3,
+  "profile_name": "Qwen3.8 27B (llama.cpp)",
+  "suite_version": 2,
+  "timeout_secs": 180,
+  "total": 4
+}

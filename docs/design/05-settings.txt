@@ -1,0 +1,28 @@
+  Pipeline settings · Qwen · local                                                                  
+  ↑↓ choose · Enter/Space change · End jumps to Save · Esc cancels                                  
+  Save applies to this session and its profile. Nothing changes until saved.                        
+  ────────────────────────────────────────────────────────────────────────────────────────────────  
+  › Research pipeline: On                                                                           
+    Workflow suggestions: On                                                                        
+    Acceptance plans: On                                                                            
+    Contract observations: On                                                                       
+    Source navigation: On                                                                           
+    Language servers: On                                                                            
+    Hypotheses: On                                                                                  
+    Verification: On                                                                                
+    Candidate fixes: On                                                                             
+    Independent review: On                                                                          
+    Completion checks: On                                                                           
+    Learned procedures: On                                                                          
+    Automatic recall: On                                                                            
+    History retrieval: On                                                                           
+    Source analysis: On                                                                             
+    Candidate attempts: 3                                                                           
+    Completion retries: 2                                                                           
+    Analysis excerpts: 4                                                                            
+    Analysis timeout (seconds): 45                                                                  
+    Analysis output (tokens): 2048                                                                  
+    Check timeout (seconds): 120                                                                    
+                                                                                                    
+  Master switch for the added research workflow.                                                    
+                                                                                                    
