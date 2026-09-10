@@ -2315,6 +2315,11 @@ async fn reasoning_activity_is_reported_without_becoming_conversation_content() 
     assert_eq!(reasoning, "private intermediate reasoningmore reasoning");
     assert_eq!(result.reasoning.as_deref(), Some(reasoning.as_str()));
     let sent = server.mock.requests.lock().unwrap();
+    assert_eq!(
+        prompt_bytes,
+        serde_json::to_vec(&sent[0]["messages"]).unwrap().len(),
+        "progress must report the prompt actually sent, without saved reasoning"
+    );
     assert_eq!(sent[0]["messages"][1]["content"], "earlier answer");
     assert!(
         !sent[0].to_string().contains("reasoning"),
@@ -2967,10 +2972,69 @@ async fn compaction_output_limit_retries_once_then_continues_or_preserves_origin
 }
 
 #[tokio::test]
+async fn compaction_sizes_only_the_handoff_that_will_be_kept() {
+    let reply = format!(
+        "{}{}{}",
+        delta(json!({"reasoning_content":"private deliberation ".repeat(3000)})),
+        delta(
+            json!({"content":"Inspected the source. Next: make the focused edit and run its test."})
+        ),
+        finish("stop")
+    );
+    let server = server(vec![(StatusCode::OK, reply)]).await;
+    let home = tempfile::tempdir().unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    let session = store
+        .create("reasoning-safe summary", "local", home.path(), "system")
+        .unwrap();
+    let profile = Profile {
+        context_tokens: 81920,
+        max_output_tokens: 8192,
+        ..server.profile.clone()
+    };
+    let agent = Agent {
+        memory: None,
+        provider: OpenAiCompatible::new(profile.clone()).unwrap(),
+        profile,
+        workspace: Workspace::new(home.path()).unwrap(),
+        session: session.clone(),
+        approval: ApprovalMode::Trust,
+        max_rounds: 5,
+    };
+    agent.submit(&mut store, "Old request").unwrap();
+    store
+        .append(
+            &session,
+            &Message::text(Role::Assistant, "source evidence ".repeat(5000)),
+        )
+        .unwrap();
+    agent.submit(&mut store, "Make the focused edit").unwrap();
+    let original = store.messages(&session).unwrap();
+    let mut shortenings = 0;
+    assert!(
+        agent
+            .compact(&mut store, &mut |event| {
+                if matches!(event, builder::agent::AgentEvent::SummaryRecovery { .. }) {
+                    shortenings += 1;
+                }
+            })
+            .await
+            .unwrap()
+    );
+    assert_eq!(shortenings, 0);
+    assert_eq!(server.mock.requests.lock().unwrap().len(), 1);
+    assert_eq!(store.history_messages(&session).unwrap(), original);
+    let active = serde_json::to_string(&store.messages(&session).unwrap()).unwrap();
+    assert!(active.contains("Inspected the source"));
+    assert!(active.contains("history_search/history_read"));
+    assert!(!active.contains("private deliberation"));
+}
+
+#[tokio::test]
 async fn larger_compaction_generation_budget_does_not_allow_an_oversized_handoff() {
     let server = server(vec![
-        text_reply(&"x".repeat(10000)),
-        text_reply(&"x".repeat(10000)),
+        text_reply(&"x".repeat(40000)),
+        text_reply(&"x".repeat(40000)),
     ])
     .await;
     let home = tempfile::tempdir().unwrap();
@@ -3010,7 +3074,7 @@ async fn larger_compaction_generation_budget_does_not_allow_an_oversized_handoff
 #[tokio::test]
 async fn compaction_shortens_from_original_evidence_and_can_recover_output_limit() {
     let server = server(vec![
-        text_reply(&"oversized draft ".repeat(800)),
+        text_reply(&"oversized draft ".repeat(1600)),
         (
             StatusCode::OK,
             format!(
@@ -3100,7 +3164,82 @@ async fn compaction_shortens_from_original_evidence_and_can_recover_output_limit
 }
 
 #[tokio::test]
-async fn empty_and_reasoning_only_responses_preserve_pending_turn_without_blind_retries() {
+async fn missing_response_retries_identical_input_and_commits_only_completed_answer() {
+    for stream in [true, false] {
+        for reasoning in [None, Some("reasoning_content"), Some("reasoning")] {
+            let mut payload = json!({"role":"assistant", "content":null});
+            if let Some(key) = reasoning {
+                payload[key] = json!("discarded private reasoning");
+            }
+            let replies = if stream {
+                vec![
+                    (
+                        StatusCode::OK,
+                        format!("{}{}", delta(payload), finish("stop")),
+                    ),
+                    text_reply("Completed answer"),
+                ]
+            } else {
+                vec![
+                    (StatusCode::OK, json!({"choices":[{"message":payload,"finish_reason":"stop"}]}).to_string()),
+                    (StatusCode::OK, json!({"choices":[{"message":{"role":"assistant","content":"Completed answer"},"finish_reason":"stop"}]}).to_string()),
+                ]
+            };
+            let mut server = server(replies).await;
+            server.profile.stream = stream;
+            server.profile.max_attempts = 2;
+            let home = tempfile::tempdir().unwrap();
+            let mut store = Store::open(home.path()).unwrap();
+            let session = store
+                .create("retry", "local", home.path(), "system")
+                .unwrap();
+            let agent = Agent {
+                memory: None,
+                provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+                profile: server.profile.clone(),
+                workspace: Workspace::new(home.path()).unwrap(),
+                session: session.clone(),
+                approval: ApprovalMode::Trust,
+                max_rounds: 4,
+            };
+            agent.submit(&mut store, "answer this").unwrap();
+            let before = store.messages(&session).unwrap().len();
+            let mut retries = 0;
+            agent
+                .run(
+                    &mut store,
+                    &mut |event| {
+                        if let builder::agent::AgentEvent::Model(Event::Retry { .. }) = event {
+                            retries += 1;
+                        }
+                    },
+                    &mut |_| panic!("no tool should execute"),
+                )
+                .await
+                .unwrap();
+            assert_eq!(retries, 1);
+            let messages = store.messages(&session).unwrap();
+            assert_eq!(messages.len(), before + 1);
+            assert_eq!(
+                messages.last().unwrap().content.as_deref(),
+                Some("Completed answer")
+            );
+            assert!(messages.last().unwrap().reasoning.is_none());
+            assert!(!pending(&messages));
+            let requests = server.mock.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0], requests[1]);
+            assert!(
+                !requests[1]
+                    .to_string()
+                    .contains("discarded private reasoning")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn empty_and_reasoning_only_responses_preserve_pending_turn_after_configured_retries() {
     for stream in [true, false] {
         for reasoning in [None, Some("reasoning_content"), Some("reasoning")] {
             let mut payload = json!({"role":"assistant", "content":" \n"});
@@ -3112,8 +3251,9 @@ async fn empty_and_reasoning_only_responses_preserve_pending_turn_without_blind_
             } else {
                 json!({"choices":[{"message":payload,"finish_reason":"stop"}]}).to_string()
             };
-            let mut server = server(vec![(StatusCode::OK, body)]).await;
+            let mut server = server(vec![(StatusCode::OK, body); 2]).await;
             server.profile.stream = stream;
+            server.profile.max_attempts = 2;
             server.profile.extra_body.insert(
                 "chat_template_kwargs".into(),
                 json!({"enable_thinking":false}),
@@ -3156,7 +3296,7 @@ async fn empty_and_reasoning_only_responses_preserve_pending_turn_without_blind_
                 }),
                 "{error}"
             );
-            assert!(error.contains("before /retry"));
+            assert!(error.contains("attempt 2/2"));
             assert!(!visible.contains("private reasoning"));
             assert_eq!(
                 before,
@@ -3164,7 +3304,8 @@ async fn empty_and_reasoning_only_responses_preserve_pending_turn_without_blind_
             );
             assert!(pending(&store.messages(&session).unwrap()));
             let requests = server.mock.requests.lock().unwrap();
-            assert_eq!(requests.len(), 1);
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0], requests[1]);
             assert_eq!(
                 requests[0]["chat_template_kwargs"]["enable_thinking"],
                 false
@@ -3337,7 +3478,14 @@ async fn recovery_restricts_broad_discovery_and_rejects_unknown_batches() {
             .collect();
         assert_eq!(
             decision_tools,
-            ["read_file", "write_file", "edit_file", "shell", "research"]
+            [
+                "read_file",
+                "write_file",
+                "edit_file",
+                "shell",
+                "research",
+                "code_search",
+            ]
         );
         if outcome == "unavailable" {
             assert!(result.unwrap_err().to_string().contains("unavailable"));
@@ -3363,7 +3511,7 @@ async fn recovery_restricts_broad_discovery_and_rejects_unknown_batches() {
         if outcome == "edit" {
             assert_eq!(
                 requests[5]["tools"].as_array().unwrap().len(),
-                7,
+                8,
                 "inspection must return after a successful edit"
             );
         }

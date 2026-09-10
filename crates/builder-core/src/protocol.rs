@@ -50,6 +50,28 @@ impl Message {
             ..Self::text(Role::Tool, content)
         }
     }
+
+    /// Serialized size of the representation that belongs in a future model
+    /// prompt. Reasoning is transcript-only and providers deliberately omit it.
+    pub fn prompt_bytes(&self) -> Result<usize, serde_json::Error> {
+        #[derive(Serialize)]
+        struct PromptMessage<'a> {
+            role: Role,
+            content: Option<&'a str>,
+            #[serde(skip_serializing_if = "<[ToolCall]>::is_empty")]
+            tool_calls: &'a [ToolCall],
+            #[serde(skip_serializing_if = "Option::is_none")]
+            tool_call_id: Option<&'a str>,
+        }
+
+        serde_json::to_vec(&PromptMessage {
+            role: self.role,
+            content: self.content.as_deref(),
+            tool_calls: &self.tool_calls,
+            tool_call_id: self.tool_call_id.as_deref(),
+        })
+        .map(|bytes| bytes.len())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
