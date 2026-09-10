@@ -688,10 +688,12 @@ async fn oversized_tool_batch_is_rejected_as_a_whole_before_dispatch() {
     let session = store
         .create("oversized batch", "local", home.path(), "system")
         .unwrap();
+    let mut profile = server.profile.clone();
+    profile.pipeline.tool_calls_per_response = 16;
     let agent = Agent {
         memory: None,
         provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
-        profile: server.profile.clone(),
+        profile,
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
@@ -809,10 +811,12 @@ async fn saved_oversized_batch_is_rejected_before_resume_dispatch() {
     drop(store);
 
     let mut store = Store::open(home.path()).unwrap();
+    let mut profile = server.profile.clone();
+    profile.pipeline.tool_calls_per_response = 16;
     let agent = Agent {
         memory: None,
         provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
-        profile: server.profile.clone(),
+        profile,
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
@@ -1333,10 +1337,12 @@ async fn completed_legacy_oversized_batch_can_resume_to_final_without_reexecutio
     drop(store);
 
     let mut store = Store::open(home.path()).unwrap();
+    let mut profile = server.profile.clone();
+    profile.pipeline.tool_calls_per_response = 16;
     let agent = Agent {
         memory: None,
         provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
-        profile: server.profile.clone(),
+        profile,
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,

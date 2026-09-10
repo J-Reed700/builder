@@ -108,7 +108,7 @@ impl Default for PipelineSettings {
             failure_check_calls: 3,
             failure_recovery_rounds: 3,
             identical_shell_calls: 3,
-            tool_calls_per_response: 16,
+            tool_calls_per_response: 128,
             candidate_attempts: 3,
             completion_retries: 2,
             analysis_artifacts: 4,

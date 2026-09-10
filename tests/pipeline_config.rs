@@ -825,7 +825,7 @@ fn runtime_budgets_default_migrate_validate_and_persist() {
     assert_eq!(settings.failure_check_calls, 3);
     assert_eq!(settings.failure_recovery_rounds, 3);
     assert_eq!(settings.identical_shell_calls, 3);
-    assert_eq!(settings.tool_calls_per_response, 16);
+    assert_eq!(settings.tool_calls_per_response, 128);
     for assignment in [
         "max_rounds=0",
         "max_rounds=1001",
