@@ -19,6 +19,12 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: Retrieval quality gates (offline)
+        run: cargo run --locked --example retrieval_eval -- eval/retrieval/cases.json
+      - name: Retrieval failure exit regression
+        run: python tests/retrieval_eval_cli.py target/debug/examples/retrieval_eval
+      - name: Retrieval manifest validation
+        run: cargo test --locked --example retrieval_eval
       - name: Real terminal paste and resize regression
         if: runner.os != 'Windows'
         run: python3 tests/terminal_smoke.py
