@@ -23,8 +23,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS code_index_fts USING fts5(
  scope UNINDEXED,id UNINDEXED,path,symbols,references,content);
 CREATE TABLE IF NOT EXISTS code_index_vectors (
  content_hash TEXT NOT NULL, fingerprint TEXT NOT NULL, vector BLOB NOT NULL,
- PRIMARY KEY(content_hash,fingerprint));
-PRAGMA user_version=7;";
+ PRIMARY KEY(content_hash,fingerprint));";
 
 pub(crate) const TELEMETRY_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS code_index_queries (
@@ -35,8 +34,7 @@ CREATE TABLE IF NOT EXISTS code_index_queries (
  semantic INTEGER NOT NULL CHECK(semantic IN (0,1)), coverage_indexed INTEGER,
  coverage_total INTEGER, result_paths TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS code_index_queries_scope
- ON code_index_queries(scope,id DESC);
-PRAGMA user_version=8;";
+ ON code_index_queries(scope,id DESC);";
 
 pub(crate) const HISTORY_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS code_history_state (
@@ -46,8 +44,7 @@ CREATE TABLE IF NOT EXISTS code_history_entries (
  scope TEXT NOT NULL, revision TEXT NOT NULL, body TEXT NOT NULL,
  PRIMARY KEY(scope,revision));
 CREATE VIRTUAL TABLE IF NOT EXISTS code_history_fts USING fts5(
- scope UNINDEXED,revision UNINDEXED,subject,paths);
-PRAGMA user_version=9;";
+ scope UNINDEXED,revision UNINDEXED,subject,paths);";
 
 pub(crate) const GRAPH_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS code_index_symbols (
@@ -59,8 +56,7 @@ CREATE INDEX IF NOT EXISTS code_index_symbols_chunk
  ON code_index_symbols(scope,chunk_id);
 CREATE INDEX IF NOT EXISTS code_index_symbols_path
  ON code_index_symbols(scope,path);
-UPDATE code_index_state SET status='stale';
-PRAGMA user_version=10;";
+UPDATE code_index_state SET status='stale';";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodeIndexFile {
@@ -162,7 +158,7 @@ pub struct CodeHistorySnapshot {
 
 impl Store {
     pub fn code_index_status(&self, scope: &str) -> Result<Option<CodeIndexStatus>> {
-        Ok(self.conn.query_row(
+        Ok(self.index()?.query_row(
             "SELECT generation,snapshot_hash,status,completed_at,files,chunks,source_bytes,skipped
              FROM code_index_state WHERE scope=?1",
             [scope],
@@ -218,7 +214,9 @@ impl Store {
                 "Invalid code chunk size"
             );
         }
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .index_mut()?
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute("DELETE FROM code_index_symbols WHERE scope=?1", [scope])?;
         let generation: i64 = tx.query_row(
             "SELECT COALESCE(MAX(generation),0)+1 FROM code_index_state WHERE scope=?1",
@@ -311,7 +309,8 @@ impl Store {
         ensure!(!expression.is_empty(), "Code index query is empty");
         // Paths and extracted references repeat across passages; give source
         // text and declarations greater weight than duplicated metadata.
-        let mut stmt = self.conn.prepare(
+        let index = self.index()?;
+        let mut stmt = index.prepare(
             "SELECT c.body,bm25(code_index_fts,0,0,0.1,1,0.1,1) FROM code_index_fts
              JOIN code_index_chunks c ON c.scope=code_index_fts.scope AND c.id=code_index_fts.id
              WHERE code_index_fts.scope=?1 AND code_index_fts MATCH ?2
@@ -333,7 +332,8 @@ impl Store {
         fingerprint: &str,
         limit: usize,
     ) -> Result<Vec<CodeChunk>> {
-        let mut stmt = self.conn.prepare(
+        let index = self.index()?;
+        let mut stmt = index.prepare(
             "SELECT MIN(c.body) FROM code_index_chunks c
              LEFT JOIN code_index_vectors v ON v.content_hash=c.content_hash AND v.fingerprint=?2
              WHERE c.scope=?1 AND v.content_hash IS NULL GROUP BY c.content_hash
@@ -353,7 +353,7 @@ impl Store {
     ) -> Result<()> {
         validate_vector(vector)?;
         ensure!(
-            self.conn.query_row(
+            self.index()?.query_row(
                 "SELECT EXISTS(SELECT 1 FROM code_index_chunks WHERE content_hash=?1)",
                 [content_hash],
                 |row| row.get::<_, bool>(0),
@@ -364,7 +364,7 @@ impl Store {
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect::<Vec<_>>();
-        self.conn.execute(
+        self.index()?.execute(
             "INSERT OR REPLACE INTO code_index_vectors(content_hash,fingerprint,vector) VALUES(?1,?2,?3)",
             params![content_hash,fingerprint,bytes],
         )?;
@@ -383,7 +383,9 @@ impl Store {
         for (_, vector) in vectors {
             validate_vector(vector)?;
         }
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .index_mut()?
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         for (content_hash, vector) in vectors {
             ensure!(
                 tx.query_row(
@@ -412,7 +414,8 @@ impl Store {
         fingerprint: &str,
         limit: usize,
     ) -> Result<Vec<(CodeChunk, Vec<f32>)>> {
-        let mut stmt = self.conn.prepare(
+        let index = self.index()?;
+        let mut stmt = index.prepare(
             "SELECT c.body,v.vector FROM code_index_chunks c JOIN code_index_vectors v
              ON v.content_hash=c.content_hash WHERE c.scope=?1 AND v.fingerprint=?2
              ORDER BY c.path,c.id LIMIT ?3",
@@ -441,7 +444,7 @@ impl Store {
         scope: &str,
         fingerprint: &str,
     ) -> Result<(usize, usize)> {
-        Ok(self.conn.query_row(
+        Ok(self.index()?.query_row(
             "SELECT COUNT(DISTINCT CASE WHEN v.content_hash IS NOT NULL THEN c.content_hash END),
                     COUNT(DISTINCT c.content_hash)
              FROM code_index_chunks c LEFT JOIN code_index_vectors v
@@ -452,7 +455,9 @@ impl Store {
     }
 
     pub fn code_index_remove_path(&mut self, scope: &str, path: &str) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .index_mut()?
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute(
             "DELETE FROM code_index_symbols WHERE scope=?1 AND path=?2",
             params![scope, path],
@@ -486,7 +491,7 @@ impl Store {
             detail.truncate(500);
         }
         let status = format!("refresh_failed: {detail}");
-        self.conn.execute(
+        self.index()?.execute(
             "INSERT INTO code_index_state(scope,generation,snapshot_hash,status,completed_at,files,chunks,source_bytes,skipped)
              VALUES(?1,0,'',?2,?3,0,0,0,0)
              ON CONFLICT(scope) DO UPDATE SET status=excluded.status,completed_at=excluded.completed_at",
@@ -515,7 +520,9 @@ impl Store {
                     .all(|path| !path.is_empty() && path.len() <= 4096),
             "Code query telemetry exceeds result bound"
         );
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .index_mut()?
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO code_index_queries(scope,session,source,query,created_at,elapsed_ms,
              candidates,returned,stale_suppressed,semantic,coverage_indexed,coverage_total,result_paths)
@@ -547,7 +554,7 @@ impl Store {
     }
 
     pub fn code_index_query_summary(&self, scope: &str) -> Result<CodeQuerySummary> {
-        self.conn
+        self.index()?
             .query_row(
                 "SELECT COUNT(*),COALESCE(SUM(returned=0),0),COALESCE(SUM(stale_suppressed),0),
              CAST(COALESCE(ROUND(AVG(elapsed_ms)),0) AS INTEGER),MAX(created_at)
@@ -581,7 +588,7 @@ impl Store {
             "Code history exceeds storage bound"
         );
         if self
-            .conn
+            .index()?
             .query_row(
                 "SELECT snapshot_hash FROM code_history_state WHERE scope=?1",
                 [scope],
@@ -605,7 +612,9 @@ impl Store {
                 "Invalid code history entry"
             );
         }
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .index_mut()?
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute("DELETE FROM code_history_fts WHERE scope=?1", [scope])?;
         tx.execute("DELETE FROM code_history_entries WHERE scope=?1", [scope])?;
         for entry in &snapshot.entries {
@@ -635,6 +644,14 @@ impl Store {
         Ok(true)
     }
 
+    pub fn code_history_available(&self, scope: &str) -> Result<bool> {
+        Ok(self.index()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM code_history_state WHERE scope=?1)",
+            [scope],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn code_history_lexical(
         &self,
         scope: &str,
@@ -642,7 +659,8 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<(CodeHistoryEntry, f64)>> {
         ensure!(!expression.is_empty(), "Code history query is empty");
-        let mut statement = self.conn.prepare(
+        let index = self.index()?;
+        let mut statement = index.prepare(
             "SELECT e.body,bm25(code_history_fts) FROM code_history_fts
              JOIN code_history_entries e ON e.scope=code_history_fts.scope
              AND e.revision=code_history_fts.revision
@@ -666,7 +684,8 @@ impl Store {
         chunks_per_path: usize,
     ) -> Result<Vec<CodeChunk>> {
         ensure!(paths.len() <= 100, "Too many code history paths");
-        let mut statement = self.conn.prepare(
+        let index = self.index()?;
+        let mut statement = index.prepare(
             "SELECT body FROM code_index_chunks WHERE scope=?1 AND path=?2
              ORDER BY CAST(json_extract(body,'$.start_line') AS INTEGER) LIMIT ?3",
         )?;
@@ -691,7 +710,8 @@ impl Store {
     ) -> Result<Vec<(CodeChunk, String, String)>> {
         ensure!(symbols.len() <= 32, "Too many exact code symbols");
         let limit = limit.clamp(1, 500);
-        let mut statement = self.conn.prepare(
+        let index = self.index()?;
+        let mut statement = index.prepare(
             "SELECT c.body,s.symbol,s.role FROM code_index_symbols s
              JOIN code_index_chunks c ON c.scope=s.scope AND c.id=s.chunk_id
              WHERE s.scope=?1 AND s.normalized=?2

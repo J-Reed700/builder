@@ -147,9 +147,7 @@ impl Store {
                 "Memory evidence is missing or rewound"
             );
         }
-        let tx = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = self.journal_transaction()?;
         let existing: Option<(i64, bool)> = tx
             .query_row(
                 "SELECT revision,forgotten FROM memories WHERE scope=?1 AND key=?2",
@@ -200,7 +198,7 @@ impl Store {
         Ok(memory)
     }
     pub fn memory_forget(&mut self, scope: &str, key: &str, expected: i64) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.journal_transaction()?;
         ensure!(tx.execute("UPDATE memories SET forgotten=1 WHERE scope=?1 AND key=?2 AND revision=?3 AND forgotten=0",params![scope,key,expected])?==1,"Memory revision conflict or missing memory");
         tx.execute(
             "DELETE FROM memory_fts WHERE scope=?1 AND key=?2",

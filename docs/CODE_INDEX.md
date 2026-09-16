@@ -18,9 +18,20 @@ explicit `code_search` refreshes synchronously before ranking.
 
 Each scan walks the current checkout with ignore rules, hashes every accepted
 source file, chunks it at language-aware declaration boundaries, and computes a
-manifest hash. Publishing occurs in one SQLite transaction. A failed or
-over-limit scan records the failure and leaves the last complete generation
-queryable. Removed files disappear when the next generation is published.
+manifest hash. Publishing occurs in one transaction in the derived
+`builder-index.sqlite3` sidecar. Conversation and recovery records stay in the
+separate authoritative `builder.sqlite3` database, so a bulk index publication
+cannot block a user message, tool claim, or tool result. Sidecar initialization
+or integrity failure disables code enrichment for that Store with an explicit
+notice while journal operations continue. A failed or over-limit scan records
+the failure and leaves the last complete generation queryable. Removed files
+disappear when the next generation is published.
+
+One checkout-scoped advisory lock covers capture, publication, history refresh,
+and vector maintenance. Another Builder process encountering that lock does not
+wait or start duplicate work; it continues reading the last published generation.
+If foreground work times out while stopping an idle maintainer, Builder keeps the
+old worker handle until the thread exits and will not start an overlapping worker.
 
 Every result is checked against a fresh hash of its source file after ranking. A
 result changed during the scan/search race is withheld and removed from the

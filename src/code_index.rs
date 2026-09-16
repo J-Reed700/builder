@@ -105,10 +105,24 @@ pub fn refresh(
 ) -> Result<bool> {
     ensure!(settings.code_index, "Code index is disabled in /settings");
     let index_scope = scope(workspace);
+    let Some(_guard) = store.try_code_index_lock(&index_scope)? else {
+        // Another process already owns the rebuild. Readers continue using the
+        // last atomically published generation instead of queuing more work.
+        return Ok(false);
+    };
+    refresh_locked(store, workspace, settings, &index_scope)
+}
+
+fn refresh_locked(
+    store: &mut Store,
+    workspace: &Workspace,
+    settings: &PipelineSettings,
+    index_scope: &str,
+) -> Result<bool> {
     match builder_tools::code_index::capture(workspace, settings) {
-        Ok(snapshot) => store.code_index_replace(&index_scope, &snapshot),
+        Ok(snapshot) => store.code_index_replace(index_scope, &snapshot),
         Err(error) => {
-            store.code_index_record_failure(&index_scope, &error.to_string())?;
+            store.code_index_record_failure(index_scope, &error.to_string())?;
             Err(error)
         }
     }
@@ -124,9 +138,13 @@ pub async fn maintain(
     if !settings.code_index || !settings.code_index_background {
         return Ok(());
     }
-    refresh(store, workspace, settings)?;
+    let index_scope = scope(workspace);
+    let Some(_guard) = store.try_code_index_lock(&index_scope)? else {
+        return Ok(());
+    };
+    refresh_locked(store, workspace, settings, &index_scope)?;
     if settings.code_history {
-        let _ = refresh_history(store, workspace, settings).await;
+        let _ = refresh_history_locked(store, workspace, settings, &index_scope).await;
     }
     if !settings.code_index_semantic {
         return Ok(());
@@ -140,7 +158,7 @@ pub async fn maintain(
     };
     loop {
         let pending = store.code_index_pending_vectors(
-            &scope(workspace),
+            &index_scope,
             fingerprint,
             settings.code_index_embedding_batch,
         )?;
@@ -165,7 +183,7 @@ pub async fn maintain(
         if let Some(watch) = watch.as_deref_mut()
             && watch.take_pending(settings.code_index_debounce_ms).await
         {
-            refresh(store, workspace, settings)?;
+            refresh_locked(store, workspace, settings, &index_scope)?;
         }
         tokio::task::yield_now().await;
     }
@@ -546,6 +564,19 @@ async fn refresh_history(
     workspace: &Workspace,
     settings: &PipelineSettings,
 ) -> Result<bool> {
+    let index_scope = scope(workspace);
+    let Some(_guard) = store.try_code_index_lock(&index_scope)? else {
+        return store.code_history_available(&index_scope);
+    };
+    refresh_history_locked(store, workspace, settings, &index_scope).await
+}
+
+async fn refresh_history_locked(
+    store: &mut Store,
+    workspace: &Workspace,
+    settings: &PipelineSettings,
+    index_scope: &str,
+) -> Result<bool> {
     let Some(snapshot) = builder_tools::git_history::capture(
         workspace,
         settings.code_history_commits,
@@ -555,7 +586,7 @@ async fn refresh_history(
     else {
         return Ok(false);
     };
-    store.code_history_replace(&scope(workspace), &snapshot)?;
+    store.code_history_replace(index_scope, &snapshot)?;
     Ok(true)
 }
 

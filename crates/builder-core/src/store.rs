@@ -4,15 +4,25 @@ use crate::protocol::Role;
 use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
 pub use pages::{ChatSession, HistoryEntry, HistoryPage};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     path::{Path, PathBuf},
+    time::Duration,
 };
+
+const JOURNAL_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const INDEX_OPEN_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub struct Store {
     pub(crate) conn: Connection,
+    /// Derived repository indexes live outside the authoritative conversation
+    /// journal. A bulk index write must never take the writer lock needed to
+    /// save a user message, tool claim, or tool result.
+    pub(crate) index_conn: Option<Connection>,
+    index_error: Option<String>,
     home: PathBuf,
 }
 
@@ -30,7 +40,19 @@ pub struct SessionGuard {
     file: File,
 }
 
+/// Serializes rebuildable index maintenance for one checkout across Builder
+/// processes. Losing the process releases the advisory lock automatically.
+pub struct CodeIndexGuard {
+    file: File,
+}
+
 impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+impl Drop for CodeIndexGuard {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.file);
     }
@@ -70,17 +92,78 @@ pub enum ToolRunState {
     Finished,
 }
 
+fn private_database_options() -> std::fs::OpenOptions {
+    let mut options = File::options();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+}
+
+fn private_lock_options() -> std::fs::OpenOptions {
+    let mut options = File::options();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+}
+
+fn open_index(home: &Path) -> Result<Connection> {
+    let path = home.join("builder-index.sqlite3");
+    let options = private_database_options();
+    match options.open(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    let mut conn = Connection::open(&path)?;
+    conn.busy_timeout(INDEX_OPEN_BUSY_TIMEOUT)?;
+    conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
+    let mut version: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    ensure!(
+        version <= 1,
+        "Code index database was created by a newer Builder version; upgrade Builder"
+    );
+    if version == 0 {
+        // journal_mode cannot change inside a transaction. It is established
+        // once before any index rows exist; later opens only read the version
+        // and therefore do not contend with an active background writer.
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        version = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        ensure!(
+            version <= 1,
+            "Code index database was created by a newer Builder version; upgrade Builder"
+        );
+        if version == 0 {
+            tx.execute_batch(crate::code_index::SCHEMA)?;
+            tx.execute_batch(crate::code_index::TELEMETRY_SCHEMA)?;
+            tx.execute_batch(crate::code_index::HISTORY_SCHEMA)?;
+            tx.execute_batch(crate::code_index::GRAPH_SCHEMA)?;
+            tx.execute_batch("PRAGMA user_version=1;")?;
+        }
+        tx.commit()?;
+    }
+    let journal_mode: String =
+        conn.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))?;
+    ensure!(
+        journal_mode.eq_ignore_ascii_case("wal"),
+        "Code index database is not in WAL mode"
+    );
+    Ok(conn)
+}
+
 impl Store {
     pub fn open(home: &Path) -> Result<Self> {
         crate::config::ensure_home(home)?;
         let path = home.join("builder.sqlite3");
-        let mut options = File::options();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
+        let options = private_database_options();
         // Seed a new database with private permissions; SQLite copies them to
         // its WAL and shm files. Never open an existing database here: POSIX
         // drops every advisory lock this process holds on a file whenever any
@@ -94,17 +177,29 @@ impl Store {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error.into()),
         }
-        let conn = Connection::open(&path)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; BEGIN IMMEDIATE;")?;
-        // Read the version under the write lock so simultaneous launches cannot
-        // both attempt the same migration.
-        let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let mut conn = Connection::open(&path)?;
+        conn.busy_timeout(JOURNAL_BUSY_TIMEOUT)?;
+        conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
+        let mut version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         ensure!(
-            version <= 11,
+            version <= 12,
             "Session database was created by a newer Builder version; upgrade Builder"
         );
-        conn.execute_batch("CREATE TABLE IF NOT EXISTS sessions (
+        if version < 12 {
+            // WAL mode is persistent. Only migrations may change it or acquire
+            // a write lock; opening a current journal is a read-only fast path.
+            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .context("Authoritative journal is busy while applying a schema migration")?;
+            // A concurrent process may have completed the migration while this
+            // connection waited for the writer lock.
+            version = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            ensure!(
+                version <= 12,
+                "Session database was created by a newer Builder version; upgrade Builder"
+            );
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY, title TEXT NOT NULL, profile TEXT NOT NULL,
                 workspace TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS messages (
@@ -118,64 +213,131 @@ impl Store {
                 session_id TEXT NOT NULL REFERENCES sessions(id), call_id TEXT NOT NULL,
                 state TEXT NOT NULL CHECK(state IN ('started','finished')), result TEXT,
                 PRIMARY KEY(session_id, call_id));")?;
-        if version < 2 {
-            conn.execute_batch(
-                "ALTER TABLE messages ADD COLUMN active INTEGER NOT NULL DEFAULT 1;
+            if version < 2 {
+                tx.execute_batch(
+                    "ALTER TABLE messages ADD COLUMN active INTEGER NOT NULL DEFAULT 1;
                 CREATE TABLE composer_drafts (
                     session_id TEXT PRIMARY KEY REFERENCES sessions(id), prompt TEXT NOT NULL);
                 PRAGMA user_version=2;",
-            )?;
-        }
-        if version < 3 {
-            conn.execute_batch(
-                "CREATE TABLE context_checkpoints (
+                )?;
+            }
+            if version < 3 {
+                tx.execute_batch(
+                    "CREATE TABLE context_checkpoints (
                 id INTEGER PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
                 through_seq INTEGER NOT NULL, context TEXT NOT NULL, created_at TEXT NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1);
                 PRAGMA user_version=3;",
-            )?;
-        }
-        if version < 4 {
-            conn.execute_batch(crate::memory::SCHEMA)?;
-        }
-        if version < 5 {
-            conn.execute_batch(
-                "ALTER TABLE tool_runs ADD COLUMN outcome TEXT; PRAGMA user_version=5;",
-            )?;
-        }
-        if version < 6 {
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS chat_metadata (
+                )?;
+            }
+            if version < 4 {
+                tx.execute_batch(crate::memory::SCHEMA)?;
+            }
+            if version < 5 {
+                tx.execute_batch(
+                    "ALTER TABLE tool_runs ADD COLUMN outcome TEXT; PRAGMA user_version=5;",
+                )?;
+            }
+            if version < 6 {
+                tx.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS chat_metadata (
                 session_id TEXT PRIMARY KEY REFERENCES sessions(id),
                 archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)));
                 PRAGMA user_version=6;",
-            )?;
-        }
-        if version < 7 {
-            conn.execute_batch(crate::code_index::SCHEMA)?;
-        }
-        if version < 8 {
-            conn.execute_batch(crate::code_index::TELEMETRY_SCHEMA)?;
-        }
-        if version < 9 {
-            conn.execute_batch(crate::code_index::HISTORY_SCHEMA)?;
-        }
-        if version < 10 {
-            conn.execute_batch(crate::code_index::GRAPH_SCHEMA)?;
-        }
-        if version < 11 {
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS provider_conformance (
+                )?;
+            }
+            if version < 7 {
+                tx.execute_batch("PRAGMA user_version=7;")?;
+            }
+            if version < 8 {
+                tx.execute_batch("PRAGMA user_version=8;")?;
+            }
+            if version < 9 {
+                tx.execute_batch("PRAGMA user_version=9;")?;
+            }
+            if version < 10 {
+                tx.execute_batch("PRAGMA user_version=10;")?;
+            }
+            if version < 11 {
+                tx.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS provider_conformance (
                  fingerprint TEXT PRIMARY KEY, profile TEXT NOT NULL, endpoint TEXT NOT NULL,
                  model TEXT NOT NULL, checked_at TEXT NOT NULL, report TEXT NOT NULL);
                  PRAGMA user_version=11;",
-            )?;
+                )?;
+            }
+            if version < 12 {
+                // Code indexes are derived and rebuildable. Schema 12 moves all
+                // new index writes to builder-index.sqlite3 so their bulk
+                // transactions cannot block the authoritative journal. Legacy
+                // index tables are deliberately retained until explicit cleanup;
+                // migration never risks transcript availability on a large DROP.
+                tx.execute_batch("PRAGMA user_version=12;")?;
+            }
+            tx.commit()?;
         }
-        conn.execute_batch("COMMIT;")?;
+        let journal_mode: String =
+            conn.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))?;
+        ensure!(
+            journal_mode.eq_ignore_ascii_case("wal"),
+            "Authoritative journal is not in WAL mode"
+        );
+        // A rebuildable sidecar must never make the authoritative journal
+        // unavailable. Automatic code context degrades with an explicit notice;
+        // a later Store open retries initialization.
+        let (index_conn, index_error) = match open_index(home) {
+            Ok(connection) => (Some(connection), None),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        };
         Ok(Self {
             conn,
+            index_conn,
+            index_error,
             home: home.into(),
         })
+    }
+
+    pub(crate) fn index(&self) -> Result<&Connection> {
+        self.index_conn.as_ref().with_context(|| {
+            format!(
+                "Derived code index unavailable: {}",
+                self.index_error.as_deref().unwrap_or("unknown error")
+            )
+        })
+    }
+
+    pub(crate) fn index_mut(&mut self) -> Result<&mut Connection> {
+        self.index_conn.as_mut().with_context(|| {
+            format!(
+                "Derived code index unavailable: {}",
+                self.index_error.as_deref().unwrap_or("unknown error")
+            )
+        })
+    }
+
+    /// Acquire the journal writer at the transaction boundary. SQLite's
+    /// default DEFERRED mode can create a read snapshot and then fail an
+    /// upgrade immediately with SQLITE_BUSY_SNAPSHOT; IMMEDIATE makes writer
+    /// contention happen before any transaction work is performed.
+    pub(crate) fn journal_transaction(&mut self) -> Result<Transaction<'_>> {
+        self.conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("Authoritative journal remained busy before a durable write")
+    }
+
+    pub fn try_code_index_lock(&self, scope: &str) -> Result<Option<CodeIndexGuard>> {
+        ensure!(
+            !scope.is_empty() && scope.len() <= 16 * 1024,
+            "Invalid code index lock scope"
+        );
+        let identity = format!("{:x}", Sha256::digest(scope.as_bytes()));
+        let file = private_lock_options()
+            .open(self.home.join(format!("builder-index-{identity}.lock")))?;
+        match file.try_lock_exclusive() {
+            Ok(()) => Ok(Some(CodeIndexGuard { file })),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(error).context("Could not acquire code index maintenance lock"),
+        }
     }
     pub fn save_provider_conformance(
         &mut self,
@@ -228,7 +390,7 @@ impl Store {
             .context("Session workspace does not exist")?;
         ensure!(workspace.is_dir(), "Session workspace must be a directory");
         let id = uuid::Uuid::new_v4().to_string();
-        let tx = self.conn.transaction()?;
+        let tx = self.journal_transaction()?;
         tx.execute(
             "INSERT INTO sessions VALUES (?1,?2,?3,?4,?5)",
             params![
@@ -252,12 +414,7 @@ impl Store {
     pub fn lock(&self, id: &str) -> Result<SessionGuard> {
         // Validate before using an externally supplied ID in a filename.
         uuid::Uuid::parse_str(id).context("Invalid session ID")?;
-        let file = File::options()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(self.home.join(format!("{id}.lock")))?;
+        let file = private_lock_options().open(self.home.join(format!("{id}.lock")))?;
         file.try_lock_exclusive()
             .context("This session is already open in another Builder process")?;
         Ok(SessionGuard { file })
@@ -316,7 +473,7 @@ impl Store {
             self.messages(id)? == expected,
             "Conversation changed while compacting; history is intact"
         );
-        let tx = self.conn.transaction()?;
+        let tx = self.journal_transaction()?;
         let through: i64 = tx.query_row(
             "SELECT MAX(seq) FROM messages WHERE session_id=?1",
             [id],
@@ -371,7 +528,7 @@ impl Store {
             ensure!(!prompt.trim().is_empty(), "Prompt is empty");
         }
         let messages = self.messages(id)?;
-        let tx = self.conn.transaction()?;
+        let tx = self.journal_transaction()?;
         let uncertain = close_pending(&tx, id, &messages)?;
         if let Some(prompt) = next {
             insert_message(&tx, id, &Message::text(Role::User, prompt))?;
@@ -385,7 +542,7 @@ impl Store {
     /// composer draft. Workspace side effects and tool claims are never undone.
     pub fn rewind(&mut self, id: &str) -> Result<(String, usize)> {
         let messages = self.history_messages(id)?;
-        let tx = self.conn.transaction()?;
+        let tx = self.journal_transaction()?;
         let (seq, body): (i64, String) = tx
             .query_row(
                 "SELECT seq,body FROM messages WHERE session_id=?1 AND active=1
@@ -452,7 +609,7 @@ impl Store {
         Ok(())
     }
     pub fn append(&mut self, id: &str, message: &Message) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.journal_transaction()?;
         tx.execute(
             "INSERT INTO messages(session_id,body) VALUES (?1,?2)",
             params![id, serde_json::to_string(message)?],
@@ -515,7 +672,7 @@ impl Store {
     /// This never claims or executes the tool. A finished run missing its
     /// atomic result is conservatively repaired as uncertain.
     pub fn restore_finished_tool_message(&mut self, session: &str, call: &str) -> Result<bool> {
-        let tx = self.conn.transaction()?;
+        let tx = self.journal_transaction()?;
         let (state, result, outcome): (String, Option<String>, Option<String>) = tx
             .query_row(
                 "SELECT state,result,outcome FROM tool_runs WHERE session_id=?1 AND call_id=?2",
@@ -574,7 +731,7 @@ impl Store {
         result: &str,
         outcome: ToolOutcome,
     ) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.journal_transaction()?;
         let state: String = tx
             .query_row(
                 "SELECT state FROM tool_runs WHERE session_id=?1 AND call_id=?2",

@@ -1038,15 +1038,31 @@ fn start_code_watch(
 }
 
 async fn stop_memory_task(task: &mut Option<MemoryTask>) {
-    if let Some(mut task) = task.take() {
-        if let Some(cancel) = task.cancel.take() {
+    if let Some(mut running) = task.take() {
+        if let Some(cancel) = running.cancel.take() {
             let _ = cancel.send(());
         }
         // Cancellation is normally immediate because network and embedding
-        // work is awaited. Never make foreground chat wait on maintenance if
-        // the worker happens to be inside a synchronous SQLite operation.
-        let _ =
-            tokio::time::timeout(std::time::Duration::from_millis(100), &mut task.stopped).await;
+        // work is awaited. If synchronous capture or SQLite work is still in
+        // flight, retain ownership so a replacement worker cannot overlap it.
+        if tokio::time::timeout(std::time::Duration::from_millis(100), &mut running.stopped)
+            .await
+            .is_err()
+        {
+            *task = Some(running);
+        }
+    }
+}
+
+fn reap_memory_task(task: &mut Option<MemoryTask>) {
+    let finished = task.as_mut().is_some_and(|running| {
+        !matches!(
+            running.stopped.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        )
+    });
+    if finished {
+        task.take();
     }
 }
 
@@ -1180,9 +1196,11 @@ async fn drive_foreground(
 ) -> Result<()> {
     stop_memory_task(memory_task).await;
     let result = drive(agent, store, interactive).await;
-    if store
-        .messages(&agent.session)
-        .is_ok_and(|messages| !pending(&messages))
+    reap_memory_task(memory_task);
+    if memory_task.is_none()
+        && store
+            .messages(&agent.session)
+            .is_ok_and(|messages| !pending(&messages))
     {
         *memory_task = start_memory_task(agent, home, config);
     }
@@ -1292,5 +1310,24 @@ mod tests {
         let description = task.index_update_description();
         assert!(description.contains("periodic full-scan fallback"));
         assert!(description.contains("watch unavailable"));
+    }
+
+    #[tokio::test]
+    async fn timed_out_maintenance_remains_owned_until_it_stops() {
+        let (cancel, mut cancelled) = tokio::sync::oneshot::channel();
+        let (stopped_tx, stopped) = tokio::sync::oneshot::channel();
+        let mut task = Some(MemoryTask {
+            cancel: Some(cancel),
+            stopped,
+            index_updates: std::sync::Arc::new(std::sync::Mutex::new(IndexUpdateState::Starting)),
+        });
+
+        stop_memory_task(&mut task).await;
+        assert!(task.is_some(), "a live worker must not be detached");
+        assert_eq!(cancelled.try_recv(), Ok(()));
+
+        stopped_tx.send(()).unwrap();
+        reap_memory_task(&mut task);
+        assert!(task.is_none());
     }
 }

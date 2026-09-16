@@ -57,7 +57,7 @@ guards classify decoded actions and recorded outcomes. A successful direct write
 resets inspection only when bounded before/after source hashes differ; candidate
 application validates nonempty changing patches. Provider messages are unchanged.
 
-SQLite WAL and full synchronization protect committed writes within the guarantees of the operating system and storage device. Database schema versions newer than the binary are rejected. Schema v2 adds an active flag to messages and a durable composer draft table in a transaction; the v1 upgrade preserves existing messages and tool claims. User-facing IDs are UUIDs; unique prefixes are resolved before obtaining the lock.
+SQLite WAL and full synchronization protect committed writes within the guarantees of the operating system and storage device. `builder.sqlite3` is the authoritative conversation, tool, recovery, research, and memory journal. Schema v12 physically separates rebuildable repository indexes into `builder-index.sqlite3`; an index generation or vector batch therefore cannot acquire the journal's writer lock. A current-schema journal open performs no write and requests no writer lock. Migrations re-read the version after acquiring an `IMMEDIATE` transaction, and every multi-statement journal mutation obtains its writer reservation before reading transactional state. This avoids a read-to-write upgrade race while retaining a bounded busy timeout. Pre-v12 index tables remain untouched in the journal but are no longer read or written, avoiding a large destructive migration on the availability-critical path. Both files reject schema versions newer than the binary. A sidecar initialization or integrity failure degrades code-index retrieval with an explicit notice but cannot prevent the authoritative journal from opening. Schema v2 adds an active flag to messages and a durable composer draft table in a transaction; the v1 upgrade preserves existing messages and tool claims. User-facing IDs are UUIDs; unique prefixes are resolved before obtaining the lock.
 
 ## Failure semantics
 
@@ -309,15 +309,22 @@ This preserves the application → provider/tools → core dependency direction 
 keeps provider details outside the agent state machine.
 
 An application-owned recursive filesystem watcher is RAII-bound to the idle
-maintenance thread. Its bounded one-item channel deliberately coalesces event
+maintenance thread. A checkout-scoped advisory lock permits only one index
+maintainer across Builder processes; contention reuses the last published
+generation instead of queuing duplicate scans. A timed-out cooperative stop
+retains ownership of the old worker, so a replacement can never overlap a
+still-running synchronous capture. Its bounded one-item channel deliberately coalesces event
 bursts; a configurable debounce combines editor save sequences. Generated and
 dependency directories do not wake the scanner. Watch events are an acceleration,
 not a correctness contract: configurable periodic complete scans remain active,
 and explicit indexed search synchronously reconciles the current checkout.
 
 A capture either satisfies every configured file/byte/chunk bound or fails. The
-store publishes its files, chunks, FTS rows, state and new generation in one SQLite
-transaction. It never exposes a prefix or mixes generations. If capture or
+derived index store publishes its files, chunks, FTS rows, state and new generation
+in one `builder-index.sqlite3` transaction. Sidecar lock waits are short and
+failure is recoverable because the entire database is derived. The authoritative `builder.sqlite3`
+journal is a separate WAL database, so even a maximum-size index publication cannot
+delay user-message or tool-result persistence. Publication never exposes a prefix or mixes generations. If capture or
 publication fails, the previous complete generation remains queryable and the
 state records the bounded error. Deletions disappear on a successful replacement.
 Canonical checkout paths scope all lexical, structural and dense artifacts.

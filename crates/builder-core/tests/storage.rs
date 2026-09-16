@@ -114,6 +114,206 @@ fn database_is_private_without_changing_existing_directory_permissions() {
             & 0o777,
         0o600
     );
+    assert_eq!(
+        std::fs::metadata(home.path().join("builder-index.sqlite3"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn bulk_index_writer_cannot_block_conversation_persistence() {
+    use builder_core::{
+        code_index::{CodeChunk, CodeIndexFile, CodeIndexSnapshot},
+        protocol::{Message, Role},
+    };
+
+    let home = tempfile::tempdir().unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    let session = store
+        .create("independent journal", "local", home.path(), "system")
+        .unwrap();
+    let snapshot = CodeIndexSnapshot {
+        snapshot_hash: "snapshot".into(),
+        files: vec![CodeIndexFile {
+            path: "main.rs".into(),
+            hash: "file".into(),
+            source_bytes: 12,
+            language: "rust".into(),
+        }],
+        chunks: vec![CodeChunk {
+            id: "chunk".into(),
+            path: "main.rs".into(),
+            file_hash: "file".into(),
+            content_hash: "content".into(),
+            language: "rust".into(),
+            kind: "declaration".into(),
+            start_line: 1,
+            end_line: 1,
+            symbols: vec!["main".into()],
+            references: vec![],
+            content: "fn main() {}".into(),
+        }],
+        source_bytes: 12,
+        skipped: 0,
+    };
+    store.code_index_replace("repo", &snapshot).unwrap();
+
+    let main = rusqlite::Connection::open(home.path().join("builder.sqlite3")).unwrap();
+    let legacy_tables: usize = main
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name='code_index_state'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(legacy_tables, 0);
+
+    let index = rusqlite::Connection::open(home.path().join("builder-index.sqlite3")).unwrap();
+    assert_eq!(
+        index
+            .query_row("SELECT COUNT(*) FROM code_index_chunks", [], |row| {
+                row.get::<_, usize>(0)
+            })
+            .unwrap(),
+        1
+    );
+    index.execute_batch("BEGIN IMMEDIATE;").unwrap();
+
+    let started = std::time::Instant::now();
+    let mut concurrent = Store::open(home.path()).unwrap();
+    concurrent
+        .append(&session, &Message::text(Role::User, "save while indexing"))
+        .unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(concurrent.messages(&session).unwrap().len(), 2);
+    index.execute_batch("ROLLBACK;").unwrap();
+}
+
+#[test]
+fn opening_a_current_journal_does_not_request_the_writer_lock() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    drop(store);
+
+    let writer = rusqlite::Connection::open(home.path().join("builder.sqlite3")).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE;").unwrap();
+
+    let started = std::time::Instant::now();
+    let concurrent = Store::open(home.path()).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert!(concurrent.sessions().unwrap().is_empty());
+    writer.execute_batch("ROLLBACK;").unwrap();
+}
+
+#[test]
+fn read_then_write_transaction_waits_before_taking_a_snapshot() {
+    use builder_core::store::ToolOutcome;
+
+    let home = tempfile::tempdir().unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    let session = store
+        .create("writer contention", "local", home.path(), "system")
+        .unwrap();
+    assert!(store.claim_tool(&session, "call").unwrap());
+
+    let path = home.path().join("builder.sqlite3");
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        locked_tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        connection.execute_batch("ROLLBACK;").unwrap();
+    });
+    locked_rx.recv().unwrap();
+
+    store
+        .complete_tool_with_outcome(&session, "call", "finished", ToolOutcome::Succeeded)
+        .unwrap();
+    writer.join().unwrap();
+    assert_eq!(
+        store.tool_result(&session, "call").unwrap().unwrap(),
+        "finished"
+    );
+}
+
+#[test]
+fn broken_derived_index_does_not_make_the_journal_unavailable() {
+    use builder_core::protocol::{Message, Role};
+
+    let home = tempfile::tempdir().unwrap();
+    drop(Store::open(home.path()).unwrap());
+    std::fs::write(home.path().join("builder-index.sqlite3"), b"not sqlite").unwrap();
+
+    let mut store = Store::open(home.path()).unwrap();
+    let session = store
+        .create("degraded index", "local", home.path(), "system")
+        .unwrap();
+    store
+        .append(
+            &session,
+            &Message::text(Role::User, "the journal still works"),
+        )
+        .unwrap();
+    assert_eq!(store.messages(&session).unwrap().len(), 2);
+    assert!(store.code_index_status("repo").is_err());
+}
+
+#[test]
+fn code_index_maintenance_lock_is_scoped_and_raii_released() {
+    let home = tempfile::tempdir().unwrap();
+    let first = Store::open(home.path()).unwrap();
+    let second = Store::open(home.path()).unwrap();
+
+    let guard = first.try_code_index_lock("repo-a").unwrap().unwrap();
+    assert!(second.try_code_index_lock("repo-a").unwrap().is_none());
+    assert!(second.try_code_index_lock("repo-b").unwrap().is_some());
+    drop(guard);
+    assert!(second.try_code_index_lock("repo-a").unwrap().is_some());
+}
+
+#[test]
+fn v11_upgrade_preserves_journal_and_archives_legacy_index_in_place() {
+    let home = tempfile::tempdir().unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    let session = store
+        .create("schema twelve", "local", home.path(), "system")
+        .unwrap();
+    drop(store);
+    std::fs::remove_file(home.path().join("builder-index.sqlite3")).unwrap();
+
+    let main = rusqlite::Connection::open(home.path().join("builder.sqlite3")).unwrap();
+    main.execute_batch(
+        "CREATE TABLE code_index_state (
+         scope TEXT PRIMARY KEY, generation INTEGER NOT NULL, snapshot_hash TEXT NOT NULL,
+         status TEXT NOT NULL, completed_at TEXT NOT NULL, files INTEGER NOT NULL,
+         chunks INTEGER NOT NULL, source_bytes INTEGER NOT NULL, skipped INTEGER NOT NULL);
+         INSERT INTO code_index_state VALUES ('legacy',1,'old','ready','before',1,1,1,0);
+         PRAGMA user_version=11;",
+    )
+    .unwrap();
+    drop(main);
+
+    let store = Store::open(home.path()).unwrap();
+    assert_eq!(store.session(&session).unwrap().title, "schema twelve");
+    assert!(store.code_index_status("legacy").unwrap().is_none());
+    let main = rusqlite::Connection::open(home.path().join("builder.sqlite3")).unwrap();
+    assert_eq!(
+        main.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+            .unwrap(),
+        12
+    );
+    assert_eq!(
+        main.query_row("SELECT COUNT(*) FROM code_index_state", [], |row| {
+            row.get::<_, usize>(0)
+        })
+        .unwrap(),
+        1
+    );
 }
 
 #[test]
