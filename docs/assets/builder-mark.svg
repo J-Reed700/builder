@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-labelledby="title">
+  <title id="title">Builder</title>
+  <defs>
+    <linearGradient id="accent" x1="18" y1="14" x2="78" y2="82" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#b8a7ff"/>
+      <stop offset="1" stop-color="#7c67e8"/>
+    </linearGradient>
+  </defs>
+  <rect width="96" height="96" rx="24" fill="#151515"/>
+  <path d="m48 19 29 16-29 16-29-16 29-16Z" fill="none" stroke="url(#accent)" stroke-width="6" stroke-linejoin="round"/>
+  <path d="m19 48 29 16 29-16M19 62l29 16 29-16" fill="none" stroke="#f4f2ff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

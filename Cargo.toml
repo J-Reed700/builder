@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "A terminal coding agent for OpenAI-compatible model servers."
 license = "MIT"
+repository = "https://github.com/J-Reed700/builder"
+readme = "README.md"
+rust-version = "1.95"
+keywords = ["agent", "cli", "coding", "llm"]
+categories = ["command-line-utilities", "development-tools"]
 
 [workspace]
 members = ["crates/*"]
