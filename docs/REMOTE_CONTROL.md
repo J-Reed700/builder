@@ -2,6 +2,10 @@
 
 [Back to README](../README.md)
 
+For the shortest installation path, start with the
+[Builder Remote quick start](../remote/README.md). This page documents the full
+deployment, security, recovery, and API behavior.
+
 Builder Gateway is the public control plane for a Builder process running on your computer. The gateway lives beside Pangolin/Newt or another reverse proxy. The computer makes an outbound WebSocket connection to it; no container needs to reach a host port.
 
 ```text

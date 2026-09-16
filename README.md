@@ -10,7 +10,7 @@
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
   <a href="#how-it-works">How it works</a> ·
-  <a href="docs/REMOTE_CONTROL.md">Remote access</a> ·
+  <a href="remote/README.md">Remote access</a> ·
   <a href="#documentation">Documentation</a>
 </p>
 
