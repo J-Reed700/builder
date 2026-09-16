@@ -1,6 +1,6 @@
-# Image-only by design: this file can be merged into an existing Pangolin/Newt
-# Compose project without requiring a Builder source checkout. Source developers
-# can additionally pass compose.build.yaml.
+# Image-only by design: this file can be merged into any reverse-proxy Compose
+# project without requiring a Builder source checkout. Source developers can
+# additionally pass compose.build.yaml.
 services:
   builder-gateway:
     image: ghcr.io/j-reed700/builder-gateway:latest

@@ -6,10 +6,10 @@ For the shortest installation path, start with the
 [Builder Remote quick start](../remote/README.md). This page documents the full
 deployment, security, recovery, and API behavior.
 
-Builder Gateway is the public control plane for a Builder process running on your computer. The gateway lives beside Pangolin/Newt or another reverse proxy. The computer makes an outbound WebSocket connection to it; no container needs to reach a host port.
+Builder Gateway is the public control plane for a Builder process running on your computer. It works behind any HTTPS reverse proxy or authenticated tunnel that meets the contract below. The computer makes an outbound WebSocket connection to it; no container needs to reach a host port.
 
 ```text
-Browser ──HTTPS──> Pangolin/Newt ──HTTP──> Builder Gateway
+Browser ──HTTPS──> proxy / tunnel ──HTTP──> Builder Gateway
                                                ▲
                                                │ outbound WSS
                                                │
@@ -19,7 +19,18 @@ Browser ──HTTPS──> Pangolin/Newt ──HTTP──> Builder Gateway
 
 The gateway contains the browser assets, pairing state, one hashed device credential, and a bounded request relay. The host injects its local API credential after each request reaches the computer. Workspace contents, provider credentials, conversations, memory, tool output, and the Docker socket never enter the gateway container.
 
-## Add the image to an existing Pangolin/Newt Compose stack
+## Reverse-proxy contract
+
+Caddy, Nginx, Traefik, HAProxy, Pangolin/Newt, and authenticated tunnel services can all sit in front of the gateway. The proxy must:
+
+- terminate HTTPS and forward HTTP plus WebSocket upgrades to port 8080;
+- protect browser routes with authentication;
+- replace any client-supplied identity header with a stable signed-in user value, matching `BUILDER_GATEWAY_AUTH_HEADER`; and
+- let `/api/gateway/connect` bypass interactive login. Builder authenticates that route with a single-use invitation or saved 256-bit device credential.
+
+Set `BUILDER_GATEWAY_ORIGIN` to the exact browser origin, with no path or trailing slash. Never expose port 8080 directly to the internet.
+
+## Pangolin/Newt example
 
 The production Compose definition is deliberately image-only. It can be merged into a stack that is already running Newt:
 
@@ -55,7 +66,8 @@ BUILDER_PROXY_NETWORK=pangolin-network docker compose \
 
 ## Start a standalone gateway stack
 
-Copy the example environment file and set your public URL and hostname:
+Copy the example environment file and set your public URL plus the identity
+header supplied by your proxy:
 
 ```sh
 cp remote/.env.example remote/.env
@@ -63,8 +75,8 @@ cp remote/.env.example remote/.env
 
 ```dotenv
 BUILDER_GATEWAY_ORIGIN=https://builder.example.com
-BUILDER_DOMAIN=builder.example.com
-COMPOSE_FILE=compose.yaml:pangolin-labels.yaml
+BUILDER_GATEWAY_AUTH_HEADER=X-Authenticated-User
+COMPOSE_FILE=compose.yaml
 ```
 
 Start the gateway from the `remote` directory:
@@ -74,9 +86,9 @@ cd remote
 docker compose up -d
 ```
 
-The sample `.env` selects `compose.yaml` and `pangolin-labels.yaml` through `COMPOSE_FILE`. The service listens on container port 8080, publishes it on loopback for local diagnostics, and keeps its device record in the `builder-gateway-data` volume. It runs as an unprivileged user with `no-new-privileges` and has no host or Docker-socket mount.
+The service listens on container port 8080, publishes it on loopback for a host-side proxy, and keeps its device record in the `builder-gateway-data` volume. It runs as an unprivileged user with `no-new-privileges` and has no host or Docker-socket mount. Add `proxy-network.yaml` when the proxy runs in Docker on an existing external network.
 
-Pangolin forwards the authenticated identity as `Remote-User`. The gateway requires that header by default, binds the paired computer to that identity, and rejects other signed-in users. Configure the Pangolin resource's roles or user allowlist to decide who may initially claim it. Do not expose the container directly on a public interface that bypasses Pangolin.
+The gateway requires the configured identity header, binds the paired computer to that identity, and rejects other signed-in users. Configure your proxy's roles or user allowlist to decide who may initially claim it. Pangolin forwards `Remote-User` by default; other proxies may use another header name.
 
 For a reverse proxy with another identity header, set `BUILDER_GATEWAY_AUTH_HEADER` to that header name. `BUILDER_GATEWAY_AUTH_HEADER=none` is intended only for a loopback-bound local test.
 
@@ -88,7 +100,7 @@ docker compose -f remote/compose.yaml -f remote/compose.build.yaml build builder
 
 ## Pair a computer
 
-Open `BUILDER_GATEWAY_ORIGIN` and sign in through Pangolin. The dashboard shows **Connect your computer** while the host is offline. Click **Generate connect command**, open a terminal in the project you want Builder to control, and run the command it displays:
+Open `BUILDER_GATEWAY_ORIGIN` and sign in through your proxy. The dashboard shows **Connect your computer** while the host is offline. Click **Generate connect command**, open a terminal in the project you want Builder to control, and run the command it displays:
 
 ```sh
 cd /path/to/project
@@ -103,9 +115,9 @@ After enrollment, the host saves a gateway-specific credential under `remote-gat
 builder -C /path/to/project remote connect https://builder.example.com
 ```
 
-The connector retries network failures with a bounded delay of one to thirty seconds. Authentication, TLS, protocol, and Pangolin routing failures stop with a concrete error instead of retrying forever. Reconnection never resubmits an API request.
+The connector retries network failures with a bounded delay of one to thirty seconds. Authentication, TLS, protocol, and proxy routing failures stop with a concrete error instead of retrying forever. Reconnection never resubmits an API request.
 
-Generating a new invitation from the same Pangolin identity replaces the paired device credential. This is also the current recovery flow if the host credential is lost. One gateway controls one paired computer; the workspace root can contain many projects, and each new chat chooses a subfolder.
+Generating a new invitation from the same signed-in identity replaces the paired device credential. This is also the current recovery flow if the host credential is lost. One gateway controls one paired computer; the workspace root can contain many projects, and each new chat chooses a subfolder.
 
 ## Keep the connector running on Linux
 
@@ -143,7 +155,7 @@ The web interface manages saved chats, folders below the workspace root, profile
 
 Each run chooses ask, trust, or read-only permissions. Starting the host with `--approval read-only` is a hard ceiling that the browser cannot raise. Gateway ownership authenticates access; it is not an operating-system sandbox. Tool processes use the account running Builder.
 
-Pangolin identity is required for every browser API request. Browser mutations also require the exact configured gateway Origin. The connector route accepts only the versioned Builder wire protocol, limits messages and request concurrency, and authenticates credentials in constant time. Pairing and device secrets are never placed in gateway logs by Builder.
+The configured proxy identity is required for every browser API request. Browser mutations also require the exact configured gateway Origin. The connector route accepts only the versioned Builder wire protocol, limits messages and request concurrency, and authenticates credentials in constant time. Pairing and device secrets are never placed in gateway logs by Builder.
 
 ## Failure and recovery rules
 
@@ -159,9 +171,9 @@ Pangolin identity is required for every browser API request. Browser mutations a
 | Symptom | Check |
 | --- | --- |
 | Dashboard says the host is offline | Start `builder remote connect` on the paired computer and inspect its terminal or service log. |
-| Connector receives HTTP 302, 401, or 403 | Ensure Pangolin's allow rule matches only `/api/gateway/connect`; the rest of the resource should use SSO. |
-| Dashboard receives 401 | Confirm Pangolin SSO is enabled and forwards `Remote-User`, matching `BUILDER_GATEWAY_AUTH_HEADER`. |
-| Dashboard says another user owns the gateway | Sign in with the Pangolin account that paired it, or remove the gateway data volume only if you intend to erase enrollment. |
+| Connector receives HTTP 302, 401, or 403 | Exempt only `/api/gateway/connect` from interactive login; the rest of the site should remain authenticated. |
+| Dashboard receives 401 | Confirm the proxy forwards the identity header named by `BUILDER_GATEWAY_AUTH_HEADER`. |
+| Dashboard says another user owns the gateway | Sign in with the identity that paired it, or remove the gateway data volume only if you intend to erase enrollment. |
 | Pairing code is rejected | Generate a fresh command; codes expire after ten minutes and cannot enroll a second device identity. |
 | Send reports an uncertain result | Inspect status and durable chat history. Do not resubmit until you know whether Builder accepted the original request. |
 | Session is already open | Exit the terminal conversation or other Builder process that holds its lock. |
