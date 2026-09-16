@@ -32,7 +32,22 @@ the terminal or connect the included browser interface to the same host.
 
 ### 1. Install
 
-Builder requires Rust 1.95 or newer.
+Builder requires [Rust 1.95 or newer](https://rustup.rs) and Git. On Linux,
+install the native build tools for your distro first:
+
+```sh
+# Fedora / RHEL
+sudo dnf install git gcc gcc-c++ make pkgconf-pkg-config
+
+# Debian / Ubuntu
+sudo apt install git build-essential pkg-config
+
+# Arch Linux
+sudo pacman -S --needed git base-devel pkgconf
+
+# openSUSE
+sudo zypper install git gcc gcc-c++ make pkg-config
+```
 
 ```sh
 git clone https://github.com/J-Reed700/builder.git
@@ -40,7 +55,8 @@ cd builder
 ./install.sh
 ```
 
-On Windows, run `cargo install --path . --locked` directly.
+If `builder` is not found afterward, add `~/.cargo/bin` to your `PATH`. On
+Windows, run `cargo install --path . --locked` directly.
 
 ### 2. Connect a model
 

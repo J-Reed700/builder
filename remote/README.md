@@ -37,8 +37,9 @@ browser ──HTTPS──▶ Pangolin / Newt ──▶ Builder Gateway
                                       Builder on your computer
 ```
 
-You need Builder installed on the computer that owns the workspace, plus a
-Pangolin/Newt Compose stack with container-label discovery enabled.
+You need [Builder installed](../README.md#1-install) on the computer that owns
+the workspace, plus a Pangolin/Newt Compose stack with container-label
+discovery enabled.
 
 ### 1. Add the gateway to Pangolin
 
