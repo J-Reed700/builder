@@ -32,6 +32,11 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
+# Local evaluation and UI-capture output
+/docs/llm-eval-*.json
+/docs/reliability-live-results-*.json
+/docs/design/*.txt
+
 # Logs, editor temporary files, and OS metadata
 *.log
 *.swp

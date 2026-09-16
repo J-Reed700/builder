@@ -124,6 +124,5 @@ Submitted prompts and streamed replies wrap at word boundaries inside a
 96-column reading measure. Tool rows omit meaningless `0.0s` timings, keep long
 commands bounded, and wrap failure details beneath the affected action.
 
-See [the design notes](design/README.md) for competitor research and actual CLI
-render captures. `NO_COLOR`, plain mode, normal scrollback, and existing approval
-and recovery behavior remain supported.
+`NO_COLOR`, plain mode, normal scrollback, and existing approval and recovery
+behavior remain supported.

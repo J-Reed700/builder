@@ -58,16 +58,8 @@ The final-answer contract is intentionally strict JSON. A correct file edit acco
 
 `live_progress.rs` remains a separate opt-in diagnostic for a one-line code fixture and a private historical replay. It is not interchangeable with this objective suite. The replay must now finish its run as well as make multiple edits, but it has no project-wide semantic correctness oracle and must not be cited as proof of a correctly completed real task.
 
-## Extending the suite
+## Memory comparison
 
-Initial live smoke run, September 8, 2026: Qwen3.8-27B-Q5_K_S.gguf passed all four cases with the compacted starting projection and a 120-second per-case deadline. Timings were approximately 66.3 seconds (resume), 39.0 seconds (stale handoff), 11.7 seconds (correction), and 16.8 seconds (unknown). Each case ran once. The resume case recovered from one tool error. These results do not establish a statistical success rate or completion of the original Arena task. See [the machine-readable baseline](llm-eval-baseline-2026-09-08.json).
+Set `BUILDER_EVAL_MEMORY=off` (default) or `on` for paired runs of the same suite. On mode uses the configured memory embedding profile, if available. Schema-v2 reports record this flag. `model_requests_including_compaction` also includes memory extraction requests; embedding HTTP requests are separate and are not counted as chat prompts. Elapsed time includes memory work. Use distinct report paths and repeat each mode; a single small-suite result is not statistical evidence.
 
-Next add independently reviewed small code repositories with actual build/test oracles, malformed tool requests, prompt-injection fixtures, and changed-file scenarios spanning compaction. Running generated code will require a separate execution boundary; do not loosen this suite's shell denial to make it convenient. Preserve inputs and grading contracts across model comparisons and reserve unseen cases to limit prompt overfitting.
-
-For the proposed memory feature, compare direct task-state loading, keyword retrieval, and hybrid retrieval while holding the rest of the agent constant. Test whether correct facts are retrieved, whether the model uses them, and whether the task completes as distinct outcomes. Require stale-memory invalidation, user-correction preservation, and workspace isolation in deterministic tests. Runtime guards must keep source inspection available and must not reward placeholder edits or memory writes as task progress.
-
-### Memory comparison
-
-Set `BUILDER_EVAL_MEMORY=off` (default) or `on` for paired runs of the same suite. On mode uses the configured memory embedding profile, if available. Schema-v2 reports record this flag. `model_requests_including_compaction` also includes memory extraction requests; embedding HTTP requests are separate and are not counted as chat prompts. Elapsed time includes memory work. Use distinct report paths and repeat each mode; a single small-suite result is not statistical evidence or a substitute for the original repository task.
-
-The September 8 paired run, failures, latency, and embedding outage are recorded in [MEMORY_EVAL_RESULTS.md](MEMORY_EVAL_RESULTS.md). Later reports retain a bounded final-answer excerpt from synthetic fixtures for diagnosis.
+Generated reports are local run artifacts and should not be committed. Preserve the inputs and grading contracts when comparing models or runtime changes.
