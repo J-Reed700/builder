@@ -1,5 +1,5 @@
 //! Explicit, durable context checkpoints. No tools execute while summarizing.
-use crate::agent::{Agent, AgentEvent, estimate_tokens, pending};
+use crate::agent::{Agent, AgentEvent, SummaryStage, estimate_tokens, pending};
 use anyhow::{Context, Result, ensure};
 use builder_core::{
     protocol::{Message, Role},
@@ -81,6 +81,39 @@ fn read_inventory(history: &[Message]) -> String {
         },
         serde_json::Value::Array(entries)
     )
+}
+
+/// Where one fragment sits in the whole summarization, by transcript bytes.
+struct SummaryProgress {
+    done: usize,
+    share: usize,
+    total: usize,
+    target: usize,
+    fragment: usize,
+}
+
+impl SummaryProgress {
+    /// Reading a reported prompt counts for most of a fragment on local
+    /// servers; writing is measured against the handoff size ceiling and
+    /// never claims the fragment finished before the result is validated.
+    fn event(&self, stage: SummaryStage, prefill_reported: bool) -> AgentEvent {
+        let reading = if prefill_reported { 0.6 } else { 0.0 };
+        let within = match stage {
+            SummaryStage::Waiting => 0.0,
+            SummaryStage::Reading { processed, total } => {
+                reading * processed as f64 / total.max(1) as f64
+            }
+            SummaryStage::Writing { bytes } => {
+                reading + (1.0 - reading) * (bytes as f64 / self.target.max(1) as f64).min(1.0)
+            }
+        };
+        let total = self.total.max(1) as f64;
+        AgentEvent::CompactionProgress {
+            fraction: ((self.done as f64 + self.share as f64 * within.min(0.97)) / total).min(0.99),
+            fragment: self.fragment,
+            stage,
+        }
+    }
 }
 
 impl<P: Provider> Agent<P> {
@@ -251,13 +284,54 @@ impl<P: Provider> Agent<P> {
             };
             let mut budget = initial_budget;
             let mut shortened = false;
+            let progress = SummaryProgress {
+                done: serialized.len() - remaining.len(),
+                share: end,
+                total: serialized.len(),
+                target: summary_byte_limit,
+                fragment: chunks,
+            };
             loop {
                 let attempt = store.begin_attempt(&self.session)?;
+                let mut stage = SummaryStage::Waiting;
+                let mut prefill_reported = false;
+                emit(progress.event(stage, prefill_reported));
                 let result = self
                     .provider
                     .complete_with_budget(&request, &[], budget, &mut |event| {
+                        match &event {
+                            Event::PromptProgress { processed, total } => {
+                                prefill_reported = true;
+                                stage = SummaryStage::Reading {
+                                    processed: *processed,
+                                    total: *total,
+                                };
+                            }
+                            Event::Delta(text) | Event::Reasoning(text) => {
+                                let bytes = match stage {
+                                    SummaryStage::Writing { bytes } => bytes,
+                                    _ => 0,
+                                };
+                                // Hidden reasoning advances the estimate more slowly.
+                                let weight = if matches!(event, Event::Delta(_)) {
+                                    text.len()
+                                } else {
+                                    text.len() / 4
+                                };
+                                stage = SummaryStage::Writing {
+                                    bytes: bytes + weight,
+                                };
+                            }
+                            _ => {}
+                        }
+                        if matches!(
+                            event,
+                            Event::PromptProgress { .. } | Event::Delta(_) | Event::Reasoning(_)
+                        ) {
+                            emit(progress.event(stage, prefill_reported));
+                        }
                         // Summary text is checkpoint data, not a user-facing answer.
-                        if !matches!(event, Event::Delta(_)) {
+                        if !matches!(event, Event::Delta(_) | Event::PromptProgress { .. }) {
                             emit(AgentEvent::Model(event));
                         }
                     })
@@ -392,7 +466,73 @@ impl<P: Provider> Agent<P> {
 
 #[cfg(test)]
 mod tests {
-    use super::handoff_limit;
+    use super::{SummaryProgress, handoff_limit};
+    use crate::agent::{AgentEvent, SummaryStage};
+
+    fn fraction(progress: &SummaryProgress, stage: SummaryStage, prefill: bool) -> f64 {
+        match progress.event(stage, prefill) {
+            AgentEvent::CompactionProgress { fraction, .. } => fraction,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn summary_progress_advances_monotonically_and_never_claims_completion() {
+        let second_of_two = SummaryProgress {
+            done: 600,
+            share: 400,
+            total: 1000,
+            target: 1000,
+            fragment: 2,
+        };
+        let stages = [
+            (SummaryStage::Waiting, true),
+            (
+                SummaryStage::Reading {
+                    processed: 10,
+                    total: 100,
+                },
+                true,
+            ),
+            (
+                SummaryStage::Reading {
+                    processed: 100,
+                    total: 100,
+                },
+                true,
+            ),
+            (SummaryStage::Writing { bytes: 200 }, true),
+            (SummaryStage::Writing { bytes: 50_000 }, true),
+        ];
+        let values: Vec<f64> = stages
+            .iter()
+            .map(|(stage, prefill)| fraction(&second_of_two, *stage, *prefill))
+            .collect();
+        assert!(
+            values.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{values:?}"
+        );
+        assert_eq!(values[0], 0.6, "earlier fragments count as done");
+        assert!(
+            (values[2] - 0.84).abs() < 1e-9,
+            "a read prompt is 60% of a fragment"
+        );
+        assert!(values[4] < 1.0);
+
+        // Without prefill reports, writing covers the whole fragment.
+        let only = SummaryProgress {
+            done: 0,
+            share: 1000,
+            total: 1000,
+            target: 1000,
+            fragment: 1,
+        };
+        assert!((fraction(&only, SummaryStage::Writing { bytes: 500 }, false) - 0.5).abs() < 1e-9);
+        assert_eq!(
+            fraction(&only, SummaryStage::Writing { bytes: 9_999 }, false),
+            0.97
+        );
+    }
 
     #[test]
     fn handoff_budget_scales_but_always_reclaims_most_old_context() {

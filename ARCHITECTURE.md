@@ -31,6 +31,7 @@ stateDiagram-v2
     ToolRecorded --> ToolsPending: more calls in batch
     ToolRecorded --> Pending: all results ready
     ToolClaimed --> NeedsInspection: process interrupted without durable result
+    ToolClaimed --> ToolRecorded: side-effect-free call interrupted; closed as retryable failure
     NeedsInspection --> Pending: record uncertainty and explicit continuation
 ```
 
@@ -135,7 +136,7 @@ Provider `OutputLimit` is a typed terminal generation failure. The agent may ret
 
 ### Bounded source inspection
 
-Whole-file reads are allowed through 200 lines; larger files require explicit start/end lines. All read results are limited to 500 lines and 12 KiB including formatting, rejecting oversized ranges rather than silently clipping source. Search returns at most 30 matches and 8 KiB with explicit truncation notices. Shell retains its separate 32 KiB cap; prompts discourage using it to bypass source-read limits, but command contents are not mechanically classified.
+Whole-file reads return files through 200 lines. A rangeless read of a larger file returns a declaration outline (tree-sitter where a grammar exists, line heuristics otherwise, rows written `L<line> <name>` so they are never parsed as numbered source) and the first 200 lines. All read results are limited to 500 lines and 12 KiB including formatting. An oversized range returns the lines that fit plus the exact continuation line; a single over-budget line is shown cut, with a note that it is not exact source. Every limit is stated in the result, so nothing is clipped silently and no request comes back empty. `multi_edit` applies ordered exact replacements in memory and writes once, so any failed replacement leaves the file untouched. Search returns at most 30 matches and 8 KiB with explicit truncation notices. Shell retains its separate 32 KiB cap; prompts discourage using it to bypass source-read limits, but command contents are not mechanically classified.
 
 Failed exact-text edits report the match count and keep the file unchanged. When the first nonblank old line has one whitespace-trimmed candidate, the error includes up to eight current source lines (2 KiB) as a diagnostic anchor. This is not fuzzy replacement: only a subsequent unique exact-text request can change the file. Line-number prefixes are omitted from this excerpt to avoid confusing them with source indentation. Edits with identical old/new text are rejected; writes of identical existing contents return UNCHANGED without a backup or write. Neither resets the investigation streak.
 
@@ -164,7 +165,9 @@ Progress and failure recovery never summarize, checkpoint, or archive context.
 Only configured context-pressure compaction and explicit `/compact` do that.
 
 Request-only progress guidance and a clearly labelled runtime continuation message
-are reserved in the context budget. They are not saved as new user instructions.
+are reserved in the context budget. The leading guidance text is identical for every
+guided round; the call count and read history change every round, so they are carried
+only in the trailing continuation, which keeps an endpoint's prompt-prefix cache valid. They are not saved as new user instructions.
 After the configured progress threshold, broad `list_files` and `search` discovery is
 removed from recovery requests until a successful typed file change or new user
 instruction resets the streak. Targeted reads, edits, and verification remain
@@ -207,6 +210,41 @@ Core owns revisioned memory records, FTS5, vector blobs, per-session proposed ta
 Every finding revision is immutable and current revisions advance with compare-and-swap. Forgetting tombstones retrieval while retaining audit rows. Source hashes and active original event sequences are validated at retrieval and update. Rewound evidence is never treated as current. Task proposals older than the latest user correction are omitted. Global preferences require explicit user commands; model-derived findings remain checkout scoped and cannot grant permission.
 
 A missing current-revision vector is a durable pending job. Model/prefix/revision fingerprints prevent mixing vector spaces; a late vector cannot attach to a newer revision. Bounded indexing retries during later idle maintenance and degrades to FTS on network failure. Derived packets remove whole optional records to meet a 6,000-byte cap; raw messages remain untouched and packet cost participates in context budgeting. Foreground packets use lexical retrieval so embedding work cannot delay a chat request. Extraction and vector indexing run only in a cancellable post-answer idle task; a new foreground request cancels that task first. Extraction is bounded and tool-free, and requests a JSON-mode response when the endpoint supports it. It saves individually atomic revisions, then task state; the durable cursor is marked done only after saving task state. A failed or cancelled batch keeps its cursor, so a later idle pass reconsiders the same evidence; partial batch progress is valid and no raw history is discarded. See [memory behavior and limits](docs/MEMORY.md).
+
+## Todo list
+
+`builder-core::todo` defines the typed list, its bounds and its derivation; `builder-tools`
+decodes and validates `todo_write`; the application owns the request-only reminder and
+rendering. There is no todo table. The current list is the newest successful `todo_write`
+request in active original history, so it persists across follow-up messages until the
+model replaces or completes it. Rewind retracts it with its turn. Compaction cannot remove
+it, because it is derived from original rows rather than the projection. Failed or invalid
+writes never become the list. While items remain, each request includes a leading system
+reminder with the checklist and current item, budgeted like other packets; recovery
+continuations name the current item. A successful write emits `TodosUpdated` after its
+`ToolFinished` so each adapter can draw the board. Writes are whole-list replacements with
+no side effects, so they are not replay-guarded. Like every non-edit tool, they consume the
+no-progress budget and never reset it. `pipeline.todos` removes the schema and rejects
+queued writes.
+
+Planning is nudged, not enforced, because only the model can judge whether it knows enough.
+From half of `progress_check_calls` with no unfinished list, a request-only trailing note
+suggests writing one. At the check, the trailing continuation becomes a decision prompt:
+successful reads since the latest `Changed` outcome (across user turns and compaction, per
+path, with whether the latest result is still in the projection), then ranked choices.
+Writing the list is recommended; a named, targeted read or an answer are the alternatives.
+With a list active, the choices center on its current item. Read-only sessions are asked for
+an answer instead. Tool availability is the same as ordinary progress recovery.
+`ProgressNudge` is emitted at each multiple of the check within a run, so the user sees a
+stalling run and its repeated-read count.
+
+## Parallel execution and subagents
+
+A tool batch is processed as consecutive groups. Admission, claiming and committing stay sequential and durable; only execution is concurrent. A group is either one call, or a run of side-effect-free calls (list, read, search, subagent) up to `parallel_tools`. The first call of a group keeps the original stop-and-explain checks. A later call that would cross the no-progress limit, or any call that is not side-effect free, ends the group and waits to lead the next one. Inspections run on blocking threads with a cloned `Workspace`. Results are committed and reported in call order, so the journal is identical to sequential execution. Such calls are claimed with `side_effect_free=1` (schema v13). An interrupted side-effect-free claim closes as a retryable failure, both when the agent resumes and inside `interrupt_turn`/`rewind`, instead of pausing for inspection. Legacy and mutating claims keep the uncertain path.
+
+`subagent` runs a complete `Agent` in a child session, created atomically with a `subagent_sessions` link to the parent session and call ID; one call starts at most one child. The child uses its own `Store` connection to the same journal. It gets the parent's profile with the research workflow, todos and subagents disabled, a later focus guard, `subagent_rounds`, no memory runtime, and `ApprovalMode::ReadOnly`. Its provider is `subagent::Delegated`, a view over the parent's model through the object-safe `builder_provider::DynProvider`. That view exposes only inspection tool schemas, and every nested agent has the same concrete type, so the recursive run is boxed once instead of instantiating an unbounded generic tower. Read-only approval independently denies anything a model requests outside that view. A semaphore bounds concurrent subagents. Children forward `SubagentProgress` events through a `RefCell` borrowed only for synchronous callbacks. The parent journal receives only the bounded report. If the child stops early (round budget, focus limit), its pending calls are closed and one tool-free request asks for a report; failures surface as ordinary tool errors. Child sessions are excluded from session and chat listings, but `resolve` finds them for export.
+
+Compaction emits `CompactionProgress` with an estimated fraction of the older transcript: completed fragments plus the current fragment's progress. Within a fragment, reported prompt processing counts for 60%, and output is measured against the handoff byte ceiling. The estimate never reaches 100% before the checkpoint is validated. The OpenAI-compatible transport turns llama.cpp `prompt_progress` stream chunks into `Event::PromptProgress`; other servers never send them. Each streamed tool-call delta also emits `Event::ToolProgress` (latest call name, call count, cumulative argument bytes), so the terminal can restore a live status after streamed prose cleared it; the enforced conclusion suppresses it with the other streamed output.
 
 ## Evidence-driven research runtime
 

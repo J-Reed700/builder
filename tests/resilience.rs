@@ -173,7 +173,7 @@ async fn progress_check_preserves_large_context_and_clears_after_edit() {
             &mut |e| {
                 if matches!(
                     e,
-                    builder::agent::AgentEvent::ExplorationRecovery { calls: 12 }
+                    builder::agent::AgentEvent::ProgressNudge { calls: 12, .. }
                 ) {
                     notices += 1;
                 }
@@ -220,8 +220,17 @@ async fn progress_check_preserves_large_context_and_clears_after_edit() {
         requests[0]["messages"][0]["content"]
             .as_str()
             .unwrap()
-            .contains("Runtime progress check: 12")
+            .contains("Runtime progress check: the configured number")
     );
+    // The count and the read history change every round, so they travel in
+    // the trailing continuation instead of the cached leading system block.
+    let nudge = recovered.last().unwrap()["content"].as_str().unwrap();
+    assert!(nudge.contains("Progress check: 12 tool calls"), "{nudge}");
+    assert!(
+        nudge.contains("12 successful reads of 1 file, 11 of them repeats: rate.ts ×12"),
+        "{nudge}"
+    );
+    assert!(nudge.contains("call todo_write now"), "{nudge}");
     assert!(
         !requests[1]["messages"]
             .to_string()
@@ -297,7 +306,7 @@ async fn unique_shell_commands_consume_durable_liveness_budget_after_restart() {
             &mut |event| {
                 if matches!(
                     event,
-                    builder::agent::AgentEvent::ExplorationRecovery { calls: 12 }
+                    builder::agent::AgentEvent::ProgressNudge { calls: 12, .. }
                 ) {
                     recoveries += 1;
                 }
@@ -314,7 +323,7 @@ async fn unique_shell_commands_consume_durable_liveness_budget_after_restart() {
     assert!(
         requests[0]["messages"]
             .to_string()
-            .contains("Runtime progress check: 12 tool calls")
+            .contains("Progress check: 12 tool calls")
     );
 }
 
@@ -1563,7 +1572,7 @@ async fn denied_shell_cannot_be_replayed_under_a_new_call_id() {
 }
 
 #[tokio::test]
-async fn giant_read_is_redirected_to_targeted_read_before_it_can_fill_context() {
+async fn giant_read_returns_a_bounded_opening_then_a_targeted_read() {
     let broad = read_message("broad", json!({"path":"large.ts"}));
     let narrow = read_message(
         "narrow",
@@ -1626,15 +1635,16 @@ async fn giant_read_is_redirected_to_targeted_read_before_it_can_fill_context() 
     let broad_result = requests[1]["messages"].as_array().unwrap().last().unwrap()["content"]
         .as_str()
         .unwrap();
-    assert!(broad_result.contains("Large file"));
-    assert!(!broad_result.contains("source line"));
+    assert!(broad_result.contains("large file"));
+    assert!(broad_result.contains("  200|source line 200"));
+    assert!(!broad_result.contains("source line 201"));
     let narrow_result = requests[2]["messages"].as_array().unwrap().last().unwrap()["content"]
         .as_str()
         .unwrap();
     assert!(narrow_result.contains("  490|source line 490"));
     assert!(narrow_result.contains("  510|source line 510"));
     assert!(!narrow_result.contains("source line 511"));
-    assert!(builder::agent::estimate_tokens(&store.messages(&session).unwrap()) < 2000);
+    assert!(builder::agent::estimate_tokens(&store.messages(&session).unwrap()) < 5000);
 }
 
 #[tokio::test]
@@ -3488,8 +3498,10 @@ async fn recovery_restricts_broad_discovery_and_rejects_unknown_batches() {
                 "read_file",
                 "write_file",
                 "edit_file",
+                "multi_edit",
                 "shell",
                 "research",
+                "todo_write",
                 "code_search",
             ]
         );
@@ -3517,7 +3529,7 @@ async fn recovery_restricts_broad_discovery_and_rejects_unknown_batches() {
         if outcome == "edit" {
             assert_eq!(
                 requests[5]["tools"].as_array().unwrap().len(),
-                8,
+                11,
                 "inspection must return after a successful edit"
             );
         }
@@ -3923,4 +3935,127 @@ async fn productive_work_passes_twenty_rounds_and_budget_pause_resumes_pending_c
         .await
         .unwrap();
     assert_eq!(server.mock.requests.lock().unwrap().len(), 22);
+}
+
+#[tokio::test]
+async fn streamed_tool_arguments_report_progress_after_prose() {
+    let body = format!(
+        "{}{}{}{}{}",
+        delta(json!({"content":"Now editing."})),
+        delta(json!({"tool_calls":[{"index":0,"id":"w1","type":"function",
+            "function":{"name":"write_file","arguments":"{\"path\":"}}]})),
+        delta(
+            json!({"tool_calls":[{"index":0,"function":{"arguments":"\"a.txt\",\"content\":\"x\"}"}}]})
+        ),
+        delta(json!({"tool_calls":[{"index":1,"id":"r1","type":"function",
+            "function":{"name":"read_file","arguments":"{}"}}]})),
+        finish("tool_calls")
+    );
+    let server = server(vec![(StatusCode::OK, body)]).await;
+    let provider = OpenAiCompatible::new(server.profile.clone()).unwrap();
+    let mut seen = Vec::new();
+    let message = provider
+        .complete(&[Message::text(Role::User, "hi")], &[], &mut |event| {
+            if let Event::ToolProgress { name, calls, bytes } = event {
+                seen.push((name, calls, bytes));
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(message.tool_calls.len(), 2);
+    assert_eq!(
+        seen,
+        [
+            ("write_file".to_owned(), 1, 8),
+            ("write_file".to_owned(), 1, 30),
+            ("read_file".to_owned(), 2, 32),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn reported_prompt_processing_becomes_progress_and_drives_the_summary_bar() {
+    let progress = |processed: u64| {
+        format!(
+            "data: {}\n\n",
+            json!({"choices":[],"prompt_progress":{"total":400,"cache":0,"processed":processed,"time_ms":5}})
+        )
+    };
+    let body = format!(
+        "{}{}{}{}",
+        progress(100),
+        progress(400),
+        delta(json!({"content":"Handoff: keep going."})),
+        finish("stop")
+    );
+    let server = server(vec![(StatusCode::OK, body.clone()), (StatusCode::OK, body)]).await;
+    let provider = OpenAiCompatible::new(server.profile.clone()).unwrap();
+    let mut seen = Vec::new();
+    let message = provider
+        .complete(&[Message::text(Role::User, "hi")], &[], &mut |event| {
+            if let Event::PromptProgress { processed, total } = event {
+                seen.push((processed, total));
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(message.content.as_deref(), Some("Handoff: keep going."));
+    assert_eq!(seen, [(100, 400), (400, 400)]);
+
+    // The same stream, summarizing context, yields a rising bar that is
+    // never shown as complete before the checkpoint is saved.
+    let home = tempfile::tempdir().unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    let session = store
+        .create("progress", "local", home.path(), "system")
+        .unwrap();
+    for turn in 0..3 {
+        store
+            .append(
+                &session,
+                &Message::text(Role::User, format!("question {turn}")),
+            )
+            .unwrap();
+        store
+            .append(
+                &session,
+                &Message::text(Role::Assistant, "older evidence ".repeat(900)),
+            )
+            .unwrap();
+    }
+    let agent = Agent {
+        memory: None,
+        provider,
+        profile: server.profile.clone(),
+        workspace: Workspace::new(home.path()).unwrap(),
+        session: session.clone(),
+        approval: ApprovalMode::Trust,
+        max_rounds: 1,
+    };
+    let mut fractions = Vec::new();
+    let mut compacted = false;
+    assert!(
+        agent
+            .compact(&mut store, &mut |event| match event {
+                builder::agent::AgentEvent::CompactionProgress { fraction, .. } => {
+                    fractions.push(fraction)
+                }
+                builder::agent::AgentEvent::Compacted { .. } => compacted = true,
+                _ => {}
+            })
+            .await
+            .unwrap()
+    );
+    assert!(compacted);
+    assert!(fractions.len() >= 4, "{fractions:?}");
+    assert!(
+        fractions.windows(2).all(|pair| pair[0] <= pair[1]),
+        "{fractions:?}"
+    );
+    assert!(
+        fractions[0] < 0.01
+            && fractions
+                .last()
+                .is_some_and(|last| *last > 0.6 && *last < 1.0)
+    );
 }

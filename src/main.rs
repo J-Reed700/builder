@@ -395,6 +395,29 @@ async fn app(cli: Cli) -> Result<()> {
             MemoryCommand::Task { session } => {
                 serde_json::json!(store.memory_task(&store.resolve(session)?.id)?)
             }
+            MemoryCommand::Refresh { session } => {
+                let saved = store.resolve(session)?;
+                let _guard = store.lock(&saved.id)?;
+                let workspace = Workspace::new(std::path::Path::new(&saved.workspace))?;
+                let (_, profile) =
+                    config.profile(cli.profile.as_deref().or(Some(&saved.profile)))?;
+                let provider = MemoryRuntime::extraction_provider(&profile)?;
+                let runtime =
+                    MemoryRuntime::from_config(&config)?.context("Enable memory first")?;
+                let extracted = runtime
+                    .extract(
+                        &provider,
+                        &mut store,
+                        &saved.id,
+                        &workspace,
+                        true,
+                        (profile.context_tokens, &mut |_| {}),
+                    )
+                    .await?;
+                runtime.index_pending(&mut store, &workspace).await?;
+                serde_json::json!({"session":saved.id,"workspace":workspace.root(),"extracted":extracted,
+                    "checkout_records":store.memory_list(&MemoryRuntime::scope(&workspace))?.len()})
+            }
             MemoryCommand::Search { query } => {
                 let runtime =
                     MemoryRuntime::from_config(&config)?.unwrap_or_else(MemoryRuntime::lexical);
@@ -591,6 +614,12 @@ async fn app(cli: Cli) -> Result<()> {
         if let Some(answer) = restored_answer(&existing) {
             println!("\n{}\n", ui::safe(answer));
         }
+        if let Some(list) = store
+            .todos(&agent.session)?
+            .filter(|list| !list.is_finished())
+        {
+            ui::print_todos(&list);
+        }
     }
     if pending(&existing) {
         eprintln!("  Paused turn restored. Send a follow-up, /retry, /cancel, or /rewind.");
@@ -648,7 +677,7 @@ async fn app(cli: Cli) -> Result<()> {
         match line {
             "/exit" | "/quit" => break,
             "/help" => println!(
-                "\n  /status         Session, context estimate, and recovery state\n  /settings       Open pipeline settings menu\n  /memory         Local memory settings and model setup\n  /history        Show active conversation (/history archived shows rewound turns)\n  /cancel         End pending work; keep completed context\n  /rewind         Archive the last turn and edit its user message (files stay changed)\n  /retry          Continue an unfinished turn\n  /compact        Summarize context now; preserve originals\n  /attach PATH    Send a workspace file into the conversation\n  /exit           Save and leave\n\nEdits and commands require approval unless --auto or --approval trust is set.\nEnter sends · Alt+Enter / Ctrl+J inserts a new line\nCtrl+V pastes directly from clipboard (macOS)\nCtrl+Z undo · Ctrl+Y redo · Ctrl+W delete word · Ctrl+U clear\n↑/↓ navigate lines (history when empty) · Ctrl+P/N history\n/ opens commands · ↑/↓ browse · Tab or Enter completes · Enter runs · Esc closes\nLarge pastes fold into blocks; their full text is sent on Enter.\nCtrl+C during a response pauses it; send a follow-up to change direction.\nAll messages are saved automatically. Rewound turns remain archived.\n"
+                "\n  /status         Session, context estimate, and recovery state\n  /settings       Open pipeline settings menu\n  /memory         Local memory settings and model setup\n  /history        Show active conversation (/history archived shows rewound turns)\n  /todo           Show the agent's current todo list\n  /cancel         End pending work; keep completed context\n  /rewind         Archive the last turn and edit its user message (files stay changed)\n  /retry          Continue an unfinished turn\n  /compact        Summarize context now; preserve originals\n  /attach PATH    Send a workspace file into the conversation\n  /exit           Save and leave\n\nEdits and commands require approval unless --auto or --approval trust is set.\nEnter sends · Alt+Enter / Ctrl+J inserts a new line\nCtrl+V pastes directly from clipboard (macOS)\nCtrl+Z undo · Ctrl+Y redo · Ctrl+W delete word · Ctrl+U clear\n↑/↓ navigate lines (history when empty) · Ctrl+P/N history\n/ opens commands · ↑/↓ browse · Tab or Enter completes · Enter runs · Esc closes\nLarge pastes fold into blocks; their full text is sent on Enter.\nCtrl+C during a response pauses it; send a follow-up to change direction.\nAll messages are saved automatically. Rewound turns remain archived.\n"
             ),
             "/memory" => {
                 stop_memory_task(&mut memory_task).await;
@@ -747,6 +776,16 @@ async fn app(cli: Cli) -> Result<()> {
                     || configured_index_update_mode(&agent.profile),
                     MemoryTask::index_update_description,
                 );
+                let memory_status = memory_task
+                    .as_ref()
+                    .and_then(|task| task.memory_status.lock().ok().map(|s| s.clone()))
+                    .unwrap_or_else(|| {
+                        if agent.memory.is_some() {
+                            "enabled; worker idle or paused".into()
+                        } else {
+                            "disabled".into()
+                        }
+                    });
                 let index = index_status
                     .map(|status| {
                         let vectors = coverage
@@ -770,7 +809,7 @@ async fn app(cli: Cli) -> Result<()> {
                     })
                     .unwrap_or_else(|| "not built yet".into());
                 println!(
-                    "\nSession: {}\nMessages: {}\nEstimated history tokens: {} / {} ({} reserved for output; tool schemas extra)\nState: {}\nStorage: {}\nModel: {}\nCode index: {}\nAgent rounds per run: {}\nProgress guard: focus after {} tool calls; tool-free conclusion at {}; full context preserved\nFailure guard: recover after {} consecutive failures; {} recovery rounds\nTool limits: {} per response; {} completed identical shell calls\nCompaction: {}\n",
+                    "\nSession: {}\nMessages: {}\nEstimated history tokens: {} / {} ({} reserved for output; tool schemas extra)\nState: {}\nStorage: {}\nModel: {}\nCode index: {}\nMemory: {}\nAgent rounds per run: {}\nProgress guard: focus after {} tool calls; tool-free conclusion at {}; full context preserved\nFailure guard: recover after {} consecutive failures; {} recovery rounds\nTool limits: {} per response; {} completed identical shell calls\nCompaction: {}\n",
                     agent.session,
                     messages.len(),
                     estimate_tokens(&messages),
@@ -784,6 +823,7 @@ async fn app(cli: Cli) -> Result<()> {
                     home.display(),
                     ui::safe(&agent.profile.model),
                     ui::safe(&index),
+                    ui::safe(&memory_status),
                     agent.max_rounds,
                     agent.profile.pipeline.progress_check_calls,
                     agent.profile.pipeline.max_no_progress_calls(),
@@ -815,6 +855,12 @@ async fn app(cli: Cli) -> Result<()> {
                     );
                 }
             }
+            "/todo" => match store.todos(&agent.session)? {
+                Some(list) => ui::print_todos(&list),
+                None => println!(
+                    "No todo list yet. The agent writes one when it is ready to implement multi-step work."
+                ),
+            },
             "/cancel" => {
                 stop_memory_task(&mut memory_task).await;
                 match store.interrupt_turn(&agent.session, None) {
@@ -966,6 +1012,7 @@ struct MemoryTask {
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
     stopped: tokio::sync::oneshot::Receiver<()>,
     index_updates: std::sync::Arc<std::sync::Mutex<IndexUpdateState>>,
+    memory_status: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1091,6 +1138,10 @@ fn start_memory_task(
         },
     ));
     let worker_index_updates = index_updates.clone();
+    let memory_status = std::sync::Arc::new(std::sync::Mutex::new(
+        "waiting for idle maintenance".to_string(),
+    ));
+    let worker_memory_status = memory_status.clone();
     std::thread::Builder::new()
         .name("builder-memory".into())
         .spawn(move || {
@@ -1102,17 +1153,22 @@ fn start_memory_task(
                 return;
             };
             runtime.block_on(async move {
-                let memory = builder::memory::MemoryRuntime::from_config(&config)
-                    .ok()
-                    .flatten();
-                let Ok(provider) = OpenAiCompatible::new(profile.clone()) else {
-                    return;
-                };
-                let Ok(workspace) = Workspace::new(&workspace) else {
-                    return;
-                };
-                let Ok(mut store) = Store::open(&home) else {
-                    return;
+                let setup = (|| -> Result<_> {
+                    Ok((
+                        builder::memory::MemoryRuntime::from_config(&config)?,
+                        builder::memory::MemoryRuntime::extraction_provider(&profile)?,
+                        Workspace::new(&workspace)?,
+                        Store::open(&home)?,
+                    ))
+                })();
+                let (memory, provider, workspace, mut store) = match setup {
+                    Ok(setup) => setup,
+                    Err(error) => {
+                        if let Ok(mut status) = worker_memory_status.lock() {
+                            *status = format!("maintenance could not start: {error}");
+                        }
+                        return;
+                    }
                 };
                 let maintenance = async {
                     let mut code_watch = if profile.pipeline.code_index
@@ -1126,29 +1182,52 @@ fn start_memory_task(
                         }
                         None
                     };
-                    if profile.pipeline.code_index && profile.pipeline.code_index_background {
-                        let _ = builder::code_index::maintain(
-                            &mut store,
-                            &workspace,
-                            memory.as_ref(),
-                            &profile.pipeline,
-                            code_watch.as_mut(),
-                        )
-                        .await;
-                    }
-                    if let Some(memory) = &memory {
-                        let _ = memory
-                            .maintain(
-                                &provider,
-                                &mut store,
-                                &session,
+                    // Separate connections let extraction retry
+                    // while a large code-vector queue is still being drained.
+                    let memory_work = async {
+                        let Some(memory) = &memory else {
+                            if let Ok(mut status) = worker_memory_status.lock() {
+                                *status = "disabled".into();
+                            }
+                            return;
+                        };
+                        loop {
+                            let result = memory
+                                .maintain(
+                                    &provider,
+                                    &mut store,
+                                    &session,
+                                    &workspace,
+                                    profile.context_tokens,
+                                )
+                                .await;
+                            if let Ok(mut status) = worker_memory_status.lock() {
+                                *status = match result {
+                                    Ok(()) => "idle pass complete; no extraction error".into(),
+                                    Err(error) => {
+                                        format!("maintenance failed; will retry: {error}")
+                                    }
+                                };
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        }
+                    };
+                    let code_work = async {
+                        if !profile.pipeline.code_index || !profile.pipeline.code_index_background {
+                            return;
+                        }
+                        let Ok(mut code_store) = Store::open(&home) else {
+                            return;
+                        };
+                        loop {
+                            let _ = builder::code_index::maintain(
+                                &mut code_store,
                                 &workspace,
-                                profile.context_tokens,
+                                memory.as_ref(),
+                                &profile.pipeline,
+                                code_watch.as_mut(),
                             )
                             .await;
-                    }
-                    if profile.pipeline.code_index && profile.pipeline.code_index_background {
-                        loop {
                             if let Some(watch) = &mut code_watch {
                                 let _ = watch
                                     .wait(
@@ -1162,16 +1241,9 @@ fn start_memory_task(
                                 ))
                                 .await;
                             }
-                            let _ = builder::code_index::maintain(
-                                &mut store,
-                                &workspace,
-                                memory.as_ref(),
-                                &profile.pipeline,
-                                code_watch.as_mut(),
-                            )
-                            .await;
                         }
-                    }
+                    };
+                    tokio::join!(biased; memory_work, code_work);
                 };
                 tokio::select! { _ = cancelled => {}, _ = maintenance => {} }
             });
@@ -1183,6 +1255,7 @@ fn start_memory_task(
         cancel: Some(cancel),
         stopped: stopped_rx,
         index_updates,
+        memory_status,
     })
 }
 
@@ -1303,6 +1376,7 @@ mod tests {
 
         let (_cancel, stopped) = tokio::sync::oneshot::channel();
         let task = MemoryTask {
+            memory_status: Default::default(),
             cancel: None,
             stopped,
             index_updates: std::sync::Arc::new(std::sync::Mutex::new(state)),
@@ -1313,6 +1387,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idle_worker_extracts_while_code_embeddings_are_stalled() {
+        use axum::{Json, Router, routing::post};
+        use builder_core::{
+            config::{EmbeddingBackend, ModelRole},
+            protocol::{Function, ToolCall},
+        };
+        use serde_json::json;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let profile = Profile {
+            base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
+            stream: false,
+            extra_body: std::collections::BTreeMap::from([(
+                "chat_template_kwargs".into(),
+                json!({"enable_thinking":true}),
+            )]),
+            roles: vec![ModelRole::Chat, ModelRole::Embed],
+            ..Default::default()
+        };
+        let app = Router::new()
+            .route("/v1/chat/completions", post(|Json(request): Json<serde_json::Value>| async move {
+                assert_eq!(request["chat_template_kwargs"]["enable_thinking"], false);
+                Json(json!({"choices":[{"message":{"role":"assistant","content":json!({
+                    "findings":[{"key":"shield", "text":"Shield rate is 0.025", "evidence_call_ids":["read"]}],
+                    "next_action":"no remaining action observed", "questions":[]
+                }).to_string()},"finish_reason":"stop"}]}))
+            }))
+            .route("/v1/embeddings", post(|| async {
+                std::future::pending::<Json<serde_json::Value>>().await
+            }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("shield.rs"),
+            "pub fn shield() -> f32 { 0.025 }\n",
+        )
+        .unwrap();
+        let workspace = Workspace::new(root.path()).unwrap();
+        let mut store = Store::open(home.path()).unwrap();
+        let session = store
+            .create("idle worker", "test", root.path(), SYSTEM)
+            .unwrap();
+        let mut call = Message::text(Role::Assistant, "");
+        call.tool_calls.push(ToolCall {
+            id: "read".into(),
+            kind: "function".into(),
+            function: Function {
+                name: "read_file".into(),
+                arguments: json!({"path":"shield.rs"}).to_string(),
+            },
+        });
+        store.append(&session, &call).unwrap();
+        store.claim_tool(&session, "read").unwrap();
+        let result = workspace
+            .execute(&builder_tools::Action::ReadFile {
+                path: "shield.rs".into(),
+                start_line: None,
+                end_line: None,
+            })
+            .await
+            .unwrap();
+        store.complete_tool(&session, "read", &result).unwrap();
+        store
+            .append(&session, &Message::text(Role::Assistant, "Done."))
+            .unwrap();
+        let mut config = Config::default();
+        config.memory.enabled = true;
+        config.memory.embedding_backend = EmbeddingBackend::Remote;
+        config.memory.embedding_profile = Some("test".into());
+        config.profiles.insert("test".into(), profile.clone());
+        let agent = Agent {
+            provider: OpenAiCompatible::new(profile.clone()).unwrap(),
+            profile,
+            memory: builder::memory::MemoryRuntime::from_config(&config).unwrap(),
+            workspace,
+            session,
+            approval: ApprovalMode::ReadOnly,
+            max_rounds: 2,
+        };
+        let mut task = start_memory_task(&agent, home.path(), &config);
+        assert_eq!(
+            agent.profile.extra_body["chat_template_kwargs"]["enable_thinking"],
+            true
+        );
+        let scope = builder::memory::MemoryRuntime::scope(&agent.workspace);
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while store.memory_list(&scope).unwrap().is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        stop_memory_task(&mut task).await;
+        server.abort();
+        assert!(
+            outcome.is_ok(),
+            "a blocked embedding queue must not starve extraction"
+        );
+        assert!(
+            task.is_none(),
+            "idle work must cancel before foreground work"
+        );
+    }
+
+    #[tokio::test]
     async fn timed_out_maintenance_remains_owned_until_it_stops() {
         let (cancel, mut cancelled) = tokio::sync::oneshot::channel();
         let (stopped_tx, stopped) = tokio::sync::oneshot::channel();
@@ -1320,6 +1498,7 @@ mod tests {
             cancel: Some(cancel),
             stopped,
             index_updates: std::sync::Arc::new(std::sync::Mutex::new(IndexUpdateState::Starting)),
+            memory_status: Default::default(),
         });
 
         stop_memory_task(&mut task).await;

@@ -26,7 +26,7 @@ impl Store {
 
     pub fn sessions_page(&self, workspace: &Path, offset: u32) -> Result<Vec<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id,title,profile,workspace,updated_at FROM sessions WHERE workspace=?1 ORDER BY updated_at DESC,id LIMIT 50 OFFSET ?2",
+            "SELECT id,title,profile,workspace,updated_at FROM sessions WHERE workspace=?1 AND id NOT IN (SELECT session_id FROM subagent_sessions) ORDER BY updated_at DESC,id LIMIT 50 OFFSET ?2",
         )?;
         let rows = stmt.query_map(params![workspace.to_string_lossy(), offset], session_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -151,7 +151,7 @@ impl Store {
         };
         let mut stmt = self.conn.prepare(&format!("SELECT s.id,s.title,s.profile,s.workspace,s.updated_at,COALESCE(m.archived,0)
             FROM sessions s LEFT JOIN chat_metadata m ON m.session_id=s.id
-            WHERE {scope} AND COALESCE(m.archived,0)=?2 AND instr(lower(s.title || ' ' || s.id), lower(?3))>0
+            WHERE {scope} AND s.id NOT IN (SELECT session_id FROM subagent_sessions) AND COALESCE(m.archived,0)=?2 AND instr(lower(s.title || ' ' || s.id), lower(?3))>0
             ORDER BY s.updated_at DESC,s.id LIMIT 50 OFFSET ?4"))?;
         Ok(stmt
             .query_map(

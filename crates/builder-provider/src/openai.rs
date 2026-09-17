@@ -265,6 +265,16 @@ impl OpenAiCompatible {
                 if value.get("error").is_some() {
                     return Err(Failure::transient("Endpoint returned an in-stream error"));
                 }
+                let progress = &value["prompt_progress"];
+                if let (Some(processed), Some(total)) =
+                    (progress["processed"].as_u64(), progress["total"].as_u64())
+                    && total > 0
+                {
+                    emit(Event::PromptProgress {
+                        processed: processed.min(total),
+                        total,
+                    });
+                }
                 let choice = &value["choices"][0];
                 if let Some(reason) = choice["finish_reason"].as_str() {
                     finish = Some(reason.to_owned());
@@ -311,6 +321,16 @@ impl OpenAiCompatible {
                         if let Some(args) = part["function"]["arguments"].as_str() {
                             call.function.arguments.push_str(args);
                         }
+                    }
+                    if let Some(latest) = calls.values().next_back() {
+                        emit(Event::ToolProgress {
+                            name: latest.function.name.clone(),
+                            calls: calls.len(),
+                            bytes: calls
+                                .values()
+                                .map(|call| call.function.arguments.len())
+                                .sum(),
+                        });
                     }
                 }
             }

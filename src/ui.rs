@@ -1,4 +1,4 @@
-use crate::agent::AgentEvent;
+use crate::agent::{AgentEvent, SummaryStage};
 use builder_provider::{Activity, Event};
 use builder_tools::Action;
 use console::style;
@@ -10,6 +10,7 @@ use std::sync::{
 
 pub mod stream;
 pub mod theme;
+pub mod todo;
 
 pub fn safe(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -47,12 +48,24 @@ pub struct Renderer {
     started_at: std::time::Instant,
     bytes: usize,
     compacting: bool,
+    /// The spinner slot currently holds the summarization progress bar.
+    summary_bar: bool,
     heading_printed: bool,
     tool_started_at: Option<std::time::Instant>,
     tools: usize,
     reflow: stream::Reflow,
     prompt_tokens: usize,
     model_activity: Option<ModelActivity>,
+    /// Tools started and not yet finished; more than one means a parallel group.
+    running: Vec<(String, String)>,
+    /// Latest progress per running subagent, keyed by call ID.
+    subagents: std::collections::BTreeMap<String, SubagentStatus>,
+}
+
+struct SubagentStatus {
+    description: String,
+    actions: usize,
+    activity: String,
 }
 
 const NO_MODEL_ACTIVITY: u64 = u64::MAX;
@@ -100,12 +113,15 @@ impl Renderer {
             started_at: std::time::Instant::now(),
             bytes: 0,
             compacting: false,
+            summary_bar: false,
             heading_printed: false,
             tool_started_at: None,
             tools: 0,
             reflow: stream::Reflow::default(),
             prompt_tokens: 0,
             model_activity: None,
+            running: Vec::new(),
+            subagents: std::collections::BTreeMap::new(),
         }
     }
     pub fn event(&mut self, event: AgentEvent) {
@@ -166,6 +182,37 @@ impl Renderer {
                 );
                 let _ = context_tokens;
             }
+            AgentEvent::CompactionProgress {
+                fraction,
+                fragment,
+                stage,
+            } => {
+                if !self.interactive {
+                    return;
+                }
+                if !self.summary_bar {
+                    self.clear_spinner();
+                    self.start_summary_bar();
+                }
+                let part = if fragment > 1 {
+                    format!("part {fragment} · ")
+                } else {
+                    String::new()
+                };
+                let detail = match stage {
+                    SummaryStage::Waiting => "waiting for the model".to_owned(),
+                    SummaryStage::Reading { processed, total } => format!(
+                        "reading {} of {} prompt tokens",
+                        compact_count(processed),
+                        compact_count(total)
+                    ),
+                    SummaryStage::Writing { .. } => "writing the summary".to_owned(),
+                };
+                if let Some(bar) = &self.spinner {
+                    bar.set_position((fraction.clamp(0.0, 1.0) * 1000.0) as u64);
+                    bar.set_message(format!("{part}{detail}"));
+                }
+            }
             AgentEvent::SummaryRecovery { size, limit } => {
                 self.finish_stream();
                 self.clear_spinner();
@@ -189,8 +236,21 @@ impl Renderer {
                 eprintln!(
                     "\n  {}",
                     theme::muted(&format!(
-                        "Refocusing after {calls} actions without a file change · context preserved"
+                        "Recovering after {calls} failed actions · context preserved"
                     ))
+                );
+            }
+            AgentEvent::ProgressNudge {
+                calls,
+                step,
+                repeated_reads,
+                planning,
+            } => {
+                self.finish_stream();
+                self.clear_spinner();
+                eprintln!(
+                    "\n  {}",
+                    theme::warning(&nudge_line(calls, step, repeated_reads, planning))
                 );
             }
             AgentEvent::OutputRecovery { budget } => {
@@ -229,15 +289,12 @@ impl Renderer {
                         self.started = false;
                         self.reflow.reset();
                     }
-                    self.tool_started_at = Some(std::time::Instant::now());
-                    let label = tool_label(&name);
-                    self.start_spinner(
-                        match self.fit(&detail, label.len() + 36) {
-                            detail if detail.is_empty() => format!("{label} · ctrl+c cancel"),
-                            detail => format!("{label}  {detail} · ctrl+c cancel"),
-                        },
-                        false,
-                    );
+                    if self.running.is_empty() {
+                        self.tool_started_at = Some(std::time::Instant::now());
+                    }
+                    self.running.push((name, detail));
+                    let message = self.running_message();
+                    self.start_spinner(message, false);
                 }
             }
             AgentEvent::ToolFinished {
@@ -249,13 +306,83 @@ impl Renderer {
                 if self.interactive {
                     self.clear_spinner();
                     self.tools += 1;
+                    if let Some(index) = self.running.iter().position(|(n, _)| *n == name) {
+                        self.running.remove(index);
+                    }
+                    // Every row of a parallel group reports the group's time.
                     let elapsed = self
                         .tool_started_at
-                        .take()
                         .map_or(0.0, |time| time.elapsed().as_secs_f64());
-                    self.print_tool_result(&name, &detail, note.as_deref(), failed, elapsed);
+                    if self.running.is_empty() {
+                        self.tool_started_at = None;
+                        self.subagents.clear();
+                    }
+                    // A recorded todo list is shown as its board instead.
+                    if failed || name != builder_core::todo::TOOL {
+                        self.print_tool_result(&name, &detail, note.as_deref(), failed, elapsed);
+                    }
                 }
             }
+            AgentEvent::SubagentProgress {
+                call_id,
+                description,
+                actions,
+                activity,
+            } => {
+                self.subagents.insert(
+                    call_id,
+                    SubagentStatus {
+                        description,
+                        actions,
+                        activity,
+                    },
+                );
+                let message = self.running_message();
+                if let Some(spinner) = &self.spinner {
+                    spinner.set_message(self.fit(&message, 14));
+                }
+            }
+            AgentEvent::TodosUpdated(list) => {
+                if self.interactive {
+                    self.finish_stream();
+                    self.clear_spinner();
+                    print_todos(&list);
+                }
+            }
+        }
+    }
+    /// One spinner line for whatever is running: a single tool, a parallel
+    /// group, or subagents with their latest activity.
+    fn running_message(&self) -> String {
+        let subagents = self
+            .running
+            .iter()
+            .filter(|(name, _)| name == builder_tools::SUBAGENT_TOOL)
+            .count();
+        let latest = self.subagents.values().max_by_key(|status| status.actions);
+        match (self.running.as_slice(), latest) {
+            ([(name, detail)], None) => {
+                let label = tool_label(name);
+                match self.fit(detail, label.len() + 36) {
+                    detail if detail.is_empty() => format!("{label} · ctrl+c cancel"),
+                    detail => format!("{label}  {detail} · ctrl+c cancel"),
+                }
+            }
+            ([_], Some(status)) => format!(
+                "Subagent  {} · {} actions · {} · ctrl+c cancel",
+                status.description, status.actions, status.activity
+            ),
+            (running, Some(status)) => format!(
+                "{} running ({subagents} subagents, {} actions) · {}: {} · ctrl+c cancel",
+                running.len(),
+                self.subagents.values().map(|s| s.actions).sum::<usize>(),
+                status.description,
+                status.activity
+            ),
+            (running, None) => format!(
+                "Running {} actions in parallel · ctrl+c cancel",
+                running.len()
+            ),
         }
     }
     /// The current request size, in the same estimated tokens the agent budgets
@@ -342,6 +469,21 @@ impl Renderer {
             spinner.finish_and_clear();
         }
         self.model_activity = None;
+        self.summary_bar = false;
+    }
+    fn start_summary_bar(&mut self) {
+        let bar = indicatif::ProgressBar::new(1000);
+        bar.set_style(
+            indicatif::ProgressStyle::with_template(
+                "  {spinner:.cyan} Summarizing {bar:28.117/238} {percent:>3}%  {msg:.dim} · {elapsed:.dim} · ctrl+c cancel",
+            )
+            .expect("static progress template")
+            .progress_chars("━╸─")
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+        );
+        bar.enable_steady_tick(std::time::Duration::from_millis(120));
+        self.spinner = Some(bar);
+        self.summary_bar = true;
     }
     fn start_spinner(&mut self, message: String, tracks_activity: bool) {
         let spinner = indicatif::ProgressBar::new_spinner();
@@ -380,9 +522,27 @@ impl Renderer {
             // The estimator the agent budgets with, so the waiting states and
             // the compaction notice quote the same number.
             Event::Prompt { bytes } => self.prompt_tokens = bytes.div_ceil(2),
+            Event::PromptProgress { processed, total } => {
+                self.record_model_activity();
+                if !self.compacting
+                    && let Some(spinner) = &self.spinner
+                {
+                    spinner.set_message(self.fit(
+                        &format!(
+                            "Reading {} of {} prompt tokens · ctrl+c cancel",
+                            compact_count(processed),
+                            compact_count(total)
+                        ),
+                        14,
+                    ));
+                }
+            }
             Event::Activity(activity) => {
                 if !matches!(activity, Activity::Connected) {
                     self.record_model_activity();
+                }
+                if self.summary_bar {
+                    return;
                 }
                 let size = self.prompt_size();
                 if let Some(spinner) = &self.spinner {
@@ -407,6 +567,10 @@ impl Renderer {
                 self.started = false;
                 self.reflow.reset();
                 self.pending.reset();
+                // The summarization bar stays in place across fragment requests.
+                if self.interactive && self.summary_bar {
+                    return;
+                }
                 if self.interactive {
                     self.clear_spinner();
                     if !self.heading_printed || number > 1 {
@@ -438,6 +602,39 @@ impl Renderer {
             // Reasoning stays out of the terminal; the spinner already says the
             // model is thinking, and the transcript keeps it for remote viewers.
             Event::Reasoning(_) => self.record_model_activity(),
+            Event::ToolProgress { name, calls, bytes } => {
+                if !self.interactive || self.compacting || self.summary_bar {
+                    return;
+                }
+                let action = if name.is_empty() {
+                    "an action".to_owned()
+                } else {
+                    tool_label(&name)
+                };
+                let batch = if calls > 1 {
+                    format!(" (action {calls})")
+                } else {
+                    String::new()
+                };
+                let message = format!(
+                    "Preparing {action}{batch} · {} chars written · ctrl+c cancel",
+                    compact_count(bytes as u64)
+                );
+                if self.spinner.is_none() {
+                    // Streamed prose cleared the spinner. A large edit can take
+                    // minutes to generate, so show that the response continues.
+                    self.finish_stream();
+                    if self.started {
+                        println!();
+                        self.started = false;
+                        self.reflow.reset();
+                    }
+                    self.start_spinner(message, true);
+                } else if let Some(spinner) = &self.spinner {
+                    spinner.set_message(self.fit(&message, 14));
+                }
+                self.record_model_activity();
+            }
             Event::Retry { delay_ms, reason } => {
                 self.finish_stream();
                 self.clear_spinner();
@@ -517,6 +714,38 @@ fn token_count(tokens: usize) -> String {
     }
 }
 
+/// The user-facing record of a progress nudge. Shared with remote clients.
+pub fn nudge_line(
+    calls: usize,
+    step: Option<(usize, usize)>,
+    repeated_reads: usize,
+    planning: bool,
+) -> String {
+    let mut line = format!("{calls} actions without a file change");
+    if repeated_reads > 0 {
+        line.push_str(&format!(
+            " · {repeated_reads} repeated read{}",
+            if repeated_reads == 1 { "" } else { "s" }
+        ));
+    }
+    match step {
+        Some((number, total)) => {
+            line.push_str(&format!(" · nudged back to todo step {number} of {total}"))
+        }
+        None if planning => line.push_str(" · no plan yet, nudged to write a todo list"),
+        None => line.push_str(" · nudged to act on what it found"),
+    }
+    line
+}
+
+fn compact_count(count: u64) -> String {
+    if count < 1000 {
+        count.to_string()
+    } else {
+        format!("{:.1}k", count as f64 / 1000.0)
+    }
+}
+
 fn short_duration(seconds: f64) -> String {
     if seconds < 10.0 {
         format!("{seconds:.1}s")
@@ -543,17 +772,26 @@ fn long_duration(seconds: f64) -> String {
 fn tool_label(name: &str) -> String {
     match name {
         "read_file" => "Read file".into(),
-        "edit_file" => "Edit file".into(),
+        "edit_file" | "multi_edit" => "Edit file".into(),
+        builder_tools::SUBAGENT_TOOL => "Subagent".into(),
         "write_file" => "Write file".into(),
         "list_files" => "List files".into(),
         "search" => "Search".into(),
         "shell" => "Run command".into(),
+        builder_core::todo::TOOL => "Todo".into(),
         _ => safe(name).replace('_', " "),
     }
 }
 impl Drop for Renderer {
     fn drop(&mut self) {
         self.clear_spinner();
+    }
+}
+pub fn print_todos(list: &builder_core::todo::List) {
+    let width = (console::Term::stderr().size().1 as usize).clamp(20, 100);
+    eprintln!();
+    for line in todo::board(list, width) {
+        eprintln!("{line}");
     }
 }
 pub fn approve(action: &Action) -> bool {

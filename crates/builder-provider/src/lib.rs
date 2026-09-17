@@ -7,7 +7,7 @@ use builder_core::protocol::Message;
 pub use openai::OpenAiCompatible;
 use serde_json::Value;
 pub use sse::SseDecoder;
-use std::future::Future;
+use std::{future::Future, pin::Pin};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Activity {
@@ -32,6 +32,21 @@ pub enum Event {
     Retry {
         delay_ms: u64,
         reason: String,
+    },
+    /// Prompt tokens the server has processed, when it reports prefill
+    /// progress (llama.cpp with `return_progress`). Never conversation content.
+    PromptProgress {
+        processed: u64,
+        total: u64,
+    },
+    /// Tool-call arguments streamed so far in this response. A large edit can
+    /// take minutes to generate; this is the only sign of life meanwhile.
+    /// Never conversation content.
+    ToolProgress {
+        /// Name of the call being written, once the stream has named it.
+        name: String,
+        calls: usize,
+        bytes: usize,
     },
 }
 
@@ -62,6 +77,47 @@ pub trait Provider {
         tools: &[Value],
         emit: &mut dyn FnMut(Event),
     ) -> impl Future<Output = Result<Message>>;
+}
+
+pub type BoxedResponse<'a> = Pin<Box<dyn Future<Output = Result<Message>> + 'a>>;
+
+/// Object-safe view of a [`Provider`]. Work that shares one model connection
+/// across nested agents (subagents) uses this to keep a single concrete agent
+/// type instead of an unbounded tower of generic wrappers.
+pub trait DynProvider {
+    fn complete_boxed<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Value],
+        max_output_tokens: usize,
+        emit: &'a mut dyn FnMut(Event),
+    ) -> BoxedResponse<'a>;
+    fn complete_json_boxed<'a>(
+        &'a self,
+        messages: &'a [Message],
+        max_output_tokens: usize,
+        emit: &'a mut dyn FnMut(Event),
+    ) -> BoxedResponse<'a>;
+}
+
+impl<P: Provider> DynProvider for P {
+    fn complete_boxed<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Value],
+        max_output_tokens: usize,
+        emit: &'a mut dyn FnMut(Event),
+    ) -> BoxedResponse<'a> {
+        Box::pin(self.complete_with_budget(messages, tools, max_output_tokens, emit))
+    }
+    fn complete_json_boxed<'a>(
+        &'a self,
+        messages: &'a [Message],
+        max_output_tokens: usize,
+        emit: &'a mut dyn FnMut(Event),
+    ) -> BoxedResponse<'a> {
+        Box::pin(self.complete_json(messages, max_output_tokens, emit))
+    }
 }
 
 /// A response exhausted its generation budget. Partial output is never usable.

@@ -40,6 +40,25 @@ pub struct MemoryRuntime {
 }
 
 impl MemoryRuntime {
+    /// Extraction has a small JSON budget. For endpoints explicitly configured
+    /// with a thinking toggle, disable that toggle only on the derived request;
+    /// otherwise hidden reasoning can consume the entire findings budget.
+    pub fn extraction_provider(
+        profile: &builder_core::config::Profile,
+    ) -> Result<OpenAiCompatible> {
+        let mut profile = profile.clone();
+        if let Some(options) = profile
+            .extra_body
+            .get_mut("chat_template_kwargs")
+            .and_then(Value::as_object_mut)
+            && options
+                .get("enable_thinking")
+                .is_some_and(Value::is_boolean)
+        {
+            options.insert("enable_thinking".into(), json!(false));
+        }
+        OpenAiCompatible::new(profile)
+    }
     pub fn lexical() -> Self {
         Self {
             embedding: None,
@@ -110,9 +129,12 @@ impl MemoryRuntime {
         workspace.root().to_string_lossy().into_owned()
     }
     pub fn reset_network(&self) {
+        self.extraction_attempt.set(0);
+        self.reset_embeddings();
+    }
+    pub(crate) fn reset_embeddings(&self) {
         self.embedding_failed.set(false);
         self.embedding_error.borrow_mut().take();
-        self.extraction_attempt.set(0);
         self.query_cache.borrow_mut().take();
     }
     async fn embed(&self, text: &str, query: bool) -> Option<Vec<f32>> {
@@ -223,44 +245,49 @@ impl MemoryRuntime {
             !ids.is_empty() && ids.len() <= 8,
             "Findings need 1–8 successful read_file evidence IDs"
         );
-        let events = store.memory_events(session, 0, 64)?;
         let mut out = Vec::new();
         for id in ids {
-            let (seq, result) = events
-                .iter()
-                .find(|(_, m)| m.tool_call_id.as_deref() == Some(id))
-                .context("Evidence not in recent durable results; read the relevant range again")?;
-            let call = events
-                .iter()
-                .flat_map(|(_, m)| &m.tool_calls)
-                .find(|c| &c.id == id)
-                .context("Evidence call missing")?;
-            let Action::ReadFile { path, .. } = Action::from_call(call)? else {
-                anyhow::bail!("Only successful source reads support repository findings")
-            };
-            let result = result.content.as_deref().unwrap_or("");
-            ensure!(
-                !result.starts_with("ERROR:") && !result.starts_with("DENIED:"),
-                "Failed reads cannot support findings"
-            );
-            let hash = result
-                .lines()
-                .nth(1)
-                .and_then(|l| l.strip_prefix("Source-SHA256: "))
-                .context("Read lacks source version; read the range again")?;
-            ensure!(
-                hash == workspace.source_hash(&path)?,
-                "Source changed since this read; refresh evidence before saving"
-            );
-            out.push(Evidence {
-                session: session.into(),
-                seq: *seq,
-                call_id: id.clone(),
-                path,
-                hash: hash.into(),
-            });
+            let reads = store.memory_source_reads(session, 0, Some(id), 1)?;
+            let (seq, result, call) = reads.first().context(
+                "Evidence is not an active durable source read; read the relevant range again",
+            )?;
+            out.push(Self::source_evidence(
+                session, workspace, *seq, result, call,
+            )?);
         }
         Ok(out)
+    }
+    fn source_evidence(
+        session: &str,
+        workspace: &Workspace,
+        seq: i64,
+        result: &Message,
+        call: &builder_core::protocol::ToolCall,
+    ) -> Result<Evidence> {
+        let Action::ReadFile { path, .. } = Action::from_call(call)? else {
+            anyhow::bail!("Only successful source reads support repository findings")
+        };
+        let result = result.content.as_deref().unwrap_or("");
+        ensure!(
+            !result.starts_with("ERROR:") && !result.starts_with("DENIED:"),
+            "Failed reads cannot support findings"
+        );
+        let hash = result
+            .lines()
+            .nth(1)
+            .and_then(|l| l.strip_prefix("Source-SHA256: "))
+            .context("Read lacks source version; read the range again")?;
+        ensure!(
+            hash == workspace.source_hash(&path)?,
+            "Source changed since this read; refresh evidence before saving"
+        );
+        Ok(Evidence {
+            session: session.into(),
+            seq,
+            call_id: call.id.clone(),
+            path,
+            hash: hash.into(),
+        })
     }
     fn fresh(
         store: &Store,
@@ -443,6 +470,23 @@ impl MemoryRuntime {
         session: &str,
         workspace: &Workspace,
     ) -> Result<Message> {
+        self.packet_with_todos(store, session, workspace, true)
+            .await
+    }
+
+    /// The model's own todo list is the authoritative next step. While one
+    /// is unfinished, an extracted next-action proposal would compete with it.
+    pub async fn packet_with_todos(
+        &self,
+        store: &Store,
+        session: &str,
+        workspace: &Workspace,
+        todos: bool,
+    ) -> Result<Message> {
+        let plan_active = todos
+            && store
+                .todos(session)?
+                .is_some_and(|list| !list.is_finished());
         let events = store.memory_events(session, 0, 64)?;
         let latest_user = store.memory_latest_user(session)?;
         let query = latest_user
@@ -451,9 +495,10 @@ impl MemoryRuntime {
             .unwrap_or("");
         let query = bounded(query, 3000);
         let mut task = store.memory_task(session)?.filter(|t| {
-            latest_user
-                .as_ref()
-                .is_none_or(|(seq, _)| t.source_seq >= *seq)
+            !plan_active
+                && latest_user
+                    .as_ref()
+                    .is_none_or(|(seq, _)| t.source_seq >= *seq)
         });
         let mut preferences = store.memory_list("@user")?;
         preferences.truncate(8);
@@ -553,20 +598,6 @@ impl MemoryRuntime {
                 store.memory_forget(&scope, key, *expected_revision)?;
                 json!({"forgotten":key,"note":"Removed from retrieval; original transcript and revisions retained"})
             }
-            Action::TaskUpdate {
-                next_action,
-                questions,
-            } => {
-                store.memory_save_task(
-                    session,
-                    &TaskState {
-                        next_action: next_action.clone(),
-                        questions: questions.clone(),
-                        source_seq: store.memory_latest_seq(session)?,
-                    },
-                )?;
-                json!({"saved":"proposed next action and questions; no completion claim"})
-            }
             _ => anyhow::bail!("Not a memory action"),
         };
         Ok(serde_json::to_string(&value)?)
@@ -621,6 +652,17 @@ impl MemoryRuntime {
         context_tokens: usize,
     ) -> Result<()> {
         self.reset_network();
+        // Preserve findings before spending the idle window on embeddings.
+        let extraction = self
+            .extract(
+                provider,
+                store,
+                session,
+                workspace,
+                false,
+                (context_tokens, &mut |_| {}),
+            )
+            .await;
         // Indexing failure must not suppress independent extraction. Missing
         // vectors remain the durable retry queue for a later idle pass.
         let _ = tokio::time::timeout(
@@ -628,15 +670,7 @@ impl MemoryRuntime {
             self.index_pending(store, workspace),
         )
         .await;
-        self.extract(
-            provider,
-            store,
-            session,
-            workspace,
-            false,
-            (context_tokens, &mut |_| {}),
-        )
-        .await?;
+        extraction?;
         Ok(())
     }
     pub async fn extract<P: Provider>(
@@ -645,13 +679,12 @@ impl MemoryRuntime {
         store: &mut Store,
         session: &str,
         workspace: &Workspace,
-        force: bool,
+        _force: bool,
         context: (usize, &mut dyn FnMut(builder_provider::Event)),
     ) -> Result<bool> {
         let cursor = store.memory_extraction_cursor(session)?;
-        let events = store.memory_events(session, cursor, 16)?;
-        let read_count = events.iter().filter(|(_, m)| m.role == Role::Tool).count();
-        if read_count == 0 || (!force && read_count < 6) {
+        let reads = store.memory_source_reads(session, cursor, None, 16)?;
+        if reads.is_empty() {
             return Ok(false);
         }
         let through = store.memory_latest_seq(session)?;
@@ -666,11 +699,11 @@ impl MemoryRuntime {
             .filter(|memory| Self::fresh(store, workspace, memory, &mut hashes))
             .take(8)
             .collect::<Vec<_>>();
-        let evidence = events
+        let evidence = reads
             .iter()
-            .filter_map(|(_, m)| m.tool_call_id.clone())
-            .filter_map(|id| self.evidence(store, session, workspace, &[id]).ok())
-            .flatten()
+            .filter_map(|(seq, result, call)| {
+                Self::source_evidence(session, workspace, *seq, result, call).ok()
+            })
             .collect::<Vec<_>>();
         if evidence.is_empty() {
             return Ok(false);
@@ -680,7 +713,21 @@ impl MemoryRuntime {
             .iter()
             .map(|e| e.call_id.as_str())
             .collect::<Vec<_>>();
-        let fragments=events.iter().filter(|(_, m)| m.role == Role::User || m.tool_call_id.as_deref().is_some_and(|id| eligible.contains(&id))).map(|(seq,m)|json!({"seq":seq,"role":m.role,"call_id":m.tool_call_id,"text_excerpt":bounded(m.content.as_deref().unwrap_or(""),700),"calls":m.tool_calls.iter().map(|c|json!({"id":c.id,"name":c.function.name})).collect::<Vec<_>>() })).collect::<Vec<_>>();
+        let fragments = reads
+            .iter()
+            .filter(|(_, m, _)| {
+                m.tool_call_id
+                    .as_deref()
+                    .is_some_and(|id| eligible.contains(&id))
+            })
+            .map(|(seq, m, _)| {
+                json!({"seq":seq,"call_id":m.tool_call_id,
+                "text_excerpt":bounded(m.content.as_deref().unwrap_or(""), 1400)})
+            })
+            .collect::<Vec<_>>();
+        let latest_user = store
+            .memory_latest_user(session)?
+            .map(|(_, m)| bounded(m.content.as_deref().unwrap_or(""), 1200));
         let request = [
             Message::text(
                 Role::System,
@@ -689,7 +736,7 @@ impl MemoryRuntime {
             Message::text(
                 Role::User,
                 serde_json::to_string(
-                    &json!({"bounded_event_excerpts":fragments,"eligible_evidence":evidence,"existing_findings":snapshot}),
+                    &json!({"latest_user":latest_user,"bounded_event_excerpts":fragments,"eligible_evidence":evidence,"existing_findings":snapshot}),
                 )?,
             ),
         ];
@@ -698,13 +745,18 @@ impl MemoryRuntime {
             "Extraction input exceeds profile context budget; deferred"
         );
         let result = tokio::time::timeout(
-            Duration::from_secs(20),
+            Duration::from_secs(90),
             provider.complete_json(&request, 2048, context.1),
         )
         .await;
         let message = match result {
             Ok(Ok(message)) => message,
-            _ => anyhow::bail!("Extraction timed out or failed; source history retained"),
+            Ok(Err(error)) => {
+                return Err(error).context("Memory extraction failed; source history retained");
+            }
+            Err(_) => anyhow::bail!(
+                "Memory extraction exceeded its 90-second idle deadline; source history retained"
+            ),
         };
         ensure!(
             message.tool_calls.is_empty(),
@@ -721,8 +773,10 @@ impl MemoryRuntime {
         ensure!(findings.len() <= 3, "Too many extracted findings");
         // Validate the whole batch before mutating any memory.
         let mut prepared = Vec::new();
+        let mut keys = std::collections::HashSet::new();
         for finding in findings {
             let key = finding["key"].as_str().context("Missing memory key")?;
+            ensure!(keys.insert(key), "Duplicate extracted memory key");
             let text = finding["text"].as_str().context("Missing memory text")?;
             ensure!(
                 key.len() <= 100 && !key.is_empty() && text.len() <= 1200 && !text.is_empty(),
@@ -747,13 +801,16 @@ impl MemoryRuntime {
         );
         let scope = Self::scope(workspace);
         for (key, text, evidence) in prepared {
-            let previous = snapshot.iter().find(|m| m.key == key);
-            if previous.is_some_and(|m| m.text == text && m.evidence == evidence) {
+            let previous = store.memory_get(&scope, &key, None)?;
+            if previous
+                .as_ref()
+                .is_some_and(|m| m.text == text && m.evidence == evidence)
+            {
                 continue;
             }
             store.memory_put(
                 &scope,
-                previous.map_or(0, |m| m.revision),
+                previous.as_ref().map_or(0, |m| m.revision),
                 Memory {
                     key,
                     revision: 0,
@@ -852,7 +909,6 @@ pub fn is_memory(action: &Action) -> bool {
             | Action::MemoryGet { .. }
             | Action::MemoryUpsert { .. }
             | Action::MemoryForget { .. }
-            | Action::TaskUpdate { .. }
     )
 }
 pub fn definitions() -> Vec<Value> {
@@ -881,12 +937,6 @@ pub fn definitions() -> Vec<Value> {
             "Remove a checkout finding from retrieval, retaining audit history. Requires approval.",
             json!({"key":{"type":"string"},"expected_revision":{"type":"integer"}}),
             vec!["key", "expected_revision"],
-        ),
-        schema(
-            "task_update",
-            "Save the next concrete action and unresolved questions for resume/compaction. This is a proposal, never a completion claim. Do not use repeatedly instead of working.",
-            json!({"next_action":{"type":"string"},"questions":{"type":"array","items":{"type":"string"},"maxItems":8}}),
-            vec!["next_action", "questions"],
         ),
     ]
 }

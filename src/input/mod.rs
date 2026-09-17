@@ -31,6 +31,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/settings", "Pipeline features and budgets"),
     ("/memory", "Local memory settings and model setup"),
     ("/history", "Show the saved conversation"),
+    ("/todo", "Show the agent's current todo list"),
     ("/retry", "Continue an unfinished turn"),
     ("/compact", "Summarize context; preserve original history"),
     ("/cancel", "Cancel pending work and keep the conversation"),

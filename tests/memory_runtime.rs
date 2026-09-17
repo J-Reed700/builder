@@ -308,17 +308,16 @@ async fn memory_is_loaded_automatically_and_new_user_correction_supersedes_old_t
         .execute(&mut store, &session, &workspace, &save("read1", 0))
         .await
         .unwrap();
-    memory
-        .execute(
-            &mut store,
+    let source_seq = store.memory_latest_seq(&session).unwrap();
+    store
+        .memory_save_task(
             &session,
-            &workspace,
-            &Action::TaskUpdate {
+            &builder_core::memory::TaskState {
                 next_action: "old task".into(),
                 questions: vec![],
+                source_seq,
             },
         )
-        .await
         .unwrap();
     store
         .interrupt_turn(&session, Some("Correction: explain shield without editing"))
@@ -936,5 +935,170 @@ async fn local_semantic_vectors_persist_and_retrieve_offline() {
     assert_eq!(result["notes"][0]["memory"]["key"], "vehicle");
     eprintln!(
         "Offline CPU inference: 384 normalized dimensions; persisted vectors retrieved the semantically related note after reopen."
+    );
+}
+
+#[tokio::test]
+async fn idle_extraction_finds_a_single_read_behind_long_non_read_history_and_retries() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("rates.json"), "shield_chance is 0.025").unwrap();
+    let workspace = Workspace::new(home.path()).unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    let session = store
+        .create("single read", "local", home.path(), SYSTEM)
+        .unwrap();
+    store
+        .append(&session, &Message::text(Role::User, "explain shield"))
+        .unwrap();
+    read(&mut store, &session, &workspace, "source").await;
+    for _ in 0..80 {
+        store
+            .append(
+                &session,
+                &Message::text(Role::Assistant, "Verification commentary"),
+            )
+            .unwrap();
+    }
+    let provider = Replies {
+        replies: Mutex::new(vec![
+            Message::text(Role::Assistant, "invalid extraction"),
+            Message::text(Role::Assistant, json!({"findings":[{"key":"shield", "text":"shield_chance is 0.025", "evidence_call_ids":["source"]}], "next_action":"no remaining action observed", "questions":[]}).to_string()),
+        ]),
+        requests: Mutex::new(vec![]),
+    };
+    let memory = MemoryRuntime::lexical();
+    assert!(
+        memory
+            .maintain(&provider, &mut store, &session, &workspace, 32768)
+            .await
+            .is_err()
+    );
+    assert_eq!(store.memory_extraction_cursor(&session).unwrap(), 0);
+    memory
+        .maintain(&provider, &mut store, &session, &workspace, 32768)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .memory_list(&MemoryRuntime::scope(&workspace))
+            .unwrap()
+            .len(),
+        1
+    );
+    memory
+        .maintain(&provider, &mut store, &session, &workspace, 32768)
+        .await
+        .unwrap();
+    assert_eq!(
+        provider.requests.lock().unwrap().len(),
+        2,
+        "completed evidence must not be extracted repeatedly"
+    );
+}
+
+#[tokio::test]
+async fn automatic_extraction_revises_stale_findings_instead_of_conflicting() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("rates.json"), "shield_chance is 0.025").unwrap();
+    let workspace = Workspace::new(home.path()).unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    let session = store
+        .create("stale finding", "local", home.path(), SYSTEM)
+        .unwrap();
+    read(&mut store, &session, &workspace, "old").await;
+    let memory = MemoryRuntime::lexical();
+    memory
+        .execute(&mut store, &session, &workspace, &save("old", 0))
+        .await
+        .unwrap();
+    std::fs::write(home.path().join("rates.json"), "shield_chance is 0.1").unwrap();
+    read(&mut store, &session, &workspace, "fresh").await;
+    let provider = Replies {
+        replies: Mutex::new(vec![Message::text(Role::Assistant, json!({"findings":[{"key":"shield", "text":"shield_chance is 0.1", "evidence_call_ids":["fresh"]}], "next_action":"no remaining action observed", "questions":[]}).to_string())]),
+        requests: Mutex::new(vec![]),
+    };
+    memory
+        .maintain(&provider, &mut store, &session, &workspace, 32768)
+        .await
+        .unwrap();
+    let finding = store
+        .memory_get(&MemoryRuntime::scope(&workspace), "shield", None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(finding.revision, 2);
+    assert_eq!(finding.text, "shield_chance is 0.1");
+    assert_eq!(finding.evidence[0].call_id, "fresh");
+    assert!(
+        !provider.requests.lock().unwrap()[0][1]
+            .content
+            .as_ref()
+            .unwrap()
+            .contains("0.025")
+    );
+}
+
+#[tokio::test]
+async fn indexed_navigation_is_supplied_to_the_agent_without_memory_or_discovery_calls() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("shield.rs"),
+        "pub fn shield_drop_rate() -> f32 { 0.025 }\n",
+    )
+    .unwrap();
+    let workspace = Workspace::new(home.path()).unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    let session = store
+        .create("index navigation", "local", home.path(), SYSTEM)
+        .unwrap();
+    store
+        .append(
+            &session,
+            &Message::text(Role::User, "Explain shield_drop_rate"),
+        )
+        .unwrap();
+    let mut profile = Profile::default();
+    profile.pipeline.code_index_semantic = false;
+    builder::code_index::refresh(&mut store, &workspace, &profile.pipeline).unwrap();
+    let agent = Agent {
+        provider: Replies {
+            replies: Mutex::new(vec![Message::text(
+                Role::Assistant,
+                "The indexed location is shield.rs.",
+            )]),
+            requests: Mutex::new(vec![]),
+        },
+        profile,
+        workspace,
+        session: session.clone(),
+        approval: ApprovalMode::ReadOnly,
+        max_rounds: 2,
+        memory: None,
+    };
+    agent
+        .run(&mut store, &mut |_| {}, &mut |_| false)
+        .await
+        .unwrap();
+    let requests = agent.provider.requests.lock().unwrap();
+    let packet = requests[0]
+        .iter()
+        .find(|m| {
+            m.content
+                .as_deref()
+                .is_some_and(|s| s.starts_with("Builder code-index reference"))
+        })
+        .expect("automatic indexed context");
+    let text = packet.content.as_ref().unwrap();
+    assert!(
+        text.contains("shield.rs")
+            && text.contains("shield_drop_rate")
+            && text.contains("\"lines\":[1,1]")
+    );
+    assert!(
+        !store
+            .history_messages(&session)
+            .unwrap()
+            .iter()
+            .any(|m| m == packet),
+        "derived context must not pollute durable history"
     );
 }

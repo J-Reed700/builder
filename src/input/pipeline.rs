@@ -126,6 +126,16 @@ const FIELDS: &[(&str, &str, &str)] = &[
         "Index recent local Git commits and changed paths as historical ranking evidence.",
     ),
     (
+        "todos",
+        "Todo board",
+        "Let the agent keep a visible, ordered todo list and follow it step by step.",
+    ),
+    (
+        "subagents",
+        "Subagents",
+        "Let the agent delegate read-only investigations to subagents with their own context.",
+    ),
+    (
         "code_index_max_files",
         "Index files",
         "1–50000 source files per complete index generation.",
@@ -328,7 +338,7 @@ const FIELDS: &[(&str, &str, &str)] = &[
     (
         "progress_check_calls",
         "Progress check after calls",
-        "1–1000 completed tools without a file change before focused recovery guidance.",
+        "1–1000 completed tools without a file change before the progress nudge. A lighter planning reminder starts at half this.",
     ),
     (
         "progress_recovery_rounds",
@@ -354,6 +364,21 @@ const FIELDS: &[(&str, &str, &str)] = &[
         "tool_calls_per_response",
         "Tool calls per response",
         "1–128 tool calls allowed in one model response.",
+    ),
+    (
+        "parallel_tools",
+        "Parallel read-only tools",
+        "1–32 consecutive reads, searches and subagents run at once; 1 runs every tool in order.",
+    ),
+    (
+        "subagent_parallel",
+        "Concurrent subagents",
+        "1–8 subagents talking to the model at once. Match your server's parallel request slots.",
+    ),
+    (
+        "subagent_rounds",
+        "Subagent rounds",
+        "1–200 model rounds per subagent before it must report what it found.",
     ),
 ];
 const SAVE: usize = FIELDS.len();

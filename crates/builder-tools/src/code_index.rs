@@ -212,6 +212,59 @@ fn chunk_file(
     Ok(chunks)
 }
 
+/// Navigable declarations with 1-based lines. Grammar-backed where
+/// available; JavaScript and TypeScript also list functions bound to
+/// variables, which is how most components and hooks are written.
+pub(crate) fn outline(path: &Path, content: &str) -> Vec<(usize, String)> {
+    let Some(language) = language(path) else {
+        return Vec::new();
+    };
+    let mut entries = syntax_declarations(language, content).unwrap_or_else(|| {
+        content
+            .lines()
+            .enumerate()
+            .filter_map(|(line, text)| declared_symbol(language, text).map(|symbol| (line, symbol)))
+            .collect()
+    });
+    if matches!(language, "javascript" | "typescript") {
+        entries.extend(
+            content
+                .lines()
+                .enumerate()
+                .filter_map(|(line, text)| bound_function(text).map(|symbol| (line, symbol))),
+        );
+        entries.sort();
+        entries.dedup();
+    }
+    entries
+        .into_iter()
+        .map(|(line, symbol)| (line + 1, symbol))
+        .collect()
+}
+
+/// `const name = (…) =>`, `const name = async …`, `const name = function`,
+/// or `const name = useSomething(` on one line.
+fn bound_function(line: &str) -> Option<String> {
+    let text = line.trim_start();
+    let text = text.strip_prefix("export ").unwrap_or(text);
+    let text = text
+        .strip_prefix("const ")
+        .or_else(|| text.strip_prefix("let "))?;
+    let name_end = text
+        .find(|character: char| !character.is_alphanumeric() && !matches!(character, '_' | '$'))
+        .unwrap_or(text.len());
+    let name = &text[..name_end];
+    let (_, value) = text[name_end..].split_once('=')?;
+    let value = value.trim_start();
+    let callable = value.starts_with("async")
+        || value.starts_with("function")
+        || (value.starts_with('(') && value.contains("=>"))
+        || value
+            .strip_prefix("use")
+            .is_some_and(|rest| rest.starts_with(|character: char| character.is_ascii_uppercase()));
+    (valid_identifier(name) && !value.starts_with('=') && callable).then(|| name.to_owned())
+}
+
 fn language(path: &Path) -> Option<&'static str> {
     let name = path.file_name()?.to_str()?;
     if matches!(

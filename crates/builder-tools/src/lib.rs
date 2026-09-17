@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 pub use workspace::Workspace;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "name", content = "arguments", rename_all = "snake_case")]
 pub enum Action {
     Research {
@@ -46,6 +46,10 @@ pub enum Action {
         old: String,
         new: String,
     },
+    MultiEdit {
+        path: String,
+        edits: Vec<Replacement>,
+    },
     MemorySearch {
         query: String,
     },
@@ -64,9 +68,12 @@ pub enum Action {
         key: String,
         expected_revision: i64,
     },
-    TaskUpdate {
-        next_action: String,
-        questions: Vec<String>,
+    TodoWrite {
+        todos: builder_core::todo::List,
+    },
+    Subagent {
+        description: String,
+        prompt: String,
     },
     Shell {
         command: String,
@@ -74,6 +81,21 @@ pub enum Action {
         timeout_secs: Option<u64>,
     },
 }
+/// One exact-text replacement within a `multi_edit`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Replacement {
+    pub old: String,
+    pub new: String,
+    #[serde(default)]
+    pub replace_all: bool,
+}
+
+pub const MAX_EDITS: usize = 50;
+pub const SUBAGENT_TOOL: &str = "subagent";
+pub const SUBAGENT_DESCRIPTION_BYTES: usize = 80;
+pub const SUBAGENT_PROMPT_BYTES: usize = 16 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Risk {
     Read,
@@ -87,6 +109,14 @@ impl Action {
             json!({"name": call.function.name, "arguments": serde_json::from_str::<Value>(&call.function.arguments)?}),
         )?)
     }
+    /// Reads the workspace without changing it: safe to run beside other
+    /// inspections and to close as retryable if interrupted.
+    pub fn is_inspection(&self) -> bool {
+        matches!(
+            self,
+            Self::ListFiles { .. } | Self::ReadFile { .. } | Self::Search { .. }
+        )
+    }
     pub fn risk(&self) -> Risk {
         match self {
             Self::Research { request } => match request {
@@ -97,9 +127,10 @@ impl Action {
                 | builder_core::research::Request::Retire { .. } => Risk::Write,
                 _ => Risk::Read,
             },
-            Self::WriteFile { .. } | Self::EditFile { .. } | Self::MemoryForget { .. } => {
-                Risk::Write
-            }
+            Self::WriteFile { .. }
+            | Self::EditFile { .. }
+            | Self::MultiEdit { .. }
+            | Self::MemoryForget { .. } => Risk::Write,
             Self::Shell { .. } => Risk::Execute,
             _ => Risk::Read,
         }
@@ -114,7 +145,11 @@ impl Action {
             Self::MemoryGet { key, .. } => format!("memory · {key}"),
             Self::MemoryUpsert { key, .. } => format!("remember finding · {key}"),
             Self::MemoryForget { key, .. } => format!("forget memory · {key}"),
-            Self::TaskUpdate { next_action, .. } => format!("task state · {next_action}"),
+            Self::TodoWrite { todos } => format!("todo list\n{}", todos.checklist()),
+            Self::Subagent {
+                description,
+                prompt,
+            } => format!("subagent · {description}\n{prompt}"),
             Self::ListFiles { glob } => {
                 format!("list files · {}", glob.as_deref().unwrap_or("**/*"))
             }
@@ -126,6 +161,23 @@ impl Action {
             }
             Self::EditFile { path, old, new } => {
                 format!("edit · {path}\n--- old\n{old}\n+++ new\n{new}")
+            }
+            Self::MultiEdit { path, edits } => {
+                let mut text = format!("edit · {path} ({} edits)", edits.len());
+                for (index, edit) in edits.iter().enumerate() {
+                    let all = if edit.replace_all {
+                        " (every match)"
+                    } else {
+                        ""
+                    };
+                    text.push_str(&format!(
+                        "\n[{}]{all}\n--- old\n{}\n+++ new\n{}",
+                        index + 1,
+                        edit.old,
+                        edit.new
+                    ));
+                }
+                text
             }
             Self::Shell { command, .. } => format!("shell · {command}"),
         }
@@ -152,7 +204,7 @@ pub fn definitions_with_pipeline_and_phase(
         ),
         schema(
             "read_file",
-            "Read a UTF-8 file with line numbers: at most 500 lines and 12288 output bytes per call. Whole-file reads are allowed only up to 200 lines; for larger files provide start_line (end_line optional — omitting it reads the next chunk, omitting start_line reads the chunk ending at end_line). Ranges clamp to the file and the result notes any remaining lines; search for the relevant symbol first. Do not repeatedly read whole files or bypass limits with shell. Re-read only a needed range when exact text or freshness matters.",
+            "Read a UTF-8 file with line numbers: at most 500 lines and 12288 output bytes per call. Files up to 200 lines are returned whole. A rangeless read of a larger file returns an outline of its declarations with line numbers plus its opening lines; choose the next range from that outline, code-index candidates, code_search, or file-scoped search, then pass start_line (end_line optional; omitting it reads the next chunk, omitting start_line reads the chunk ending at end_line). A range that exceeds a limit returns the part that fits and the exact start_line to continue with. Read many files or ranges in one batch; reads run in parallel. Do not page through whole files or bypass limits with shell. Re-read only a needed range when exact text or freshness matters.",
             json!({"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}),
             &["path"],
         ),
@@ -175,6 +227,12 @@ pub fn definitions_with_pipeline_and_phase(
             &["path", "old", "new"],
         ),
         schema(
+            "multi_edit",
+            "Apply several exact-text replacements to one file in a single atomic write. Edits apply in order, each to the result of the previous one. Each old text must match exactly once unless replace_all is true. If any edit fails, none are applied. Prefer this over several edit_file calls on one file. Requires approval; the original is backed up.",
+            json!({"path":{"type":"string"},"edits":{"type":"array","minItems":1,"maxItems":MAX_EDITS,"items":{"type":"object","properties":{"old":{"type":"string","minLength":1},"new":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["old","new"],"additionalProperties":false}}}),
+            &["path", "edits"],
+        ),
+        schema(
             "shell",
             "Execute a shell command in the workspace. Requires approval. Shell has the user's permissions, not a sandbox. Timeout up to 120 seconds.",
             json!({"command":{"type":"string"},"timeout_secs":{"type":"integer","minimum":1,"maximum":120}}),
@@ -186,6 +244,22 @@ pub fn definitions_with_pipeline_and_phase(
             Some(phase) => crate::research::definition_with_phase(settings, phase),
             None => crate::research::definition_with_settings(settings),
         });
+    }
+    if settings.todos {
+        tools.push(schema(
+                builder_core::todo::TOOL,
+                "Replace your ordered todo list; the user sees it as a board. For multi-step work, write the concrete steps in order as soon as you know which files to change, usually after a few reads; a detail still to confirm can be its own step. Then follow them instead of re-exploring. Keep exactly one item in_progress. When an item is done, mark it completed and set the next one in_progress in the same response as your next action. Rewrite the list when the user changes direction; an empty list clears it. Not needed for single-step or question-only requests. Writing the list is not progress by itself.",
+                json!({"todos":{"type":"array","maxItems":builder_core::todo::MAX_ITEMS,"items":{"type":"object","properties":{"content":{"type":"string","minLength":1,"maxLength":builder_core::todo::MAX_ITEM_BYTES},"status":{"type":"string","enum":["pending","in_progress","completed"]}},"required":["content","status"],"additionalProperties":false}}}),
+                &["todos"],
+            ));
+    }
+    if settings.subagents {
+        tools.push(schema(
+            SUBAGENT_TOOL,
+            "Delegate a self-contained, read-only investigation to a subagent with its own fresh context. It can list, search and read files (and use code_search) but cannot edit or run commands. Only its final report comes back to you, so use it to explore unfamiliar code, trace a flow across many files, or answer a question that would otherwise take many reads. Several subagent calls in one response run in parallel, so split independent questions. Write a complete prompt: the goal, what is already known, likely paths, and exactly what the report must contain (for example file paths with line numbers and the exact code to change). Do not delegate what one or two reads can answer.",
+            json!({"description":{"type":"string","minLength":1,"maxLength":SUBAGENT_DESCRIPTION_BYTES,"description":"3–8 words shown to the user"},"prompt":{"type":"string","minLength":1,"maxLength":SUBAGENT_PROMPT_BYTES}}),
+            &["description", "prompt"],
+        ));
     }
     if settings.code_index {
         tools.push(schema(
@@ -225,11 +299,30 @@ pub fn call_summary(name: &str, arguments: &str) -> String {
             (query, glob) => format!("{query} in {glob}"),
         },
         "code_search" => field("query").to_owned(),
+        SUBAGENT_TOOL => field("description").to_owned(),
         "write_file" | "edit_file" => field("path").to_owned(),
+        "multi_edit" => match args["edits"].as_array().map(Vec::len) {
+            Some(count) => format!("{} · {count} edits", field("path")),
+            None => field("path").to_owned(),
+        },
         "shell" => field("command").to_owned(),
         "memory_search" => field("query").to_owned(),
         "memory_get" | "memory_upsert" | "memory_forget" => field("key").to_owned(),
-        "task_update" => field("next_action").to_owned(),
+        builder_core::todo::TOOL => {
+            match serde_json::from_value::<builder_core::todo::List>(args["todos"].clone()) {
+                Ok(list) if list.items.is_empty() => "clear".to_owned(),
+                Ok(list) => match list.current() {
+                    Some((_, item)) => format!(
+                        "{}/{} · {}",
+                        list.completed(),
+                        list.items.len(),
+                        item.content.trim()
+                    ),
+                    None => format!("{0}/{0} done", list.items.len()),
+                },
+                Err(_) => String::new(),
+            }
+        }
         "research" => {
             let request = &args["request"];
             let operation = request["operation"].as_str().unwrap_or("?");
@@ -277,6 +370,12 @@ pub fn result_note(name: &str, result: &str) -> Option<String> {
                     .unwrap_or(status)
             ),
         },
+        SUBAGENT_TOOL => result
+            .lines()
+            .next()?
+            .split(" · ")
+            .find(|part| part.ends_with(" tool calls"))?
+            .to_owned(),
         "read_file" | "search" | "list_files" | "code_search" => {
             let lines = result.lines().filter(|line| !line.is_empty()).count();
             format!("{lines} lines")

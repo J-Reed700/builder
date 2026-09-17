@@ -305,7 +305,7 @@ fn v11_upgrade_preserves_journal_and_archives_legacy_index_in_place() {
     assert_eq!(
         main.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        12
+        13
     );
     assert_eq!(
         main.query_row("SELECT COUNT(*) FROM code_index_state", [], |row| {
@@ -607,5 +607,59 @@ fn provider_conformance_is_bounded_and_replaced_by_fingerprint() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&report).unwrap()["normal_generation"],
         "failed"
+    );
+}
+
+#[test]
+fn v12_upgrade_adds_subagent_links_and_side_effect_free_claims() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    let parent = store
+        .create("parent", "p", workspace.path(), "system")
+        .unwrap();
+    assert!(store.claim_tool(&parent, "legacy").unwrap());
+    drop(store);
+    let conn = rusqlite::Connection::open(home.path().join("builder.sqlite3")).unwrap();
+    conn.execute_batch(
+        "DROP TABLE subagent_sessions; ALTER TABLE tool_runs DROP COLUMN side_effect_free; PRAGMA user_version=12;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut store = Store::open(home.path()).unwrap();
+    // A legacy claim is conservatively not side-effect free.
+    assert!(
+        !store
+            .close_interrupted_side_effect_free_tool(&parent, "legacy")
+            .unwrap()
+    );
+    let child = store
+        .create_subagent(&parent, "call", "subagent · look", "child system")
+        .unwrap();
+    assert!(store.is_subagent(&child).unwrap());
+    assert!(!store.is_subagent(&parent).unwrap());
+    assert_eq!(
+        store
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .map(|session| session.id)
+            .collect::<Vec<_>>(),
+        std::slice::from_ref(&parent)
+    );
+    assert_eq!(store.resolve(&child[..8]).unwrap().profile, "p");
+    assert!(
+        store
+            .create_subagent(&parent, "call", "again", "child system")
+            .is_err(),
+        "one call starts at most one subagent"
+    );
+    assert!(
+        store
+            .create_subagent(&child, "nested", "deeper", "child system")
+            .unwrap_err()
+            .to_string()
+            .contains("cannot start another subagent")
     );
 }

@@ -281,7 +281,11 @@ pub enum MemoryCommand {
     Task {
         session: String,
     },
-    /// Index up to four pending findings; safe to repeat or interrupt.
+    /// Extract fresh findings from a saved session's durable source reads.
+    Refresh {
+        session: String,
+    },
+    /// Index up to two pending findings; safe to repeat or interrupt.
     Index,
 }
 
