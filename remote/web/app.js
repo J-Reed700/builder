@@ -102,6 +102,7 @@ function controls() {
   $('phase').textContent = archived ? 'Archived · restore this chat to continue' : pending ? 'Saving your request…' : phaseLabel(s.phase);
   $('activity').textContent = busy() ? s.notices?.at(-1) || '' : '';
   $('live').hidden = !s.preview && !s.thinking; $('thinking-live').hidden = !s.thinking; $('thinking').textContent = s.thinking || ''; $('preview').textContent = (s.preview || '') + (s.preview_limited ? '\n[Preview limit reached. The complete committed response will appear in history.]' : '');
+  todoBoard(s);
   $('approval').hidden = !s.approval;
   if (s.approval) $('action').textContent = s.approval.description;
   $('chat-error').hidden = !s.error; $('chat-error').textContent = s.error || '';
@@ -117,6 +118,16 @@ function controls() {
   if (info?.session?.profile) $('profile').value = info.session.profile;
   const count = states.filter(s => active(s) || s.phase === 'maintaining').length;
   $('running-count').textContent = `${count} of 4 chats running · drafts stay in this tab`;
+}
+let todoKey = '';
+function todoBoard(s) {
+  const list = s.todos || [], done = list.filter(t => t.status === 'completed').length;
+  $('todos').hidden = !list.length || (!busy() && done === list.length);
+  $('todo-progress').textContent = `${done} of ${list.length} done`;
+  const key = JSON.stringify(list);
+  if (key === todoKey) return;
+  todoKey = key;
+  $('todo-list').replaceChildren(...list.map(t => { const li = document.createElement('li'); li.className = t.status; li.textContent = t.content; return li; }));
 }
 function prose(content) {
   const div = document.createElement('div'); div.className = 'prose';

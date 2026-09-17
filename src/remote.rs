@@ -73,6 +73,8 @@ struct Snapshot {
     /// Reasoning streamed for the response in progress, shown beside the preview.
     thinking: String,
     notices: VecDeque<String>,
+    /// The session's current todo list, refreshed whenever the agent records one.
+    todos: Option<builder_core::todo::List>,
     approval: Option<ApprovalRequest>,
     error: Option<String>,
     #[serde(skip)]
@@ -826,6 +828,9 @@ async fn drive(
         approval,
     } = input;
     let session = run.snapshot.lock().unwrap().session.clone().unwrap();
+    if profile.tools && profile.pipeline.todos {
+        run.snapshot.lock().unwrap().todos = store.todos(&session)?;
+    }
     let agent = Agent {
         memory: MemoryRuntime::from_config(&config)?,
         provider: OpenAiCompatible::new(profile.clone())?,
@@ -878,11 +883,12 @@ async fn drive(
     if matches!(result, Some(Ok(())))
         && let Some(memory) = &agent.memory
     {
+        let extraction_provider = MemoryRuntime::extraction_provider(&agent.profile)?;
         run.snapshot.lock().unwrap().phase = Phase::Maintaining;
         tokio::select! {
             biased;
             _ = cancelled(&mut cancel) => {},
-            _ = tokio::time::timeout(Duration::from_secs(35), memory.maintain(&agent.provider, &mut store, &session, &agent.workspace, agent.profile.context_tokens)) => {},
+            _ = tokio::time::timeout(Duration::from_secs(105), memory.maintain(&extraction_provider, &mut store, &session, &agent.workspace, agent.profile.context_tokens)) => {},
         }
         run.snapshot.lock().unwrap().phase = Phase::Complete;
     }
@@ -903,6 +909,22 @@ fn event_update(run: &Run, event: AgentEvent) {
             if state.thinking.len() + text.len() <= 64 * 1024 {
                 state.thinking.push_str(&text);
             }
+        }
+        AgentEvent::CompactionProgress { fraction, .. } => {
+            // One live line, replaced in place rather than flooding the log.
+            const PREFIX: &str = "Summarizing older context · ";
+            if state
+                .notices
+                .back()
+                .is_some_and(|notice| notice.starts_with(PREFIX))
+            {
+                state.notices.pop_back();
+            } else if state.notices.len() == 32 {
+                state.notices.pop_front();
+            }
+            state
+                .notices
+                .push_back(format!("{PREFIX}{:.0}%", fraction * 100.0));
         }
         AgentEvent::Model(Event::Prompt { .. } | Event::Attempt { .. } | Event::Retry { .. }) => {
             state.preview.clear();
@@ -940,12 +962,28 @@ fn event_update(run: &Run, event: AgentEvent) {
                 }
                 AgentEvent::SummaryRecovery { .. } => "Shortening the context summary".into(),
                 AgentEvent::ExplorationRecovery { .. } => {
-                    "Checking progress before continuing".into()
+                    "Recovering from repeated tool failures".into()
                 }
+                AgentEvent::ProgressNudge {
+                    calls,
+                    step,
+                    repeated_reads,
+                    planning,
+                } => crate::ui::nudge_line(calls, step, repeated_reads, planning),
                 AgentEvent::RepetitionNotice { name, .. } => {
                     format!("Repeated {name} call; checking progress")
                 }
-                AgentEvent::Model(_) => return,
+                AgentEvent::SubagentProgress {
+                    description,
+                    actions,
+                    activity,
+                    ..
+                } => format!("Subagent {description} · {actions} actions · {activity}"),
+                AgentEvent::TodosUpdated(list) => {
+                    state.todos = Some(list);
+                    return;
+                }
+                AgentEvent::Model(_) | AgentEvent::CompactionProgress { .. } => return,
             };
             let notice = if notice.len() > 2048 {
                 "Activity details exceed the live display limit; inspect saved history".into()

@@ -1,5 +1,8 @@
 //! Versioned derived memory. Original conversation/tool records remain authoritative.
-use crate::{protocol::Message, store::Store};
+use crate::{
+    protocol::{Message, ToolCall},
+    store::Store,
+};
 use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -65,6 +68,48 @@ pub struct TaskState {
 }
 
 impl Store {
+    /// Select source reads independently of intervening shell results and prose.
+    /// Both halves of the tool exchange must still be active and durable.
+    pub fn memory_source_reads(
+        &self,
+        session: &str,
+        after: i64,
+        call_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(i64, Message, ToolCall)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT r.seq,r.body,c.value FROM messages r
+             JOIN tool_runs t ON t.session_id=r.session_id
+                AND t.call_id=json_extract(r.body,'$.tool_call_id') AND t.state='finished'
+             JOIN messages a ON a.session_id=r.session_id AND a.active=1 AND a.seq<r.seq
+             JOIN json_each(a.body,'$.tool_calls') c
+                ON json_extract(c.value,'$.id')=t.call_id
+             WHERE r.session_id=?1 AND r.active=1 AND r.seq>?2
+                AND json_extract(r.body,'$.role')='tool'
+                AND json_extract(c.value,'$.function.name')='read_file'
+                AND (?3 IS NULL OR t.call_id=?3)
+             ORDER BY r.seq DESC LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(params![session, after, call_id, limit.min(64)], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut reads = rows
+            .map(|row| {
+                let (seq, result, call) = row?;
+                Ok((
+                    seq,
+                    serde_json::from_str(&result)?,
+                    serde_json::from_str(&call)?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        reads.reverse();
+        Ok(reads)
+    }
     pub fn memory_latest_user(&self, session: &str) -> Result<Option<(i64, Message)>> {
         let row: Option<(i64, String)> = self.conn.query_row("SELECT seq,body FROM messages WHERE session_id=?1 AND active=1 AND json_extract(body,'$.role')='user' ORDER BY seq DESC LIMIT 1", [session], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
         row.map(|(seq, body)| Ok((seq, serde_json::from_str(&body)?)))

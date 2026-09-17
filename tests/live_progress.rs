@@ -72,7 +72,7 @@ async fn compacted_investigation_reaches_a_real_edit() -> anyhow::Result<()> {
             &mut store,
             &mut |event| match event {
                 AgentEvent::ToolStarted { .. } => calls += 1,
-                AgentEvent::ExplorationRecovery { .. } => notices += 1,
+                AgentEvent::ProgressNudge { .. } => notices += 1,
                 _ => {}
             },
             &mut |action| matches!(action, Action::EditFile { path, .. } if path == "rates.js"),

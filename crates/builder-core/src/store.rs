@@ -1,5 +1,6 @@
 use crate::protocol::Message;
 mod pages;
+mod subagents;
 use crate::protocol::Role;
 use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
@@ -14,6 +15,7 @@ use std::{
 };
 
 const JOURNAL_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+pub const INTERRUPTED_SIDE_EFFECT_FREE: &str = "ERROR: Interrupted before this result was saved. The call has no side effects; repeat it if the result is still needed.";
 const INDEX_OPEN_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub struct Store {
@@ -90,6 +92,34 @@ pub enum ToolRunState {
     Unclaimed,
     Started,
     Finished,
+}
+
+fn insert_session(
+    tx: &Transaction<'_>,
+    title: &str,
+    profile: &str,
+    workspace: &Path,
+    system: &str,
+) -> Result<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO sessions VALUES (?1,?2,?3,?4,?5)",
+        params![
+            id,
+            title.chars().take(80).collect::<String>(),
+            profile,
+            workspace.to_string_lossy(),
+            now()
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO messages(session_id,body) VALUES (?1,?2)",
+        params![
+            id,
+            serde_json::to_string(&Message::text(Role::System, system))?
+        ],
+    )?;
+    Ok(id)
 }
 
 fn private_database_options() -> std::fs::OpenOptions {
@@ -182,10 +212,10 @@ impl Store {
         conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
         let mut version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         ensure!(
-            version <= 12,
+            version <= 13,
             "Session database was created by a newer Builder version; upgrade Builder"
         );
-        if version < 12 {
+        if version < 13 {
             // WAL mode is persistent. Only migrations may change it or acquire
             // a write lock; opening a current journal is a read-only fast path.
             conn.execute_batch("PRAGMA journal_mode=WAL;")?;
@@ -196,7 +226,7 @@ impl Store {
             // connection waited for the writer lock.
             version = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
             ensure!(
-                version <= 12,
+                version <= 13,
                 "Session database was created by a newer Builder version; upgrade Builder"
             );
             tx.execute_batch("CREATE TABLE IF NOT EXISTS sessions (
@@ -273,6 +303,22 @@ impl Store {
                 // index tables are deliberately retained until explicit cleanup;
                 // migration never risks transcript availability on a large DROP.
                 tx.execute_batch("PRAGMA user_version=12;")?;
+            }
+            if version < 13 {
+                // Side-effect-free claims (reads, subagents) may be closed as
+                // retryable failures after an interruption instead of uncertain.
+                tx.execute_batch(subagents::SCHEMA)?;
+                let migrated: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tool_runs') WHERE name='side_effect_free')",
+                    [],
+                    |r| r.get(0),
+                )?;
+                if !migrated {
+                    tx.execute_batch(
+                        "ALTER TABLE tool_runs ADD COLUMN side_effect_free INTEGER NOT NULL DEFAULT 0;",
+                    )?;
+                }
+                tx.execute_batch("PRAGMA user_version=13;")?;
             }
             tx.commit()?;
         }
@@ -378,6 +424,11 @@ impl Store {
         )?;
         Ok(())
     }
+    /// A second connection to the same journal, for work that runs beside
+    /// this one, such as a subagent's child session.
+    pub fn reopen(&self) -> Result<Self> {
+        Self::open(&self.home)
+    }
     pub fn create(
         &mut self,
         title: &str,
@@ -389,25 +440,8 @@ impl Store {
             .canonicalize()
             .context("Session workspace does not exist")?;
         ensure!(workspace.is_dir(), "Session workspace must be a directory");
-        let id = uuid::Uuid::new_v4().to_string();
         let tx = self.journal_transaction()?;
-        tx.execute(
-            "INSERT INTO sessions VALUES (?1,?2,?3,?4,?5)",
-            params![
-                id,
-                title.chars().take(80).collect::<String>(),
-                profile,
-                workspace.to_string_lossy(),
-                now()
-            ],
-        )?;
-        tx.execute(
-            "INSERT INTO messages(session_id,body) VALUES (?1,?2)",
-            params![
-                id,
-                serde_json::to_string(&Message::text(Role::System, system))?
-            ],
-        )?;
+        let id = insert_session(&tx, title, profile, &workspace, system)?;
         tx.commit()?;
         Ok(id)
     }
@@ -421,7 +455,7 @@ impl Store {
     }
     pub fn resolve(&self, prefix: &str) -> Result<Session> {
         let matches: Vec<_> = self
-            .sessions()?
+            .sessions_where("")?
             .into_iter()
             .filter(|s| s.id.starts_with(prefix))
             .collect();
@@ -432,10 +466,15 @@ impl Store {
         );
         Ok(matches.into_iter().next().unwrap())
     }
+    /// User conversations, newest first. Subagent child sessions are
+    /// excluded; `resolve` still finds them by ID for export and inspection.
     pub fn sessions(&self) -> Result<Vec<Session>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id,title,profile,workspace,updated_at FROM sessions ORDER BY updated_at DESC",
-        )?;
+        self.sessions_where("WHERE id NOT IN (SELECT session_id FROM subagent_sessions)")
+    }
+    fn sessions_where(&self, filter: &str) -> Result<Vec<Session>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT id,title,profile,workspace,updated_at FROM sessions {filter} ORDER BY updated_at DESC"
+        ))?;
         let rows = stmt.query_map([], |r| {
             Ok(Session {
                 id: r.get(0)?,
@@ -637,10 +676,44 @@ impl Store {
     }
     /// Claim before executing. An existing claim is never executed automatically.
     pub fn claim_tool(&self, session: &str, call: &str) -> Result<bool> {
+        self.claim(session, call, false)
+    }
+    /// Claim a call the executor guarantees has no side effects. If it is
+    /// interrupted, it closes as a retryable failure rather than uncertain.
+    pub fn claim_side_effect_free_tool(&self, session: &str, call: &str) -> Result<bool> {
+        self.claim(session, call, true)
+    }
+    fn claim(&self, session: &str, call: &str, side_effect_free: bool) -> Result<bool> {
         Ok(self.conn.execute(
-            "INSERT OR IGNORE INTO tool_runs(session_id,call_id,state) VALUES (?1,?2,'started')",
-            params![session, call],
+            "INSERT OR IGNORE INTO tool_runs(session_id,call_id,state,side_effect_free) VALUES (?1,?2,'started',?3)",
+            params![session, call, side_effect_free],
         )? == 1)
+    }
+    /// Close a side-effect-free claim that never recorded a result. Returns
+    /// false, changing nothing, for any other claim state.
+    pub fn close_interrupted_side_effect_free_tool(
+        &mut self,
+        session: &str,
+        call: &str,
+    ) -> Result<bool> {
+        let free: bool = self
+            .conn
+            .query_row(
+                "SELECT side_effect_free FROM tool_runs WHERE session_id=?1 AND call_id=?2 AND state='started'",
+                params![session, call],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if free {
+            self.complete_tool_with_outcome(
+                session,
+                call,
+                INTERRUPTED_SIDE_EFFECT_FREE,
+                ToolOutcome::Failed,
+            )?;
+        }
+        Ok(free)
     }
     pub fn tool_run_state(&self, session: &str, call: &str) -> Result<ToolRunState> {
         let state = self
@@ -789,11 +862,11 @@ fn close_pending(tx: &Transaction<'_>, id: &str, messages: &[Message]) -> Result
             if completed.contains(call.id.as_str()) {
                 continue;
             }
-            let run: Option<(String, Option<String>)> = tx
+            let run: Option<(String, Option<String>, bool)> = tx
                 .query_row(
-                    "SELECT state,result FROM tool_runs WHERE session_id=?1 AND call_id=?2",
+                    "SELECT state,result,side_effect_free FROM tool_runs WHERE session_id=?1 AND call_id=?2",
                     params![id, call.id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
             let (result, outcome) = match run {
@@ -801,7 +874,11 @@ fn close_pending(tx: &Transaction<'_>, id: &str, messages: &[Message]) -> Result
                     "CANCELLED: User stopped this turn before this tool ran. Do not execute the cancelled request.".to_owned(),
                     None,
                 ),
-                Some((state, Some(result))) if state == "finished" => (result, None),
+                Some((state, Some(result), _)) if state == "finished" => (result, None),
+                Some((_, _, true)) => (
+                    INTERRUPTED_SIDE_EFFECT_FREE.to_owned(),
+                    Some(serde_json::to_string(&ToolOutcome::Failed)?),
+                ),
                 Some(_) => {
                     uncertain += 1;
                     (

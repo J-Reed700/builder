@@ -105,26 +105,56 @@ async fn search_respects_ignore_files() {
 }
 
 #[tokio::test]
-async fn large_files_require_a_range_and_ranges_guide_continuation() {
+async fn large_files_open_with_an_outline_and_ranges_guide_continuation() {
     let dir = tempfile::tempdir().unwrap();
     let content = (1..=1400)
         .map(|n| format!("source line {n}\n"))
         .collect::<String>();
     std::fs::write(dir.path().join("large.ts"), content).unwrap();
     let workspace = Workspace::new(dir.path()).unwrap();
-    // A rangeless read of a large file is still refused with orientation,
-    // never a source dump.
-    let error = workspace
+    // A rangeless read of a large file returns its opening lines and the way
+    // forward, never the whole file and never an empty retry round.
+    let output = workspace
         .execute(&Action::ReadFile {
             path: "large.ts".into(),
             start_line: None,
             end_line: None,
         })
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("1400 lines"));
-    assert!(!error.contains("source line"));
+        .unwrap();
+    assert!(output.contains("1400 total lines"));
+    assert!(output.contains("  200|source line 200"));
+    assert!(!output.contains("source line 201"));
+    assert!(output.contains("large file"));
+    assert!(output.contains("lines 201–1400 remain; continue with start_line=201"));
+    // Declarations are listed with their lines so the next read is targeted.
+    std::fs::write(
+        dir.path().join("panel.tsx"),
+        format!(
+            "export function ChatPanel() {{\n  const handleSubmit = async (event) => {{}};\n  const onKey = useCallback(() => {{}}, []);\n  const total = a == b;\n{}}}\n",
+            "  // filler\n".repeat(400)
+        ),
+    )
+    .unwrap();
+    let output = workspace
+        .execute(&Action::ReadFile {
+            path: "panel.tsx".into(),
+            start_line: None,
+            end_line: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        output
+            .lines()
+            .nth(1)
+            .map(|line| line.starts_with("Source-SHA256: ")),
+        Some(true)
+    );
+    for row in [" L1 ChatPanel", " L2 handleSubmit", " L3 onKey"] {
+        assert!(output.lines().any(|line| line == row), "{output}");
+    }
+    assert!(!output.contains("L4 total"), "{output}");
     // A lone start_line reads a forward chunk with an explicit continuation.
     let output = workspace
         .execute(&Action::ReadFile {
@@ -207,20 +237,19 @@ async fn long_unicode_lines_are_rejected_and_search_remains_bounded() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("long.ts"), "🦀".repeat(4000)).unwrap();
     let workspace = Workspace::new(dir.path()).unwrap();
-    let error = workspace
+    let output = workspace
         .execute(&Action::ReadFile {
             path: "long.ts".into(),
             start_line: Some(1),
             end_line: Some(1),
         })
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("12288 output bytes"));
-    assert!(error.contains("No source was returned"));
-    assert!(!error.contains('🦀'));
-    // A range that overflows the byte budget partway names the exact range
-    // to retry instead of leaving the model to guess.
+        .unwrap();
+    assert!(output.len() <= 12288, "{}", output.len());
+    assert!(output.contains("    1|🦀"));
+    assert!(output.contains("line 1 exceeds the 12288-byte output budget and was cut"));
+    // A range that overflows the byte budget partway returns what fits and
+    // the exact line to continue from.
     std::fs::write(
         dir.path().join("wide.ts"),
         (1..=100)
@@ -228,21 +257,27 @@ async fn long_unicode_lines_are_rejected_and_search_remains_bounded() {
             .collect::<String>(),
     )
     .unwrap();
-    let error = workspace
+    let output = workspace
         .execute(&Action::ReadFile {
             path: "wide.ts".into(),
             start_line: Some(1),
             end_line: Some(100),
         })
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("12288 output bytes at line"), "{error}");
+        .unwrap();
+    assert!(output.len() <= 12288, "{}", output.len());
+    let shown = output
+        .lines()
+        .filter_map(|line| line.trim_start().split_once('|'))
+        .filter_map(|(number, _)| number.parse::<usize>().ok())
+        .max()
+        .unwrap();
+    assert!((30..100).contains(&shown), "{output}");
+    assert!(output.contains(&format!("showing 1–{shown}")), "{output}");
     assert!(
-        error.contains("Retry with start_line=1 and end_line="),
-        "{error}"
+        output.contains(&format!("continue with start_line={}", shown + 1)),
+        "{output}"
     );
-    assert!(!error.contains("xxx"), "{error}");
     std::fs::write(
         dir.path().join("matches.ts"),
         format!("needle {}\n", "🦀".repeat(300)).repeat(100),
@@ -477,5 +512,78 @@ fn result_note_reports_failure_and_nonzero_exit() {
     assert_eq!(
         builder_tools::result_note("read_file", "1 | one\n2 | two\n"),
         Some("2 lines".into())
+    );
+}
+
+#[tokio::test]
+async fn multi_edit_applies_in_order_atomically_or_not_at_all() {
+    use builder_tools::Replacement;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rate.ts");
+    std::fs::write(&path, "const rate = 1;\nconst cap = rate;\nlog(rate);\n").unwrap();
+    let workspace = Workspace::new(dir.path()).unwrap();
+    let edit = |edits: Vec<(&str, &str, bool)>| Action::MultiEdit {
+        path: "rate.ts".into(),
+        edits: edits
+            .into_iter()
+            .map(|(old, new, replace_all)| Replacement {
+                old: old.into(),
+                new: new.into(),
+                replace_all,
+            })
+            .collect(),
+    };
+
+    // A later edit that fails leaves the earlier ones unapplied.
+    let error = workspace
+        .execute(&edit(vec![
+            ("const rate = 1;", "const rate = 2;", false),
+            ("missing text", "x", false),
+        ]))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("Edit 2 of 2 failed, so none were applied"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "const rate = 1;\nconst cap = rate;\nlog(rate);\n"
+    );
+
+    // An ambiguous single replacement explains how to disambiguate.
+    let error = workspace
+        .execute(&edit(vec![("rate", "limit", false)]))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("found 3 matches"), "{error}");
+    assert!(error.contains("replace_all"), "{error}");
+
+    // Edits see the result of the previous edit; replace_all renames.
+    workspace
+        .execute(&edit(vec![
+            ("const rate = 1;", "const rate = 2;", false),
+            ("rate", "limit", true),
+            ("log(limit);", "log(limit, cap);", false),
+        ]))
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "const limit = 2;\nconst cap = limit;\nlog(limit, cap);\n"
+    );
+    assert!(
+        workspace
+            .execute(&edit(vec![]))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("1–50 edits")
+    );
+    assert_eq!(
+        edit(vec![("a", "b", false)]).risk(),
+        builder_tools::Risk::Write
     );
 }

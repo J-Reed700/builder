@@ -11,3 +11,4 @@ pub mod remote;
 pub mod remote_connect;
 pub mod research;
 pub mod retrieval_eval;
+pub mod subagent;

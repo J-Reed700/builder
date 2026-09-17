@@ -16,7 +16,12 @@ const WHOLE_FILE_LINES: usize = 200;
 const MAX_READ_LINES: usize = 500;
 const MAX_READ_OUTPUT: usize = 12 * 1024;
 const MAX_SEARCH_OUTPUT: usize = 8 * 1024;
+/// Room kept for range notes after the numbered lines.
+const READ_NOTE_RESERVE: usize = 640;
+const OUTLINE_ENTRIES: usize = 80;
+const OUTLINE_BYTES: usize = 3 * 1024;
 
+#[derive(Clone)]
 pub struct Workspace {
     root: PathBuf,
 }
@@ -166,17 +171,126 @@ impl Workspace {
                 .unwrap_or_default()
         ))
     }
-    pub async fn execute(&self, action: &Action) -> Result<String> {
-        let output = match action {
-            Action::Research { .. }
-            | Action::CodeSearch { .. }
-            | Action::MemorySearch { .. }
-            | Action::MemoryGet { .. }
-            | Action::MemoryUpsert { .. }
-            | Action::MemoryForget { .. }
-            | Action::TaskUpdate { .. } => {
-                bail!("Memory actions require the application memory runtime")
+    /// A bounded, numbered range. Limits shape the result instead of
+    /// rejecting it: a model that asks for too much still gets the part that
+    /// fits and the exact next range, never an empty retry round.
+    fn read_range(
+        &self,
+        path: &str,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+    ) -> Result<String> {
+        let content = self.read(&self.resolve(path)?)?;
+        let total_lines = content.lines().count();
+        // One approximate location is enough to begin: a lone start_line
+        // reads forward from it, a lone end_line reads the chunk ending at
+        // it, and out-of-range ends clamp to the file.
+        let start = match (start_line, end_line) {
+            (Some(start), _) => start,
+            (None, Some(end)) => end.saturating_sub(MAX_READ_LINES - 1).max(1),
+            (None, None) => 1,
+        };
+        ensure!(
+            start > 0,
+            "Invalid line range: start_line must be at least 1"
+        );
+        if let Some(end) = end_line {
+            ensure!(
+                end >= start,
+                "Invalid line range: end_line {end} is before start_line {start}"
+            );
+        }
+        let mut header = format!(
+            "File: {} · {total_lines} total lines · {} bytes\nSource-SHA256: {}\nLine format: number|source. Everything after the first | is exact source indentation; omit the number and | when editing.",
+            serde_json::to_string(path)?,
+            content.len(),
+            builder_core::memory::digest(content.as_bytes())
+        );
+        if total_lines == 0 {
+            return Ok(format!("{header}\n[empty file]"));
+        }
+        if start > total_lines {
+            return Ok(format!(
+                "{header}\n[start_line {start} is beyond the last line {total_lines}; no lines returned. Use a start_line between 1 and {total_lines}]"
+            ));
+        }
+        let mut end = end_line.unwrap_or(total_lines).min(total_lines);
+        let mut notes: Vec<String> = Vec::new();
+        let whole_request = start_line.is_none() && end_line.is_none();
+        if whole_request && (total_lines > WHOLE_FILE_LINES || content.len() > MAX_READ_OUTPUT) {
+            header.push_str(&outline(path, &content));
+            end = end.min(WHOLE_FILE_LINES);
+            notes.push(
+                "large file: this whole-file request returns only its opening lines; choose the next range from the outline, code_search, or search instead of paging through the file"
+                    .to_owned(),
+            );
+        }
+        if start > 1 {
+            notes.push(format!("lines 1–{} precede this range", start - 1));
+        }
+        if end - start + 1 > MAX_READ_LINES {
+            end = start + MAX_READ_LINES - 1;
+            notes.push(format!(
+                "requested range exceeds {MAX_READ_LINES} lines; showing {start}–{end}"
+            ));
+        }
+        // Fill the byte budget line by line; notes are short and reserved.
+        let budget = MAX_READ_OUTPUT.saturating_sub(header.len() + READ_NOTE_RESERVE);
+        let mut body = String::new();
+        let mut shown = start - 1;
+        for (index, line) in content
+            .lines()
+            .enumerate()
+            .skip(start - 1)
+            .take(end - start + 1)
+        {
+            let numbered = format!("{:>5}|{line}", index + 1);
+            let cost = numbered.len() + usize::from(!body.is_empty());
+            if body.len() + cost > budget {
+                if shown < start {
+                    // A single minified or generated line: show its head.
+                    let mut cut = budget.saturating_sub(1);
+                    while !numbered.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    body.push_str(&numbered[..cut]);
+                    body.push('…');
+                    shown = index + 1;
+                    notes.push(format!(
+                        "line {shown} exceeds the {MAX_READ_OUTPUT}-byte output budget and was cut at …; that line is not exact source, so use search to locate the needed part"
+                    ));
+                } else {
+                    notes.push(format!(
+                        "{MAX_READ_OUTPUT}-byte output budget reached; showing {start}–{shown}"
+                    ));
+                }
+                break;
             }
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            body.push_str(&numbered);
+            shown = index + 1;
+        }
+        if shown < total_lines {
+            notes.push(format!(
+                "lines {}–{total_lines} remain; continue with start_line={}",
+                shown + 1,
+                shown + 1
+            ));
+        }
+        let mut output = header;
+        output.push('\n');
+        output.push_str(&body);
+        if !notes.is_empty() {
+            output.push_str(&format!("\n[{}]", notes.join("; ")));
+        }
+        Ok(output)
+    }
+    /// Side-effect-free inspection. Synchronous and self-contained, so
+    /// several may run at once on blocking threads.
+    pub fn inspect(&self, action: &Action) -> Result<String> {
+        let output = match action {
             Action::ListFiles { glob } => {
                 let files = self.files(glob.as_deref())?;
                 let mut out = files
@@ -194,111 +308,7 @@ impl Workspace {
                 path,
                 start_line,
                 end_line,
-            } => {
-                let content = self.read(&self.resolve(path)?)?;
-                let total_lines = content.lines().count();
-                ensure!(
-                    start_line.is_some()
-                        || end_line.is_some()
-                        || (total_lines <= WHOLE_FILE_LINES && content.len() <= MAX_READ_OUTPUT),
-                    "Large file: {path} has {total_lines} lines and {} bytes. Search for the relevant symbol, then provide start_line (end_line is optional; a range returns at most {MAX_READ_LINES} lines and {MAX_READ_OUTPUT} output bytes). A full-file read was not returned. Do not use shell to dump the file instead.",
-                    content.len()
-                );
-                // One approximate location is enough to begin: a lone
-                // start_line reads forward from it, a lone end_line reads the
-                // chunk ending at it, and out-of-range ends clamp to the file.
-                let start = match (start_line, end_line) {
-                    (Some(start), _) => *start,
-                    (None, Some(end)) => end.saturating_sub(MAX_READ_LINES - 1).max(1),
-                    (None, None) => 1,
-                };
-                ensure!(
-                    start > 0,
-                    "Invalid line range: start_line must be at least 1"
-                );
-                if let Some(end) = end_line {
-                    ensure!(
-                        *end >= start,
-                        "Invalid line range: end_line {end} is before start_line {start}"
-                    );
-                }
-                let header = format!(
-                    "File: {} · {total_lines} total lines · {} bytes\nSource-SHA256: {}\nLine format: number|source. Everything after the first | is exact source indentation; omit the number and | when editing.",
-                    serde_json::to_string(path)?,
-                    content.len(),
-                    builder_core::memory::digest(content.as_bytes())
-                );
-                if total_lines == 0 {
-                    return Ok(format!("{header}\n[empty file]"));
-                }
-                if start > total_lines {
-                    return Ok(format!(
-                        "{header}\n[start_line {start} is beyond the last line {total_lines}; no lines returned. Use a start_line between 1 and {total_lines}]"
-                    ));
-                }
-                let mut end = end_line.unwrap_or(total_lines).min(total_lines);
-                let mut notes: Vec<String> = Vec::new();
-                if start > 1 {
-                    notes.push(format!("lines 1–{} precede this range", start - 1));
-                }
-                if end - start + 1 > MAX_READ_LINES {
-                    end = start + MAX_READ_LINES - 1;
-                    notes.push(format!(
-                        "requested range exceeds {MAX_READ_LINES} lines; showing {start}–{end}"
-                    ));
-                }
-                if end < total_lines {
-                    notes.push(format!(
-                        "lines {}–{total_lines} remain; continue with start_line={}",
-                        end + 1,
-                        end + 1
-                    ));
-                }
-                let body = content
-                    .lines()
-                    .enumerate()
-                    .skip(start - 1)
-                    .take(end - start + 1)
-                    .map(|(n, line)| format!("{:>5}|{line}", n + 1))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let mut output = header;
-                output.push('\n');
-                output.push_str(&body);
-                if !notes.is_empty() {
-                    output.push_str(&format!("\n[{}]", notes.join("; ")));
-                }
-                if output.len() > MAX_READ_OUTPUT {
-                    // Name the exact line where the budget runs out so the
-                    // next request can be sized without trial and error.
-                    let overhead = output.len() - body.len();
-                    let mut used = overhead;
-                    let mut fits = start - 1;
-                    for (n, line) in content
-                        .lines()
-                        .enumerate()
-                        .skip(start - 1)
-                        .take(end - start + 1)
-                    {
-                        let line_bytes = format!("{:>5}|{line}", n + 1).len() + 1;
-                        if used + line_bytes > MAX_READ_OUTPUT {
-                            break;
-                        }
-                        used += line_bytes;
-                        fits = n + 1;
-                    }
-                    if fits >= start {
-                        bail!(
-                            "Requested range exceeds {MAX_READ_OUTPUT} output bytes at line {}. No source was returned. Retry with start_line={start} and end_line={fits}.",
-                            fits + 1
-                        );
-                    }
-                    bail!(
-                        "Line {start} alone exceeds the {MAX_READ_OUTPUT} output bytes limit (long or minified line). No source was returned. Use search to locate the needed part of that line."
-                    );
-                }
-                output
-            }
+            } => self.read_range(path, *start_line, *end_line)?,
             Action::Search { query, glob } => {
                 ensure!(!query.is_empty(), "Search query cannot be empty");
                 let mut results = vec![];
@@ -324,47 +334,54 @@ impl Workspace {
                 }
                 truncate(results.join("\n"), MAX_SEARCH_OUTPUT)
             }
+            _ => bail!("Not a workspace inspection"),
+        };
+        Ok(truncate(output, MAX_OUTPUT))
+    }
+    pub async fn execute(&self, action: &Action) -> Result<String> {
+        let output = match action {
+            Action::ListFiles { .. } | Action::ReadFile { .. } | Action::Search { .. } => {
+                return self.inspect(action);
+            }
+            Action::Subagent { .. } => bail!("Subagents require the application runtime"),
+            Action::Research { .. }
+            | Action::CodeSearch { .. }
+            | Action::MemorySearch { .. }
+            | Action::MemoryGet { .. }
+            | Action::MemoryUpsert { .. }
+            | Action::MemoryForget { .. } => {
+                bail!("Memory actions require the application memory runtime")
+            }
+            Action::TodoWrite { todos } => {
+                todos.validate()?;
+                todos.receipt()
+            }
             Action::WriteFile { path, content } => self.write(&self.resolve(path)?, content)?,
             Action::EditFile { path, old, new } => {
-                ensure!(!old.is_empty(), "Old text cannot be empty");
-                ensure!(
-                    old != new,
-                    "Old and new text are identical; file unchanged. Propose an actual change or report the existing result."
-                );
                 let path = self.resolve(path)?;
                 let content = self.read(&path)?;
-                let matches = content.matches(old).count();
-                if matches != 1 {
-                    let mut hint = String::new();
-                    if matches == 0
-                        && let Some(anchor) = old.lines().find(|line| !line.trim().is_empty())
-                    {
-                        let mut candidates = content
-                            .lines()
-                            .enumerate()
-                            .filter(|(_, line)| line.trim() == anchor.trim());
-                        if let Some((index, _)) = candidates.next()
-                            && candidates.next().is_none()
-                        {
-                            let snippet = content
-                                .lines()
-                                .skip(index)
-                                .take(8)
-                                .map(str::to_owned)
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            hint = format!(
-                                " A possible first-line anchor is at line {}. Current source, without line-number prefixes:\n{}",
+                self.write(&path, &replace(&content, old, new, false)?)?
+            }
+            Action::MultiEdit { path, edits } => {
+                ensure!(
+                    (1..=crate::MAX_EDITS).contains(&edits.len()),
+                    "multi_edit takes 1–{} edits",
+                    crate::MAX_EDITS
+                );
+                let path = self.resolve(path)?;
+                let mut content = self.read(&path)?;
+                for (index, edit) in edits.iter().enumerate() {
+                    content = replace(&content, &edit.old, &edit.new, edit.replace_all).map_err(
+                        |error| {
+                            anyhow::anyhow!(
+                                "Edit {} of {} failed, so none were applied: {error:#}",
                                 index + 1,
-                                truncate(snippet, 2048)
-                            );
-                        }
-                    }
-                    bail!(
-                        "Old text must match exactly once; found {matches} matches. File unchanged. Preserve source indentation and actual newlines in old/new; do not copy line-number prefixes. Use a unique exact block.{hint}"
-                    );
+                                edits.len()
+                            )
+                        },
+                    )?;
                 }
-                self.write(&path, &content.replacen(old, new, 1))?
+                self.write(&path, &content)?
             }
             Action::Shell {
                 command,
@@ -454,6 +471,85 @@ async fn capture(mut stream: impl AsyncRead + Unpin) -> Result<String> {
         text.push_str("\n[output truncated]");
     }
     Ok(text)
+}
+/// Replace exact text: once and uniquely, or every occurrence when `all`.
+/// A failed match returns a diagnostic anchor, never a fuzzy replacement.
+fn replace(content: &str, old: &str, new: &str, all: bool) -> Result<String> {
+    ensure!(!old.is_empty(), "Old text cannot be empty");
+    ensure!(
+        old != new,
+        "Old and new text are identical; file unchanged. Propose an actual change or report the existing result."
+    );
+    let matches = content.matches(old).count();
+    if all && matches > 0 {
+        return Ok(content.replace(old, new));
+    }
+    if matches == 1 {
+        return Ok(content.replacen(old, new, 1));
+    }
+    let mut hint = String::new();
+    if matches == 0
+        && let Some(anchor) = old.lines().find(|line| !line.trim().is_empty())
+    {
+        let mut candidates = content
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.trim() == anchor.trim());
+        if let Some((index, _)) = candidates.next()
+            && candidates.next().is_none()
+        {
+            let snippet = content
+                .lines()
+                .skip(index)
+                .take(8)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+                .join("\n");
+            hint = format!(
+                " A possible first-line anchor is at line {}. Current source, without line-number prefixes:\n{}",
+                index + 1,
+                truncate(snippet, 2048)
+            );
+        }
+    }
+    let expectation = if all {
+        "Old text must match at least once"
+    } else {
+        "Old text must match exactly once"
+    };
+    let uniqueness = if matches > 1 {
+        " Add surrounding lines to make it unique, or set replace_all when every occurrence should change."
+    } else {
+        ""
+    };
+    bail!(
+        "{expectation}; found {matches} matches. File unchanged. Preserve source indentation and actual newlines in old/new; do not copy line-number prefixes. Use a unique exact block.{uniqueness}{hint}"
+    )
+}
+/// Declarations with line numbers for a file too large to read whole. Rows
+/// use `L<line> <name>` so they are never mistaken for numbered source.
+fn outline(path: &str, content: &str) -> String {
+    let entries = crate::code_index::outline(Path::new(path), content);
+    if entries.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from("\nOutline (line and declaration; read a range with start_line):");
+    let mut shown = 0;
+    for (line, symbol) in &entries {
+        let row = format!("\n L{line} {symbol}");
+        if shown == OUTLINE_ENTRIES || text.len() + row.len() > OUTLINE_BYTES {
+            break;
+        }
+        text.push_str(&row);
+        shown += 1;
+    }
+    if shown < entries.len() {
+        text.push_str(&format!(
+            "\n [outline shows {shown} of {} declarations; use search for others]",
+            entries.len()
+        ));
+    }
+    text
 }
 fn truncate(mut text: String, limit: usize) -> String {
     if text.len() > limit {
