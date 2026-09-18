@@ -10,6 +10,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import re
 import select
 import signal
 import struct
@@ -81,6 +82,17 @@ class Terminal:
         while needle not in self.output[start:]:
             if time.monotonic() > deadline:
                 raise AssertionError(f"Timed out waiting for {text!r}: {self.output[-1500:]!r}")
+            self.drain()
+
+    def expect_row(self, label, value, start=0, timeout=8):
+        """Wait for a menu row: a label and its value, separated by padding."""
+        pattern = re.compile(re.escape(label).encode() + rb"\s+" + re.escape(value).encode())
+        deadline = time.monotonic() + timeout
+        while not pattern.search(self.output[start:]):
+            if time.monotonic() > deadline:
+                raise AssertionError(
+                    f"Timed out waiting for {label!r} = {value!r}: {self.output[-1500:]!r}"
+                )
             self.drain()
 
     def send(self, data):
@@ -202,17 +214,24 @@ max_output_tokens = 1024
             mark = len(terminal.output)
             terminal.send("\r")
             terminal.expect("enter run", mark)
-            assert b"Estimated history tokens:" not in terminal.output[mark:], "Choosing a command executed it"
+            assert b"tool schemas are counted" not in terminal.output[mark:], "Choosing a command executed it"
             assert len(Endpoint.requests) == 1, "Browsing commands contacted the model"
             terminal.send("\x15")
             terminal.send("/sta\t\r")
-            terminal.expect("Estimated history tokens:", mark)
+            terminal.expect("tool schemas are counted separately", mark)
+            terminal.expect("Ask Builder", mark)
+            # /clear wipes the visible screen, not just the stored context.
+            mark = len(terminal.output)
+            terminal.send("/clear\r")
+            terminal.expect("Conversation cleared", mark)
+            assert b"\x1b[2J" in terminal.output[mark:], \
+                "/clear did not clear the visible screen"
             terminal.expect("Ask Builder", mark)
             mark = len(terminal.output)
             terminal.send("\x04")
             terminal.expect("Saved. Continue with", mark)
             assert b"\x1b[?2004l" in terminal.output, "Bracketed paste mode was not restored"
-            print("PASS: exact multiline payload, no auto-submit, compact output, command menu, tab completion, resize, terminal cleanup")
+            print("PASS: exact multiline payload, no auto-submit, compact output, command menu, tab completion, resize, /clear screen wipe, terminal cleanup")
         finally:
             terminal.close()
             endpoint.shutdown()

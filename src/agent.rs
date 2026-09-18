@@ -102,8 +102,13 @@ pub enum SummaryStage {
     Waiting,
     /// The server is processing the fragment's prompt.
     Reading { processed: u64, total: u64 },
-    /// The model is writing; `bytes` counts visible and reasoning output.
-    Writing { bytes: usize },
+    /// The model is producing the handoff. Hidden reasoning is counted apart
+    /// from handoff text, and `expected` is the size the estimate runs against.
+    Writing {
+        summary_bytes: usize,
+        reasoning_bytes: usize,
+        expected: usize,
+    },
 }
 
 pub struct Agent<P> {

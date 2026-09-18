@@ -3,6 +3,8 @@
 pub mod buffer;
 mod clipboard;
 pub mod layout;
+pub mod memory;
+pub mod menu;
 pub mod pipeline;
 
 use crate::ui::{safe, theme};
@@ -25,7 +27,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const COMMANDS: &[(&str, &str)] = &[
+pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("/help", "Keyboard shortcuts and commands"),
     ("/status", "Context usage and session details"),
     ("/settings", "Pipeline features and budgets"),
@@ -36,6 +38,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/compact", "Summarize context; preserve original history"),
     ("/cancel", "Cancel pending work and keep the conversation"),
     ("/rewind", "Edit the previous message; archive its turn"),
+    (
+        "/clear",
+        "Start a fresh conversation; archive the current one",
+    ),
     ("/attach ", "Attach a file from this workspace"),
     ("/exit", "Save and leave"),
 ];

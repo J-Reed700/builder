@@ -676,49 +676,47 @@ async fn app(cli: Cli) -> Result<()> {
         }
         match line {
             "/exit" | "/quit" => break,
-            "/help" => println!(
-                "\n  /status         Session, context estimate, and recovery state\n  /settings       Open pipeline settings menu\n  /memory         Local memory settings and model setup\n  /history        Show active conversation (/history archived shows rewound turns)\n  /todo           Show the agent's current todo list\n  /cancel         End pending work; keep completed context\n  /rewind         Archive the last turn and edit its user message (files stay changed)\n  /retry          Continue an unfinished turn\n  /compact        Summarize context now; preserve originals\n  /attach PATH    Send a workspace file into the conversation\n  /exit           Save and leave\n\nEdits and commands require approval unless --auto or --approval trust is set.\nEnter sends · Alt+Enter / Ctrl+J inserts a new line\nCtrl+V pastes directly from clipboard (macOS)\nCtrl+Z undo · Ctrl+Y redo · Ctrl+W delete word · Ctrl+U clear\n↑/↓ navigate lines (history when empty) · Ctrl+P/N history\n/ opens commands · ↑/↓ browse · Tab or Enter completes · Enter runs · Esc closes\nLarge pastes fold into blocks; their full text is sent on Enter.\nCtrl+C during a response pauses it; send a follow-up to change direction.\nAll messages are saved automatically. Rewound turns remain archived.\n"
-            ),
+            "/help" => println!("\n{}", ui::help(ui::panel::width())),
             "/memory" => {
                 stop_memory_task(&mut memory_task).await;
-                println!(
-                    "\nMemory settings\n1. Local embeddings (one-time ~91 MB model download; then offline)\n2. Keyword-only memory (no embedding model)\n3. Disable memory (retain stored records)\nEnter to cancel"
-                );
-                let choice = if plain {
-                    editor.read_plain()?
-                } else {
-                    editor.read("Memory settings · enter 1, 2 or 3")?
-                };
-                if let builder::input::Input::Submit(choice) = choice {
-                    let update = async {
-                        let mut latest = Config::load(&config_home)?;
-                        let baseline = latest.memory.clone();
-                        match choice.trim() {
-                            "1" => setup_local_memory(&mut latest, &home).await?,
-                            "2" => {
-                                latest.memory.enabled = true;
-                                latest.memory.embedding_backend = config::EmbeddingBackend::Lexical;
+                let chosen = builder::input::memory::choose(&config.memory, plain);
+                match chosen {
+                    Ok(None) => println!("Memory settings unchanged."),
+                    Err(error) => report(&anyhow::anyhow!("{error}")),
+                    Ok(Some(mode)) => {
+                        let update = async {
+                            let mut latest = Config::load(&config_home)?;
+                            let baseline = latest.memory.clone();
+                            match mode {
+                                builder::input::memory::Mode::Local => {
+                                    setup_local_memory(&mut latest, &home).await?
+                                }
+                                builder::input::memory::Mode::Lexical => {
+                                    latest.memory.enabled = true;
+                                    latest.memory.embedding_backend =
+                                        config::EmbeddingBackend::Lexical;
+                                }
+                                builder::input::memory::Mode::Disabled => {
+                                    latest.memory.enabled = false
+                                }
                             }
-                            "3" => latest.memory.enabled = false,
-                            "" => return Ok::<_, anyhow::Error>(()),
-                            _ => anyhow::bail!("Choose 1, 2 or 3; memory settings unchanged"),
+                            let mut current = Config::load(&config_home)?;
+                            ensure!(
+                                current.memory == baseline,
+                                "Memory settings changed during setup; reopen /memory before saving"
+                            );
+                            current.memory = latest.memory;
+                            let memory = builder::memory::MemoryRuntime::from_config(&current)?;
+                            current.save(&config_home)?;
+                            agent.memory = memory;
+                            config = current;
+                            println!("Memory settings saved and applied to this session.");
+                            Ok::<_, anyhow::Error>(())
                         }
-                        let mut current = Config::load(&config_home)?;
-                        ensure!(
-                            current.memory == baseline,
-                            "Memory settings changed during setup; reopen /memory before saving"
-                        );
-                        current.memory = latest.memory;
-                        let memory = builder::memory::MemoryRuntime::from_config(&current)?;
-                        current.save(&config_home)?;
-                        agent.memory = memory;
-                        config = current;
-                        println!("Memory settings saved and applied to this session.");
-                        Ok(())
-                    }
-                    .await;
-                    if let Err(error) = update {
-                        report(&error);
+                        .await;
+                        if let Err(error) = update {
+                            report(&error);
+                        }
                     }
                 }
             }
@@ -786,59 +784,147 @@ async fn app(cli: Cli) -> Result<()> {
                             "disabled".into()
                         }
                     });
-                let index = index_status
-                    .map(|status| {
-                        let vectors = coverage
-                            .map(|(indexed, total)| format!(" · semantic {indexed}/{total}"))
-                            .unwrap_or_default();
+                let used = estimate_tokens(&messages);
+                let limit = agent.profile.context_tokens;
+                let percent = used.saturating_mul(100) / limit.max(1);
+                let pipeline = &agent.profile.pipeline;
+                let mut rows = vec![
+                    ui::panel::section("Context"),
+                    ui::panel::field("Messages", ui::panel::count(messages.len())),
+                    ui::panel::field(
+                        "History",
                         format!(
-                            "generation {} · {} files · {} chunks{} · skipped {} · {} · refreshed {} · updates {} · queries {} ({} abstained, {} stale suppressed, {}ms average)",
-                            status.generation,
-                            status.files,
-                            status.chunks,
-                            vectors,
-                            status.skipped,
-                            status.status,
-                            status.completed_at,
-                            update_mode,
-                            query_summary.queries,
-                            query_summary.abstentions,
-                            query_summary.stale_suppressions,
-                            query_summary.average_elapsed_ms,
-                        )
-                    })
-                    .unwrap_or_else(|| "not built yet".into());
-                println!(
-                    "\nSession: {}\nMessages: {}\nEstimated history tokens: {} / {} ({} reserved for output; tool schemas extra)\nState: {}\nStorage: {}\nModel: {}\nCode index: {}\nMemory: {}\nAgent rounds per run: {}\nProgress guard: focus after {} tool calls; tool-free conclusion at {}; full context preserved\nFailure guard: recover after {} consecutive failures; {} recovery rounds\nTool limits: {} per response; {} completed identical shell calls\nCompaction: {}\n",
-                    agent.session,
-                    messages.len(),
-                    estimate_tokens(&messages),
-                    agent.profile.context_tokens,
-                    agent.profile.max_output_tokens,
-                    if pending(&messages) {
-                        "paused; send a follow-up, /retry, /cancel, or /rewind"
-                    } else {
-                        "ready"
-                    },
-                    home.display(),
-                    ui::safe(&agent.profile.model),
-                    ui::safe(&index),
-                    ui::safe(&memory_status),
-                    agent.max_rounds,
-                    agent.profile.pipeline.progress_check_calls,
-                    agent.profile.pipeline.max_no_progress_calls(),
-                    agent.profile.pipeline.failure_check_calls,
-                    agent.profile.pipeline.failure_recovery_rounds,
-                    agent.profile.pipeline.tool_calls_per_response,
-                    agent.profile.pipeline.identical_shell_calls,
-                    if agent.profile.auto_compact {
+                            "{} of {} tokens  {}  {percent}%",
+                            ui::panel::count(used),
+                            ui::panel::count(limit),
+                            ui::panel::meter(percent, 12)
+                        ),
+                    ),
+                    ui::panel::field(
+                        "Reserved",
                         format!(
-                            "compact at {}% · originals retained",
-                            agent.profile.compact_at_percent
-                        )
-                    } else {
-                        "auto-compact off".into()
+                            "{} output tokens; tool schemas are counted separately",
+                            ui::panel::count(agent.profile.max_output_tokens)
+                        ),
+                    ),
+                    ui::panel::field(
+                        "Compaction",
+                        if agent.profile.auto_compact {
+                            format!(
+                                "automatic at {}% · originals retained",
+                                agent.profile.compact_at_percent
+                            )
+                        } else {
+                            "off · /compact summarizes on request".into()
+                        },
+                    ),
+                    ui::panel::field(
+                        "State",
+                        if pending(&messages) {
+                            "paused; send a follow-up, /retry, /cancel, or /rewind"
+                        } else {
+                            "ready"
+                        },
+                    ),
+                    ui::panel::section("Session"),
+                    ui::panel::field(
+                        "Profile",
+                        format!(
+                            "{} · {}",
+                            ui::safe(&profile_name),
+                            ui::safe(&agent.profile.model)
+                        ),
+                    ),
+                    ui::panel::field(
+                        "Approval",
+                        match agent.approval {
+                            ApprovalMode::Ask => "approve changes",
+                            ApprovalMode::ReadOnly => "read only",
+                            ApprovalMode::Trust => "auto · all tools approved",
+                        },
+                    ),
+                    ui::panel::field("Rounds per run", agent.max_rounds.to_string()),
+                    ui::panel::field("Workspace", ui::short_path(agent.workspace.root())),
+                    ui::panel::field("Storage", ui::short_path(&home)),
+                    ui::panel::section("Code index"),
+                ];
+                match index_status {
+                    None => rows.push(ui::panel::field("Build", "not built yet")),
+                    Some(status) => {
+                        rows.push(ui::panel::field(
+                            "Build",
+                            format!(
+                                "generation {} · {} files · {} chunks{}",
+                                status.generation,
+                                ui::panel::count(status.files),
+                                ui::panel::count(status.chunks),
+                                coverage
+                                    .map(|(indexed, total)| format!(
+                                        " · semantic {indexed}/{total}"
+                                    ))
+                                    .unwrap_or_default()
+                            ),
+                        ));
+                        rows.push(ui::panel::field(
+                            "State",
+                            format!(
+                                "{} · {} skipped · refreshed {}",
+                                ui::safe(&status.status),
+                                status.skipped,
+                                ui::safe(&status.completed_at)
+                            ),
+                        ));
+                        rows.push(ui::panel::field("Updates", ui::safe(&update_mode)));
+                        rows.push(ui::panel::field(
+                            "Queries",
+                            format!(
+                                "{} · {} abstained · {} stale suppressed · {}ms average",
+                                query_summary.queries,
+                                query_summary.abstentions,
+                                query_summary.stale_suppressions,
+                                query_summary.average_elapsed_ms
+                            ),
+                        ));
                     }
+                }
+                rows.extend([
+                    ui::panel::section("Memory"),
+                    ui::panel::field("Status", ui::safe(&memory_status)),
+                    ui::panel::section("Guards"),
+                    ui::panel::field(
+                        "Progress",
+                        format!(
+                            "focus after {} tool calls; tool-free conclusion at {}; full context preserved",
+                            pipeline.progress_check_calls,
+                            pipeline.max_no_progress_calls()
+                        ),
+                    ),
+                    ui::panel::field(
+                        "Failures",
+                        format!(
+                            "recover after {} consecutive failures; {} recovery rounds",
+                            pipeline.failure_check_calls, pipeline.failure_recovery_rounds
+                        ),
+                    ),
+                    ui::panel::field(
+                        "Tool limits",
+                        format!(
+                            "{} per response; {} completed identical shell calls",
+                            pipeline.tool_calls_per_response, pipeline.identical_shell_calls
+                        ),
+                    ),
+                ]);
+                println!(
+                    "\n{}",
+                    ui::panel::render(
+                        "Status",
+                        &format!(
+                            "session {}",
+                            agent.session.chars().take(8).collect::<String>()
+                        ),
+                        &rows,
+                        ui::panel::width()
+                    )
                 );
             }
             "/history" | "/history archived" => {
@@ -917,6 +1003,36 @@ async fn app(cli: Cli) -> Result<()> {
                         store.interrupt_attempts(&agent.session)?;
                         report(&error);
                     }
+                }
+            }
+            "/clear" => {
+                stop_memory_task(&mut memory_task).await;
+                let uncertain = store.close_pending_turn(&agent.session)?;
+                match store.clear(&agent.session) {
+                    Ok(archived) => {
+                        // Rich mode: wipe the visible screen so the fresh composer
+                        // starts at the top, like a brand-new conversation. The
+                        // transcript stays in /history archived. Plain/piped output
+                        // keeps its normal scrollback, so only clear a real TTY.
+                        if !plain {
+                            use crossterm::{
+                                cursor, execute,
+                                terminal::{Clear, ClearType},
+                            };
+                            let _ =
+                                execute!(io::stdout(), cursor::MoveTo(0, 0), Clear(ClearType::All));
+                        }
+                        println!(
+                            "Conversation cleared ({} messages archived); starting fresh. The transcript remains in /history archived. Workspace changes are not undone.",
+                            archived
+                        );
+                        if uncertain > 0 {
+                            eprintln!(
+                                "An interrupted tool has an uncertain outcome. Inspect the workspace before continuing."
+                            );
+                        }
+                    }
+                    Err(error) => report(&error),
                 }
             }
             "/retry" => {

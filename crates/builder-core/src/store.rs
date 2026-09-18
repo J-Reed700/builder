@@ -628,6 +628,48 @@ impl Store {
         tx.commit()?;
         Ok((prompt, uncertain))
     }
+    /// Close a pending turn without archiving anything, so an interrupted tool
+    /// keeps its durable claim and typed outcome. A no-op when the turn is
+    /// already complete.
+    pub fn close_pending_turn(&mut self, id: &str) -> Result<usize> {
+        let messages = self.messages(id)?;
+        let tx = self.journal_transaction()?;
+        let uncertain = close_pending(&tx, id, &messages)?;
+        touch(&tx, id)?;
+        tx.commit()?;
+        Ok(uncertain)
+    }
+    /// Archive the whole conversation, keeping only the system message active.
+    /// The session, transcript, and workspace are all preserved; every
+    /// archived message stays available through `/history archived`.
+    pub fn clear(&mut self, id: &str) -> Result<usize> {
+        let tx = self.journal_transaction()?;
+        let (system_seq, active): (i64, i64) = tx
+            .query_row(
+                "SELECT (SELECT seq FROM messages WHERE session_id=?1
+                    AND json_extract(body,'$.role')='system' ORDER BY seq LIMIT 1),
+                 (SELECT COUNT(*) FROM messages WHERE session_id=?1 AND active=1)",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .context("Session not found")?;
+        let archived = if active <= 1 {
+            0
+        } else {
+            tx.execute(
+                "UPDATE messages SET active=0 WHERE session_id=?1 AND active=1 AND seq>?2",
+                params![id, system_seq],
+            )?
+        };
+        tx.execute(
+            "UPDATE context_checkpoints SET active=0 WHERE session_id=?1",
+            [id],
+        )?;
+        touch(&tx, id)?;
+        tx.commit()?;
+        Ok(archived)
+    }
     pub fn composer_draft(&self, id: &str) -> Result<Option<String>> {
         Ok(self
             .conn

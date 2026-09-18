@@ -58,7 +58,7 @@ Configure `auto_compact = false` to disable automatic summaries, or `compact_at_
 
 Output limits are separate from context limits. On a `length` finish, Builder discards the incomplete result and retries once with up to twice the output budget (capped at 32,768 and available context). It never executes partial tool calls. If the larger response also hits its limit, the turn remains saved for a new instruction or `/retry`.
 
-Inside a conversation: `/help`, `/status`, `/history`, `/history archived`, `/todo`, `/retry`, `/compact`, `/cancel`, `/rewind`, `/attach PATH`, `/exit`.
+Inside a conversation: `/help`, `/status`, `/history`, `/history archived`, `/todo`, `/retry`, `/compact`, `/clear`, `/cancel`, `/rewind`, `/attach PATH`, `/exit`.
 
 During a response, **Ctrl+C pauses the agent and returns to the composer**. Send a new message to add context or change direction; completed messages and tool results remain in context, incomplete model output is discarded, and queued tools from the interrupted turn are cancelled. `/retry` instead continues from the saved context. Opening an unfinished session with `builder resume` now waits for your instruction rather than restarting the model automatically.
 
@@ -263,8 +263,10 @@ copies are not OS sandboxes. See [the research runtime guide](RESEARCH_RUNTIME.m
 for source-scope limits, examples, and the same-model evaluation harness.
 
 In interactive chat, press `/` and choose **Settings** to toggle features and edit
-limits in a menu. **Save settings** applies changes immediately and saves them to
-the current profile; **Cancel** keeps the previous settings.
+limits in a menu. Settings are grouped into sections, and `/` inside the menu
+filters them by label or section when you know what you are looking for.
+**Save settings** applies changes immediately and saves them to the current
+profile; **Cancel** keeps the previous settings.
 
 For scripting, configure features per endpoint profile or override them for one invocation:
 

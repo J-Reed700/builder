@@ -52,7 +52,7 @@ To test the macOS clipboard shortcut against the local mock endpoint, run `pytho
 
 ## Interrupt, steer, cancel, and rewind
 
-During model output, Ctrl+C drops the generation future and restores the composer. Typing a follow-up changes direction without requiring `/retry`. `/retry` continues the committed turn; `/cancel` closes it without contacting the model. `/rewind` archives the last user turn and puts its prompt back in the composer, with no automatic submission. Rewound originals remain accessible with `/history archived`; workspace files are not rolled back.
+During model output, Ctrl+C drops the generation future and restores the composer. Typing a follow-up changes direction without requiring `/retry`. `/retry` continues the committed turn; `/cancel` closes it without contacting the model. `/rewind` archives the last user turn and puts its prompt back in the composer, with no automatic submission. `/clear` closes any pending work, archives the entire conversation, and starts fresh from the system message; the transcript remains available in `/history archived`, and workspace changes are not undone. Rewound originals remain accessible with `/history archived`; workspace files are not rolled back.
 
 `python3 tests/terminal_interrupt.py target/release/builder` uses a real PTY and local mock endpoint to test Ctrl+C during a stalled response, follow-up submission with earlier tool evidence, discarded partial output, editing a rewound prompt, cancellation without a new request, reopening paused sessions, and restoring a rewound draft across restart. It requires no credentials and never touches a real project.
 
@@ -60,6 +60,19 @@ During model output, Ctrl+C drops the generation future and restores the compose
 ## Automatic and manual compaction
 
 `/status` shows the auto-compaction threshold (75% by default); the composer keeps only current context usage visible. The trigger includes estimated context, tool schemas, and reserved response tokens. `/compact` summarizes without continuing the task. Progress distinguishes summary generation from ordinary model output, and completion reports estimated before/after sizes. Original transcripts remain available in history. The real PTY test `python3 tests/terminal_compact.py target/release/builder` checks automatic triggering, output-limit and oversized-handoff retry and continuation, manual compaction, original history access, and checkpoint continuation after restart. A summary output-limit failure displays a compaction-specific retry notice; it gets one larger generation attempt per fragment while keeping the saved handoff small.
+
+The progress bar measures each fragment against the handoff size the model is
+expected to produce, not the ceiling it is told to stay under. Handoffs land far
+below that ceiling, so measuring against it left a finished summary reading around
+a fifth of the bar. The estimate starts from the fragment's own size, roughly a
+thirtieth of it, and once a fragment of the same run has been summarized its
+measured size replaces the estimate for the fragments that follow. An unusually
+long handoff saturates near the end of the bar instead of overshooting, and the
+bar never claims a fragment is finished before its result is validated. Hidden
+reasoning advances the estimate at a quarter weight and is labelled `thinking`
+until handoff text arrives, so a model that reasons at length no longer looks
+stalled at 1% while it is `writing the summary`. These are estimates from bytes
+actually received: they cannot predict when a model will stop generating.
 
 ## Command discovery and draft navigation
 
@@ -95,18 +108,41 @@ Restart Builder after changing configuration, resume the session, then use
 `/retry`. If responses remain empty, inspect the server's model/chat-template
 configuration; repeatedly increasing the output limit may only lengthen the wait.
 
-### Pipeline settings
+### Settings and memory menus
 
-Choose **Settings** from the `/` menu to open the pipeline panel. Up/Down browse,
-Enter/Space toggle switches, Enter edits a numeric limit, and End selects Save.
-Escape cancels (or leaves a numeric edit). Restore defaults is staged until Save.
-Saved settings take effect in the current session and its profile immediately;
-opening the panel does not call the model or resume pending work. Plain mode offers
-a numbered menu. The rich panel temporarily uses an alternate screen, restoring
-the inline composer and existing scrollback afterward.
+`/settings` and `/memory` share one full-screen menu surface: a titled header, the
+setting values aligned in a right-hand column, a rule, a footer that describes the
+highlighted row, and the keys that apply there. Both temporarily use an alternate
+screen and restore the inline composer and existing scrollback afterward.
 
-Validate keyboard interaction, cancellation, persistence and live policy with:
-`python3 tests/terminal_pipeline.py` after `cargo build --locked`.
+In `/settings`, the pipeline's settings are grouped into sections (research
+workflow, code intelligence, memory and history, agent, loop guards, and the
+budget groups). Up/Down browse and keep two rows of context at each edge,
+Enter/Space toggle a switch, Enter edits a numeric limit, `/` filters the list by
+label or section, `s` saves, `r` restores defaults, and Escape clears an active
+filter before it cancels the menu. Save, Restore defaults and Cancel stay
+reachable under **Apply** however the list is filtered, and the header marks a
+draft with unsaved changes. Nothing is written until Save; opening the panel does
+not call the model or resume pending work.
+
+`/memory` lists the three memory modes with the configured one marked `current`.
+Digits 1–3 jump to a mode and Enter applies it. The menu closes before a local
+model download starts, so setup progress appears in ordinary scrollback.
+
+Plain mode (`--plain`, `TERM=dumb`, or a redirected stdout) offers the same
+choices as numbered lists, with the settings list grouped under the same headings.
+
+Validate keyboard interaction, cancellation, persistence and live policy with
+`python3 tests/terminal_pipeline.py` and `python3 tests/terminal_memory.py` after
+`cargo build --locked`.
+
+### Reports
+
+`/help` and `/status` are rendered as sectioned panels: a titled rule, then
+grouped rows whose labels share one column so values line up, with long values
+wrapped under their own column. `/status` shows context usage as a proportion bar
+next to the exact token counts. Both stay legible without color, and `NO_COLOR`
+keeps the same columns.
 
 ## Visual hierarchy
 
