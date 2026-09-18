@@ -29,3 +29,6 @@ pub fn success(text: &str) -> String {
 pub fn warning(text: &str) -> String {
     style(text).color256(215).to_string()
 }
+pub fn danger(text: &str) -> String {
+    style(text).color256(203).to_string()
+}

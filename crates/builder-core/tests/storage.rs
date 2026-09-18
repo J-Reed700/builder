@@ -663,3 +663,54 @@ fn v12_upgrade_adds_subagent_links_and_side_effect_free_claims() {
             .contains("cannot start another subagent")
     );
 }
+
+#[test]
+fn clear_archives_the_conversation_and_deactivates_checkpoints() {
+    use builder_core::protocol::{Message, Role};
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    let id = store
+        .create("clear", "p", workspace.path(), "system")
+        .unwrap();
+    store
+        .append(&id, &Message::text(Role::User, "first task"))
+        .unwrap();
+    store
+        .append(&id, &Message::text(Role::Assistant, "first answer"))
+        .unwrap();
+    store
+        .append(&id, &Message::text(Role::User, "second task"))
+        .unwrap();
+    // A pending turn is closed before the archive so no claim stays started.
+    assert_eq!(store.close_pending_turn(&id).unwrap(), 0);
+    assert_eq!(store.clear(&id).unwrap(), 4);
+    let messages = store.messages(&id).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].role, Role::System);
+    let archived = store.archived_messages(&id).unwrap();
+    assert!(
+        archived
+            .iter()
+            .any(|m| m.content.as_deref() == Some("first task"))
+    );
+    assert!(
+        archived
+            .iter()
+            .any(|m| m.content.as_deref() == Some("first answer"))
+    );
+    // A cleared session starts fresh, and checkpoints no longer project context.
+    store
+        .append(&id, &Message::text(Role::User, "fresh start"))
+        .unwrap();
+    let current = store.messages(&id).unwrap();
+    store.checkpoint(&id, &current, &current).unwrap();
+    store
+        .append(&id, &Message::text(Role::User, "after checkpoint"))
+        .unwrap();
+    assert_eq!(store.messages(&id).unwrap().len(), 3);
+    assert_eq!(store.clear(&id).unwrap(), 2);
+    let messages = store.messages(&id).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].role, Role::System);
+}

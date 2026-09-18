@@ -83,18 +83,28 @@ fn read_inventory(history: &[Message]) -> String {
     )
 }
 
+/// The size a handoff is expected to reach, in bytes. Models keep well below
+/// the ceiling they are given, so measuring against that ceiling leaves the bar
+/// finishing at a fraction of its width. Handoffs compress a fragment by roughly
+/// thirty times; once a fragment of this run has been summarized, its measured
+/// size replaces the estimate for the fragments that follow.
+fn expected_handoff(fragment_bytes: usize, ceiling: usize, measured: Option<usize>) -> usize {
+    measured
+        .unwrap_or(fragment_bytes / 32)
+        .clamp(512, ceiling.max(512))
+}
+
 /// Where one fragment sits in the whole summarization, by transcript bytes.
 struct SummaryProgress {
     done: usize,
     share: usize,
     total: usize,
-    target: usize,
     fragment: usize,
 }
 
 impl SummaryProgress {
     /// Reading a reported prompt counts for most of a fragment on local
-    /// servers; writing is measured against the handoff size ceiling and
+    /// servers; writing is measured against the expected handoff size and
     /// never claims the fragment finished before the result is validated.
     fn event(&self, stage: SummaryStage, prefill_reported: bool) -> AgentEvent {
         let reading = if prefill_reported { 0.6 } else { 0.0 };
@@ -103,8 +113,15 @@ impl SummaryProgress {
             SummaryStage::Reading { processed, total } => {
                 reading * processed as f64 / total.max(1) as f64
             }
-            SummaryStage::Writing { bytes } => {
-                reading + (1.0 - reading) * (bytes as f64 / self.target.max(1) as f64).min(1.0)
+            SummaryStage::Writing {
+                summary_bytes,
+                reasoning_bytes,
+                expected,
+            } => {
+                // Hidden reasoning precedes the handoff, so it advances the
+                // estimate, but far more slowly than handoff text does.
+                let written = summary_bytes as f64 + reasoning_bytes as f64 / 4.0;
+                reading + (1.0 - reading) * (written / expected.max(1) as f64).min(1.0)
             }
         };
         let total = self.total.max(1) as f64;
@@ -241,6 +258,8 @@ impl<P: Provider> Agent<P> {
         // Very large restored histories are handled in bounded fragments. No
         // prefix is discarded: every byte is either summarized or retained.
         let mut chunks = 0;
+        // A completed fragment measures how long this model's handoffs run.
+        let mut measured = None;
         while !remaining.is_empty() {
             chunks += 1;
             ensure!(
@@ -284,11 +303,11 @@ impl<P: Provider> Agent<P> {
             };
             let mut budget = initial_budget;
             let mut shortened = false;
+            let expected = expected_handoff(end, summary_byte_limit, measured);
             let progress = SummaryProgress {
                 done: serialized.len() - remaining.len(),
                 share: end,
                 total: serialized.len(),
-                target: summary_byte_limit,
                 fragment: chunks,
             };
             loop {
@@ -308,18 +327,23 @@ impl<P: Provider> Agent<P> {
                                 };
                             }
                             Event::Delta(text) | Event::Reasoning(text) => {
-                                let bytes = match stage {
-                                    SummaryStage::Writing { bytes } => bytes,
-                                    _ => 0,
+                                let (mut summary_bytes, mut reasoning_bytes) = match stage {
+                                    SummaryStage::Writing {
+                                        summary_bytes,
+                                        reasoning_bytes,
+                                        ..
+                                    } => (summary_bytes, reasoning_bytes),
+                                    _ => (0, 0),
                                 };
-                                // Hidden reasoning advances the estimate more slowly.
-                                let weight = if matches!(event, Event::Delta(_)) {
-                                    text.len()
+                                if matches!(event, Event::Delta(_)) {
+                                    summary_bytes += text.len();
                                 } else {
-                                    text.len() / 4
-                                };
+                                    reasoning_bytes += text.len();
+                                }
                                 stage = SummaryStage::Writing {
-                                    bytes: bytes + weight,
+                                    summary_bytes,
+                                    reasoning_bytes,
+                                    expected,
                                 };
                             }
                             _ => {}
@@ -402,6 +426,7 @@ impl<P: Provider> Agent<P> {
                             });
                             continue;
                         }
+                        measured = Some(content.len());
                         notes = content.to_owned();
                         store.finish_attempt(
                             attempt,
@@ -466,7 +491,7 @@ impl<P: Provider> Agent<P> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SummaryProgress, handoff_limit};
+    use super::{SummaryProgress, expected_handoff, handoff_limit};
     use crate::agent::{AgentEvent, SummaryStage};
 
     fn fraction(progress: &SummaryProgress, stage: SummaryStage, prefill: bool) -> f64 {
@@ -482,8 +507,12 @@ mod tests {
             done: 600,
             share: 400,
             total: 1000,
-            target: 1000,
             fragment: 2,
+        };
+        let writing = |summary_bytes, reasoning_bytes| SummaryStage::Writing {
+            summary_bytes,
+            reasoning_bytes,
+            expected: 1000,
         };
         let stages = [
             (SummaryStage::Waiting, true),
@@ -501,8 +530,8 @@ mod tests {
                 },
                 true,
             ),
-            (SummaryStage::Writing { bytes: 200 }, true),
-            (SummaryStage::Writing { bytes: 50_000 }, true),
+            (writing(200, 0), true),
+            (writing(50_000, 0), true),
         ];
         let values: Vec<f64> = stages
             .iter()
@@ -524,14 +553,40 @@ mod tests {
             done: 0,
             share: 1000,
             total: 1000,
-            target: 1000,
             fragment: 1,
         };
-        assert!((fraction(&only, SummaryStage::Writing { bytes: 500 }, false) - 0.5).abs() < 1e-9);
+        assert!((fraction(&only, writing(500, 0), false) - 0.5).abs() < 1e-9);
+        assert_eq!(fraction(&only, writing(9_999, 0), false), 0.97);
+        // Hidden reasoning advances the estimate, at a quarter of its weight.
+        assert!((fraction(&only, writing(0, 1000), false) - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_expected_handoff_tracks_the_fragment_and_then_what_the_model_wrote() {
+        // A handoff ends far below the ceiling the model is told to respect, so
+        // the estimate follows the fragment rather than that ceiling.
+        assert_eq!(expected_handoff(192_000, 32_640, None), 6_000);
         assert_eq!(
-            fraction(&only, SummaryStage::Writing { bytes: 9_999 }, false),
-            0.97
+            expected_handoff(192_000, 32_640, Some(8_400)),
+            8_400,
+            "a measured fragment replaces the estimate"
         );
+        assert_eq!(expected_handoff(2_000_000, 32_640, None), 32_640, "capped");
+        assert_eq!(expected_handoff(400, 32_640, None), 512, "never zero");
+
+        // A typical handoff now sweeps most of the bar instead of a fraction.
+        let fragment = SummaryProgress {
+            done: 0,
+            share: 192_000,
+            total: 192_000,
+            fragment: 1,
+        };
+        let typical = SummaryStage::Writing {
+            summary_bytes: 6_000,
+            reasoning_bytes: 0,
+            expected: expected_handoff(192_000, 32_640, None),
+        };
+        assert!(fraction(&fragment, typical, false) > 0.9);
     }
 
     #[test]

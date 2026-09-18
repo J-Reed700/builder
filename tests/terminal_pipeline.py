@@ -37,9 +37,10 @@ max_output_tokens = 1024
             terminal.expect("/settings", mark)
             terminal.send(b"\r")
             terminal.expect("Pipeline settings", mark)
-            terminal.expect("Research pipeline: On", mark)
+            terminal.expect("Research workflow", mark)
+            terminal.expect_row("Research pipeline", "On", mark)
             terminal.send(b" ")
-            terminal.expect("Research pipeline: Off", mark)
+            terminal.expect_row("Research pipeline", "Off", mark)
             terminal.send(b"\x1b")
             terminal.expect("Settings unchanged", mark)
             terminal.expect("Ask Builder", terminal.output.find(b"Settings unchanged", mark) + len(b"Settings unchanged"))
@@ -48,7 +49,7 @@ max_output_tokens = 1024
             # Reopen, toggle and save using the menu's End shortcut.
             mark = len(terminal.output)
             terminal.send("/settings\r")
-            terminal.expect("Research pipeline: On", mark)
+            terminal.expect_row("Research pipeline", "On", mark)
             terminal.send(b" \x1b[F\r")
             terminal.expect("Pipeline settings saved for local and applied to this session", mark)
             terminal.expect("Ask Builder", terminal.output.find(b"applied to this session", mark) + len(b"applied to this session"))
@@ -62,20 +63,26 @@ max_output_tokens = 1024
             # Numeric edit validation; unsaved invalid input never reaches disk.
             mark = len(terminal.output)
             terminal.send("/settings\r")
-            terminal.expect("Research pipeline: Off", mark)
-            terminal.send(b"\x1b[B" * 15 + b"\r0\r")
+            terminal.expect_row("Research pipeline", "Off", mark)
+            # The filter reaches a setting without counting arrow presses.
+            terminal.send(b"/candidate attempts")
+            terminal.expect_row("Candidate attempts", "3", mark)
+            terminal.send(b"\r\r0\r")
             terminal.expect("must be between 1 and 20", mark)
             assert tomllib.loads(path.read_text())["profiles"]["local"]["pipeline"]["candidate_attempts"] == 3
-            terminal.send(b"\x7f5\r\x1b[F\r")
+            terminal.send(b"\x7f5\r")
+            terminal.expect_row("Candidate attempts", "5", mark)
+            terminal.send(b"\x1b[F\r")
             terminal.expect("Pipeline settings saved", mark)
             assert tomllib.loads(path.read_text())["profiles"]["local"]["pipeline"]["candidate_attempts"] == 5
             assert len(Endpoint.requests) == 1
             terminal.expect("Ask Builder", terminal.output.find(b"applied to this session", mark) + len(b"applied to this session"))
             mark = len(terminal.output)
             terminal.send("/settings\r")
-            terminal.expect("Research pipeline: Off", mark)
+            terminal.expect_row("Research pipeline", "Off", mark)
             terminal.send(b" ")
-            terminal.expect("Research pipeline: On", mark)
+            terminal.expect_row("Research pipeline", "On", mark)
+            terminal.expect("unsaved", mark)
             path.write_text(path.read_text().replace("candidate_attempts = 5", "candidate_attempts = 6"))
             terminal.send(b"\x1b[F\r")
             terminal.expect("Pipeline settings changed elsewhere", mark)
@@ -98,7 +105,7 @@ max_output_tokens = 1024
             plain.send("/settings\r")
             plain.expect("Choose an item:", mark)
             plain.send("1\r")
-            plain.expect("Research pipeline: On", mark)
+            plain.expect_row("Research pipeline", "On", mark)
             # The run budget is a menu setting and applies without restarting.
             import re
             field_source = Path(__file__).resolve().parents[1] / "src/input/pipeline.rs"
@@ -107,13 +114,13 @@ max_output_tokens = 1024
             plain.send(f"{budget_index}\r")
             plain.expect("New value", mark)
             plain.send("250\r")
-            plain.expect("Agent rounds per run: 250", mark)
+            plain.expect_row("Agent rounds per run", "250", mark)
             plain.send("s\r")
             plain.expect("Pipeline settings saved", mark)
             assert tomllib.loads(path.read_text())["profiles"]["local"]["pipeline"]["enabled"]
             assert tomllib.loads(path.read_text())["profiles"]["local"]["pipeline"]["max_rounds"] == 250
             plain.send("/status\r")
-            plain.expect("Agent rounds per run: 250", mark)
+            plain.expect_row("Rounds per run", "250", mark)
             plain.send("/exit\r")
             plain.expect("Saved. Continue with", mark)
             print("PASS: numbered settings menu in plain terminals")

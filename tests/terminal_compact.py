@@ -58,20 +58,19 @@ max_output_tokens = 4096
         try:
             terminal.expect("Ask Builder")
             terminal.send("/status\r")
-            terminal.expect("compact at 75%")
-            terminal.expect("Ask Builder", terminal.output.find(b"compact at 75%"))
+            terminal.expect_row("Compaction", "automatic at 75%")
+            terminal.expect("Ask Builder", terminal.output.find(b"automatic at 75%"))
             mark = len(terminal.output)
             terminal.send("inspect source\r")
             terminal.expect("evidence evidence", mark)
             terminal.expect("Ask Builder", mark)
             mark = len(terminal.output)
             terminal.send("continue inspection\r")
-            terminal.expect("Compacting context", mark)
-            terminal.expect("Compaction output limit reached", mark)
-            terminal.expect("retrying once with 8192 output tokens", mark)
-            terminal.expect("Compaction handoff too long", mark)
-            terminal.expect("retrying once with a shorter handoff", mark)
-            terminal.expect("Context compacted:", mark)
+            terminal.expect("Summarizing", mark)
+            terminal.expect("Context summary needed more room", mark)
+            terminal.expect("retrying with 8.2k tokens", mark)
+            terminal.expect("Tightening context summary", mark)
+            terminal.expect("Context compacted ·", mark)
             summary_requests = [r for r in Endpoint.requests if r["messages"][0]["content"].startswith("Write a concise factual handoff")]
             assert summary_requests[0]["max_tokens"] == 4096
             assert summary_requests[1]["max_tokens"] == 8192
@@ -81,7 +80,7 @@ max_output_tokens = 4096
             terminal.expect("Ask Builder", mark)
             mark = len(terminal.output)
             terminal.send("/compact\r")
-            terminal.expect("Context compacted:", mark)
+            terminal.expect("Context compacted ·", mark)
             terminal.expect("Ask Builder", mark)
             assert Endpoint.normal == 2, "Manual compaction executed the task"
             mark = len(terminal.output)
