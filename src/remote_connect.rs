@@ -84,6 +84,7 @@ pub async fn serve(control: &RemoteControl, options: ConnectOptions) -> Result<(
     let token = control.token().to_owned();
     let mut delay = Duration::from_secs(1);
     loop {
+        let attempt_started = std::time::Instant::now();
         match connect_once(
             &websocket,
             &gateway,
@@ -106,6 +107,12 @@ pub async fn serve(control: &RemoteControl, options: ConnectOptions) -> Result<(
                 delay = Duration::from_secs(1);
             }
             Err(AttemptError::Disconnected(error)) => {
+                // Only a link that never stabilised should back off further;
+                // otherwise a nightly proxy restart compounds the delay day
+                // after day (observed: 1s, 2s, 4s, 8s, 16s on consecutive days).
+                if attempt_started.elapsed() >= STABLE_CONNECTION {
+                    delay = Duration::from_secs(1);
+                }
                 eprintln!(
                     "Gateway unavailable: {error:#}. Retrying in {}s.",
                     delay.as_secs()
@@ -202,10 +209,35 @@ async fn connect_once(
     }
     eprintln!("Connected to {gateway} as {device_name}. Keep this process running.");
 
+    let mut strikes = 0u32;
     loop {
-        let message = receive(&mut socket)
-            .await
-            .map_err(AttemptError::Disconnected)?;
+        // Bounded wait: any frame (including a pong) proves the link is alive.
+        let message = match tokio::time::timeout(HEARTBEAT_IDLE, receive_frame(&mut socket)).await {
+            Ok(frame) => match frame.map_err(AttemptError::Disconnected)? {
+                Incoming::Message(message) => {
+                    strikes = 0;
+                    message
+                }
+                Incoming::Liveness => {
+                    strikes = 0;
+                    continue;
+                }
+            },
+            Err(_) => {
+                strikes += 1;
+                if strikes > HEARTBEAT_STRIKES {
+                    return Err(AttemptError::Disconnected(anyhow!(
+                        "gateway stopped answering heartbeats after {}s",
+                        HEARTBEAT_IDLE.as_secs() * u64::from(strikes)
+                    )));
+                }
+                socket
+                    .send(Message::Ping(Vec::new().into()))
+                    .await
+                    .map_err(|error| AttemptError::Disconnected(error.into()))?;
+                continue;
+            }
+        };
         match message {
             GatewayMessage::Request {
                 request_id,
@@ -322,6 +354,29 @@ fn json_error(message: &str) -> String {
         .unwrap_or_else(|_| "{\"error\":\"Host request failed\"}".into())
 }
 
+/// How long the host waits for any frame before probing the gateway.
+///
+/// Without this the serve loop sat in `socket.next().await` forever: a proxy
+/// restart or NAT timeout kills the TCP connection without a close frame, so
+/// the host kept reporting "Connected" while the gateway had already marked it
+/// offline. That is what made the dashboard ask for a new connect command even
+/// though pairing was intact — and re-pairing then invalidated the credential
+/// the still-running service was holding, which is the loop we are breaking.
+const HEARTBEAT_IDLE: Duration = Duration::from_secs(30);
+/// Unanswered probes tolerated before declaring the connection dead.
+const HEARTBEAT_STRIKES: u32 = 2;
+/// A connection that survived this long is treated as healthy, so the next
+/// drop retries immediately instead of inheriting a grown backoff.
+const STABLE_CONNECTION: Duration = Duration::from_secs(60);
+
+/// A frame from the gateway: either a protocol message, or mere evidence that
+/// the peer is still alive (pong/ping). Liveness must be visible to the serve
+/// loop, otherwise an idle-but-healthy link looks identical to a dead one.
+enum Incoming {
+    Message(GatewayMessage),
+    Liveness,
+}
+
 async fn send(
     socket: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -343,19 +398,36 @@ async fn receive(
     >,
 ) -> Result<GatewayMessage> {
     loop {
-        match socket.next().await {
-            Some(Ok(Message::Text(text))) => {
-                ensure!(
-                    text.len() <= MAX_WIRE_MESSAGE,
-                    "Gateway message exceeds the wire limit"
-                );
-                return serde_json::from_str(&text).context("Invalid gateway message");
-            }
-            Some(Ok(Message::Ping(value))) => socket.send(Message::Pong(value)).await?,
-            Some(Ok(Message::Close(_))) | None => anyhow::bail!("gateway disconnected"),
-            Some(Err(error)) => return Err(error.into()),
-            Some(Ok(_)) => {}
+        match receive_frame(socket).await? {
+            Incoming::Message(message) => return Ok(message),
+            Incoming::Liveness => {}
         }
+    }
+}
+
+/// Reads exactly one frame, reporting keepalive traffic instead of hiding it.
+async fn receive_frame(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> Result<Incoming> {
+    match socket.next().await {
+        Some(Ok(Message::Text(text))) => {
+            ensure!(
+                text.len() <= MAX_WIRE_MESSAGE,
+                "Gateway message exceeds the wire limit"
+            );
+            Ok(Incoming::Message(
+                serde_json::from_str(&text).context("Invalid gateway message")?,
+            ))
+        }
+        Some(Ok(Message::Ping(value))) => {
+            socket.send(Message::Pong(value)).await?;
+            Ok(Incoming::Liveness)
+        }
+        Some(Ok(Message::Close(_))) | None => anyhow::bail!("gateway disconnected"),
+        Some(Err(error)) => Err(error.into()),
+        Some(Ok(_)) => Ok(Incoming::Liveness),
     }
 }
 
