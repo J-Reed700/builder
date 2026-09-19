@@ -207,7 +207,7 @@ impl<P: Provider> Agent<P> {
                 failure_recoveries += 1;
                 Some(Message::text(
                     Role::System,
-                    "Runtime tool failure recovery: repeated calls have failed. Read the recorded error and the operation-specific schema before trying again. Do not repeat identical invalid arguments. For research finish, supply only operation, outcome and explanation; verification_ids belong to review/learn. If no research plan is active, report completed work and actual results directly. A tool error is not successful evidence. If unable to correct the request, report unfinished work and the concrete blocker. Denials and uncertain outcomes remain binding.",
+                    "Runtime tool failure recovery: repeated calls have failed. Read the recorded error and the operation-specific schema before trying again. For a failed exact-text edit, use current source from a targeted read to rebuild a minimal replacement; historical snippets are not current source. Preserve unrelated current values. A successful read does not erase earlier edit failures. Do not repeat identical invalid arguments. For research finish, supply only operation, outcome and explanation; verification_ids belong to review/learn. If no research plan is active, report completed work and actual results directly. A tool error is not successful evidence. If unable to correct the request, report unfinished work and the concrete blocker. Denials and uncertain outcomes remain binding.",
                 ))
             } else if no_progress_calls >= progress_check_calls {
                 // Tell the user once per multiple of the check, including
@@ -296,7 +296,7 @@ impl<P: Provider> Agent<P> {
             // endpoint's prompt cache survives a long recovery.
             let continuation = if guidance.is_some() {
                 let mut text = if force_conclusion {
-                    "[Builder runtime continuation, not a new user request] Conclude the original task now using only the recorded evidence. Tools are unavailable in this request. Return ordinary user-facing prose only: do not output tool-call tags, function syntax, XML control markup, or a proposed tool request. State honestly what was completed, what remains unresolved, and any concrete blocker.".to_owned()
+                    "[Builder runtime continuation, not a new user request] Conclude the original task now using only the recorded evidence. Tools are unavailable in this request. Honor the user's requested final-answer format, including JSON-only when requested: do not output tool-call tags, function syntax, XML control markup, or a proposed tool request. State honestly what was completed, what remains unresolved, and any concrete blocker.".to_owned()
                 } else if restrict_discovery {
                     progress_nudge(&Nudge {
                         calls: no_progress_calls,
@@ -1186,7 +1186,12 @@ fn failed_tool_streak(
                     == Some(&ToolOutcome::Failed)
                 {
                     failures += 1;
-                } else {
+                } else if message
+                    .tool_call_id
+                    .as_ref()
+                    .and_then(|id| outcomes.get(id))
+                    == Some(&ToolOutcome::Changed)
+                {
                     failures = 0;
                 }
             }
@@ -1331,7 +1336,12 @@ enum ToolGuardViolation<'a> {
 
 fn tool_signature(call: &ToolCall) -> String {
     let arguments = serde_json::from_str::<serde_json::Value>(&call.function.arguments)
-        .and_then(|value| serde_json::to_string(&value))
+        .and_then(|mut value| {
+            // Tool schemas preserve declaration order for constrained decoding;
+            // action identity must still ignore argument object ordering.
+            value.sort_all_objects();
+            serde_json::to_string(&value)
+        })
         .unwrap_or_else(|_| call.function.arguments.clone());
     format!("{}\0{arguments}", call.function.name)
 }
@@ -1458,7 +1468,7 @@ fn blocked_outcome_name(outcome: ToolOutcome) -> &'static str {
 fn progress_guidance(calls: usize, force_conclusion: bool, retry: bool) -> Message {
     let conclusion = if force_conclusion {
         if retry {
-            " This is the second and final enforced conclusion request. The previous response was rejected because it contained tool-control syntax. Tools remain unavailable. Return ordinary user-facing prose only."
+            " This is the second and final enforced conclusion request. The previous response was rejected because it contained tool-control syntax. Tools remain unavailable. Honor the user's requested final-answer format, including JSON-only when requested."
         } else {
             " This is the enforced conclusion round. Tools are unavailable for this request. Answer the user now from verified evidence, clearly distinguish completed work from unresolved work, and state any concrete limitation. Do not emit a tool call, tool-control markup, claim unverified success, or make up an edit merely to end the investigation."
         }
@@ -1758,6 +1768,14 @@ mod tests {
             "ERROR: an example from the source file".into(),
         ));
         outcomes.insert("source".into(), ToolOutcome::Succeeded);
+        assert_eq!(failed_tool_streak(&history, &outcomes), 3);
+        history.push(Message::tool("edit", "changed".into()));
+        outcomes.insert("edit".into(), ToolOutcome::Changed);
+        assert_eq!(failed_tool_streak(&history, &outcomes), 0);
+        history.push(Message::tool("four", "failed".into()));
+        outcomes.insert("four".into(), ToolOutcome::Failed);
+        assert_eq!(failed_tool_streak(&history, &outcomes), 1);
+        history.push(Message::text(Role::User, "new task"));
         assert_eq!(failed_tool_streak(&history, &outcomes), 0);
     }
 
@@ -1856,6 +1874,14 @@ mod tests {
         assert_eq!(
             tool_signature(&call(r#"{"command":"printf stable","timeout_secs":5}"#)),
             tool_signature(&call(r#"{"timeout_secs":5,"command":"printf stable"}"#))
+        );
+        assert_eq!(
+            tool_signature(&call(
+                r#"{"request":{"operation":"history_read","seq":2,"offset":0}}"#
+            )),
+            tool_signature(&call(
+                r#"{"request":{"offset":0,"seq":2,"operation":"history_read"}}"#
+            ))
         );
         assert_ne!(
             tool_signature(&call(r#"{"command":"printf stable","timeout_secs":5}"#)),

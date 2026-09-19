@@ -810,7 +810,10 @@ async fn manual_remote_compaction_preserves_original_chat_without_continuing_it(
         store
             .append(
                 &id,
-                &Message::text(Role::Assistant, format!("Original answer {i}")),
+                &Message::text(
+                    Role::Assistant,
+                    format!("Original answer {i}: inspected source evidence. ").repeat(40),
+                ),
             )
             .unwrap();
     }
@@ -821,7 +824,20 @@ async fn manual_remote_compaction_preserves_original_chat_without_continuing_it(
         serde_json::to_value(store.history_messages(&id).unwrap()).unwrap(),
         before
     );
-    assert!(store.messages(&id).unwrap().len() < 21);
+    let active = store.messages(&id).unwrap();
+    assert!(active.len() < 21);
+    assert_eq!(
+        active
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .collect::<Vec<_>>(),
+        store
+            .history_messages(&id)
+            .unwrap()
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .collect::<Vec<_>>()
+    );
     assert_eq!(host.requests.lock().unwrap().len(), 1);
     assert_eq!(
         host.get(&format!("sessions/{id}/messages")).await["entries"]

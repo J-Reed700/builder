@@ -500,6 +500,26 @@ impl Store {
     pub fn history_messages(&self, id: &str) -> Result<Vec<Message>> {
         self.read_messages(id, "AND active=1")
     }
+    /// Stable transcript IDs for source-backed user memory. Rewound rows are excluded.
+    pub fn user_sources(&self, id: &str) -> Result<Vec<(i64, Message)>> {
+        let mut stmt = self.conn.prepare("SELECT seq,body FROM messages WHERE session_id=?1 AND active=1 AND json_extract(body, '$.role')='user' ORDER BY seq")?;
+        let rows = stmt.query_map([id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        rows.map(|row| {
+            let (seq, body) = row?;
+            Ok((seq, serde_json::from_str(&body)?))
+        })
+        .collect()
+    }
+    /// Read the runtime checkpoint projection separately from original rows.
+    /// It includes a verbatim tail; callers must distinguish owned metadata slots.
+    pub fn checkpoint_messages(&self, id: &str) -> Result<Option<Vec<Message>>> {
+        let context: Option<String> = self.conn.query_row(
+            "SELECT context FROM context_checkpoints WHERE session_id=?1 AND active=1 ORDER BY id DESC LIMIT 1",
+            [id], |r| r.get(0)).optional()?;
+        context
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
+    }
     /// Activate a complete checkpoint atomically; original rows and previous
     /// checkpoints remain durable. Never install a summary of stale context.
     pub fn checkpoint(
