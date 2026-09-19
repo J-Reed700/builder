@@ -477,7 +477,7 @@ async fn tool_markup_at_progress_boundary_is_hidden_and_repaired_without_executi
         text_reply(
             "<tool_call>\n<function=search>\n<parameter=query>playerX</parameter>\n</function>\n</tool_call>",
         ),
-        text_reply("I could not verify the requested collision change; no edit was completed."),
+        text_reply(r#"{"status":"blocked"}"#),
     ])
     .await;
     let home = tempfile::tempdir().unwrap();
@@ -485,6 +485,12 @@ async fn tool_markup_at_progress_boundary_is_hidden_and_repaired_without_executi
     let mut store = Store::open(home.path()).unwrap();
     let session = store
         .create("raw conclusion", "local", home.path(), "system")
+        .unwrap();
+    store
+        .append(
+            &session,
+            &Message::text(Role::User, "Return only JSON with a status field."),
+        )
         .unwrap();
     seed_investigation(&mut store, &session);
     for index in 12..20 {
@@ -520,14 +526,14 @@ async fn tool_markup_at_progress_boundary_is_hidden_and_repaired_without_executi
         .await
         .unwrap();
 
-    assert_eq!(
-        visible,
-        "I could not verify the requested collision change; no edit was completed."
-    );
+    assert_eq!(visible, r#"{"status":"blocked"}"#);
     assert!(!visible.contains("<tool_call>"));
     assert_eq!(server.mock.requests.lock().unwrap().len(), 2);
     for request in server.mock.requests.lock().unwrap().iter() {
         assert!(request["tools"].as_array().is_none_or(Vec::is_empty));
+        let prompt = request["messages"].to_string();
+        assert!(prompt.contains("JSON-only"));
+        assert!(!prompt.contains("prose only"));
     }
     assert_eq!(
         store
@@ -537,7 +543,7 @@ async fn tool_markup_at_progress_boundary_is_hidden_and_repaired_without_executi
             .unwrap()
             .content
             .as_deref(),
-        Some("I could not verify the requested collision change; no edit was completed.")
+        Some(r#"{"status":"blocked"}"#)
     );
 }
 
@@ -2605,6 +2611,77 @@ async fn auto_compaction_preserves_tool_evidence_originals_and_latest_instructio
 }
 
 #[tokio::test]
+async fn compaction_preserves_exact_user_contract_and_corrections_despite_bad_summaries() {
+    let server = server(vec![
+        text_reply("Restore damage to 12; finish with prose."),
+        text_reply("Restore damage to 12; chance must be 0.00625."),
+    ])
+    .await;
+    let home = tempfile::tempdir().unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    let session = store
+        .create("contract", "local", home.path(), "system")
+        .unwrap();
+    let agent = Agent {
+        memory: None,
+        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        profile: server.profile.clone(),
+        workspace: Workspace::new(home.path()).unwrap(),
+        session: session.clone(),
+        approval: ApprovalMode::Trust,
+        max_rounds: 3,
+    };
+    let request =
+        r#"Set chance to 0.00625. Preserve current damage. Return only JSON: {"damage":number}."#;
+    agent.submit(&mut store, request).unwrap();
+    // A legacy checkpoint already discarded the original request. A new
+    // compaction must recover it from original rows, not perpetuate the loss.
+    let original = store.messages(&session).unwrap();
+    agent
+        .submit(&mut store, "Continue the original task.")
+        .unwrap();
+    let before = store.messages(&session).unwrap();
+    store
+        .checkpoint(
+            &session,
+            &before,
+            &[
+                original[0].clone(),
+                Message::text(Role::Assistant, "Old summary: restore damage to 12."),
+                before.last().unwrap().clone(),
+            ],
+        )
+        .unwrap();
+    for cycle in 0..2 {
+        store
+            .append(
+                &session,
+                &Message::text(Role::Assistant, "historical source damage=12 ".repeat(1500)),
+            )
+            .unwrap();
+        agent.submit(&mut store, if cycle == 0 {
+            "Correction: chance must be 0.01. Keep the original preservation and output requirements."
+        } else { "Continue." }).unwrap();
+        let original = store.history_messages(&session).unwrap();
+        assert!(agent.compact(&mut store, &mut |_| {}).await.unwrap());
+        drop(store);
+        store = Store::open(home.path()).unwrap();
+        let active = store.messages(&session).unwrap();
+        let users = |messages: &[Message]| {
+            messages
+                .iter()
+                .filter(|m| m.role == Role::User)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(users(&active), users(&original));
+        assert_eq!(users(&active)[0].content.as_deref(), Some(request));
+        assert_eq!(store.history_messages(&session).unwrap(), original);
+        assert!(pending(&active));
+    }
+}
+
+#[tokio::test]
 async fn failed_compaction_never_changes_context_or_dispatches_summary_tools() {
     let reply = format!(
         "{}{}",
@@ -3578,6 +3655,17 @@ async fn invalid_research_loop_recovers_after_restart_and_has_a_hard_bound() {
                 )
                 .unwrap();
         }
+        let read_id = "successful_read";
+        store
+            .append(
+                &session,
+                &read_message(read_id, json!({"path":"rates.json"})),
+            )
+            .unwrap();
+        store.claim_tool(&session, read_id).unwrap();
+        store
+            .complete_tool(&session, read_id, "1|current source")
+            .unwrap();
         let original = store.history_messages(&session).unwrap();
         drop(store);
         let mut store = Store::open(home.path()).unwrap();

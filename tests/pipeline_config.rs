@@ -267,11 +267,7 @@ async fn disabled_research_and_verification_cannot_execute_queued_calls_in_trust
                     .starts_with("Builder research policy:")
             }));
         } else {
-            let operations =
-                research.unwrap()["function"]["parameters"]["properties"]["request"]["properties"]
-                    ["operation"]["enum"]
-                    .as_array()
-                    .unwrap();
+            let operations = research_operations(research.unwrap());
             assert!(!operations.contains(&json!("verify")));
             assert!(!operations.contains(&json!("review")));
         }
@@ -507,13 +503,7 @@ async fn every_feature_toggle_rejects_its_operations_before_work_starts() {
             .iter()
             .find(|t| t["function"]["name"] == "research")
         {
-            assert!(
-                !tool["function"]["parameters"]["properties"]["request"]["properties"]["operation"]
-                    ["enum"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!(request.operation()))
-            );
+            assert!(!research_operations(tool).contains(&json!(request.operation())));
         }
     }
     assert!(provider.requests.lock().unwrap().is_empty());
@@ -685,10 +675,7 @@ async fn cli_run_override_changes_the_actual_model_request_without_saving() {
         .iter()
         .find(|t| t["function"]["name"] == "research")
         .unwrap();
-    let operations =
-        tool["function"]["parameters"]["properties"]["request"]["properties"]["operation"]["enum"]
-            .as_array()
-            .unwrap();
+    let operations = research_operations(tool);
     assert!(!operations.contains(&json!("semantic")));
     assert!(!operations.contains(&json!("analyze")));
     assert!(operations.contains(&json!("plan")));
@@ -786,9 +773,24 @@ async fn analysis_and_command_budgets_reach_the_real_executors() {
     }
 }
 
+fn research_operations(definition: &Value) -> Vec<Value> {
+    definition["function"]["parameters"]["properties"]["request"]["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|variant| variant["properties"]["operation"]["enum"][0].clone())
+        .collect()
+}
+
 #[test]
 fn research_schemas_reject_cross_operation_fields_and_require_decoder_inputs() {
     let definition = builder_tools::research::definition();
+    let request = &definition["function"]["parameters"]["properties"]["request"];
+    assert!(
+        request.get("properties").is_none(),
+        "llama.cpp cannot mix object properties with anyOf"
+    );
+    assert!(request.get("type").is_none());
     let variants = definition["function"]["parameters"]["properties"]["request"]["anyOf"]
         .as_array()
         .unwrap();
@@ -869,4 +871,44 @@ fn runtime_budgets_default_migrate_validate_and_persist() {
     assert_eq!(pipeline.failure_recovery_rounds, 7);
     assert_eq!(pipeline.identical_shell_calls, 4);
     assert_eq!(pipeline.tool_calls_per_response, 24);
+}
+
+#[test]
+fn research_wire_schema_exposes_arguments_and_decoder_keeps_operation_contracts() {
+    let tool = builder_tools::research::definition_with_settings(&PipelineSettings::default());
+    let request = &tool["function"]["parameters"]["properties"]["request"];
+    let wire = serde_json::to_string(request).unwrap();
+    let roundtrip: Value = serde_json::from_str(&wire).unwrap();
+    for variant in roundtrip["anyOf"].as_array().unwrap() {
+        let fields = variant["properties"].as_object().unwrap();
+        assert_eq!(
+            fields.keys().next().unwrap(),
+            "operation",
+            "grammar must choose operation before variant-specific arguments"
+        );
+        if variant["properties"]["operation"]["enum"][0] == "history_search" {
+            assert_eq!(
+                fields.keys().map(String::as_str).collect::<Vec<_>>(),
+                ["operation", "query", "include_archived", "before_seq"]
+            );
+        }
+    }
+    use builder_core::research::Request;
+    assert!(
+        serde_json::from_value::<Request>(
+            json!({"operation":"history_search","query":"record","include_archived":false})
+        )
+        .is_ok()
+    );
+    assert!(
+        serde_json::from_value::<Request>(json!({"operation":"history_read","seq":2,"offset":0}))
+            .is_ok()
+    );
+    assert!(serde_json::from_value::<Request>(json!({"operation":"history_search"})).is_err());
+    assert!(
+        serde_json::from_value::<Request>(
+            json!({"operation":"history_read","seq":2,"offset":0,"query":"wrong operation"})
+        )
+        .is_err()
+    );
 }

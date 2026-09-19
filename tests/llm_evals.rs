@@ -189,9 +189,14 @@ async fn seed(
     session: &str,
     workspace: &Workspace,
     scenario: Scenario,
-    compacted: bool,
+    mode: &str,
 ) -> Result<()> {
-    store.append(session, &Message::text(Role::User, scenario.prompt()))?;
+    let initial_prompt = if matches!(scenario, Scenario::Correction) {
+        Scenario::Resume.prompt()
+    } else {
+        scenario.prompt()
+    };
+    store.append(session, &Message::text(Role::User, initial_prompt))?;
     if matches!(scenario, Scenario::Invalid) {
         for index in 0..3 {
             let id = format!("invalid_{index}");
@@ -230,7 +235,11 @@ async fn seed(
         };
         let mut message = Message::text(
             Role::Assistant,
-            if index == 0 { scenario.handoff() } else { "" },
+            if index == 0 && mode != "generated" {
+                scenario.handoff()
+            } else {
+                ""
+            },
         );
         message.tool_calls.push(call);
         store.append(session, &message)?;
@@ -250,7 +259,7 @@ async fn seed(
         store.complete_tool(session, &id, &result)?;
     }
     let before = store.messages(session)?;
-    if compacted {
+    if mode == "compacted" {
         store.checkpoint(
             session,
             &before,
@@ -281,6 +290,161 @@ async fn seed(
     Ok(())
 }
 
+// Use tool execution instead of handwritten findings. Repeated reads provide a
+// reproducible long transcript; they are fixture setup, not model tool calls.
+async fn append_inspections(
+    store: &mut Store,
+    session: &str,
+    workspace: &Workspace,
+    cycle: usize,
+) -> Result<()> {
+    for index in 0..24 {
+        let path = if index % 2 == 0 {
+            "rates.json"
+        } else {
+            "expectations.json"
+        };
+        let id = format!("compaction_fixture_{cycle}_{index}");
+        let call = ToolCall {
+            id: id.clone(),
+            kind: "function".into(),
+            function: Function {
+                name: "read_file".into(),
+                arguments: json!({"path":path}).to_string(),
+            },
+        };
+        let result = workspace.execute(&Action::from_call(&call)?).await?;
+        let mut message = Message::text(Role::Assistant, "");
+        message.tool_calls.push(call);
+        store.append(session, &message)?;
+        store.claim_tool(session, &id)?;
+        store.complete_tool(session, &id, &result)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn generated_fixtures_use_source_evidence_and_preserve_the_actual_correction() -> Result<()> {
+    for scenario in [
+        Scenario::Resume,
+        Scenario::Stale,
+        Scenario::Correction,
+        Scenario::Unknown,
+        Scenario::Invalid,
+    ] {
+        let temp = tempfile::tempdir()?;
+        std::fs::write(temp.path().join("rates.json"), CONFIG)?;
+        std::fs::write(
+            temp.path().join("expectations.json"),
+            r#"{"arena_shield_chance":0.025,"schema_version":1}"#,
+        )?;
+        let workspace = Workspace::new(temp.path())?;
+        let mut store = Store::open(temp.path())?;
+        let session = store.create("generated fixture", "test", temp.path(), SYSTEM)?;
+        seed(&mut store, &session, &workspace, scenario, "generated").await?;
+        let messages = store.messages(&session)?;
+        assert_eq!(messages, store.history_messages(&session)?);
+        assert!(
+            !messages
+                .iter()
+                .any(|m| m.content.as_deref() == Some(scenario.handoff()))
+        );
+        if matches!(scenario, Scenario::Correction) {
+            let users = messages
+                .iter()
+                .filter(|m| m.role == Role::User)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                users[0].content.as_deref(),
+                Some(Scenario::Resume.prompt().as_str())
+            );
+            assert!(
+                users[1]
+                    .content
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("Correction: use 0.01, not 0.00625.")
+            );
+        }
+        for cycle in 0..3 {
+            append_inspections(&mut store, &session, &workspace, cycle).await?;
+        }
+        let history = store.history_messages(&session)?;
+        let calls = history
+            .iter()
+            .flat_map(|m| &m.tool_calls)
+            .filter(|c| c.id.starts_with("compaction_fixture_"))
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 72);
+        assert_eq!(
+            calls.iter().map(|c| &c.id).collect::<HashSet<_>>().len(),
+            72
+        );
+        for call in calls {
+            let result = history
+                .iter()
+                .find(|m| m.tool_call_id.as_deref() == Some(&call.id))
+                .unwrap();
+            assert_eq!(
+                result.content.as_deref(),
+                Some(workspace.execute(&Action::from_call(call)?).await?.as_str())
+            );
+        }
+    }
+    Ok(())
+}
+
+fn permits_mutation(scenario: Scenario, inspection_only: bool, action: &Action) -> bool {
+    !inspection_only
+        && !matches!(scenario, Scenario::Unknown)
+        && matches!(action,
+            Action::EditFile { path, .. }
+            | Action::WriteFile { path, .. }
+            | Action::MultiEdit { path, .. }
+            if matches!(path.as_str(), "rates.json" | "expectations.json"))
+}
+
+#[test]
+fn mutation_allowlist_covers_all_edit_tools_without_expanding_scope() {
+    for path in [
+        "rates.json",
+        "expectations.json",
+        "NOTES.md",
+        "../rates.json",
+    ] {
+        let allowed = matches!(path, "rates.json" | "expectations.json");
+        for action in [
+            Action::EditFile {
+                path: path.into(),
+                old: "old".into(),
+                new: "new".into(),
+            },
+            Action::WriteFile {
+                path: path.into(),
+                content: "new".into(),
+            },
+            Action::MultiEdit {
+                path: path.into(),
+                edits: vec![],
+            },
+        ] {
+            assert_eq!(permits_mutation(Scenario::Resume, false, &action), allowed);
+            assert!(!permits_mutation(Scenario::Resume, true, &action));
+            assert!(!permits_mutation(Scenario::Unknown, false, &action));
+        }
+    }
+    let shell = Action::from_call(&ToolCall {
+        id: "shell".into(),
+        kind: "function".into(),
+        function: Function {
+            name: "shell".into(),
+            arguments: json!({"command":"echo forbidden"}).to_string(),
+        },
+    })
+    .unwrap();
+    assert!(!permits_mutation(Scenario::Resume, false, &shell));
+}
+
 fn bounded_env(name: &str, default: usize, max: usize) -> Result<usize> {
     let value = std::env::var(name)
         .ok()
@@ -301,15 +465,16 @@ async fn live_behavior_suite() -> Result<()> {
     let (profile_name, mut profile) =
         config.profile(std::env::var("BUILDER_EVAL_PROFILE").ok().as_deref())?;
     profile.max_attempts = 1;
-    profile.request_timeout_secs = 60;
-    profile.idle_timeout_secs = 45;
+    profile.request_timeout_secs =
+        bounded_env("BUILDER_EVAL_REQUEST_TIMEOUT_SECS", 60, 600)? as u64;
+    profile.idle_timeout_secs = bounded_env("BUILDER_EVAL_IDLE_TIMEOUT_SECS", 45, 600)? as u64;
     let repeats = bounded_env("BUILDER_EVAL_REPEATS", 1, 10)?;
     let seconds = bounded_env("BUILDER_EVAL_TIMEOUT_SECS", 180, 600)?;
     let filter = std::env::var("BUILDER_EVAL_CASE").ok();
     let mode = std::env::var("BUILDER_EVAL_MODE").unwrap_or_else(|_| "compacted".into());
     ensure!(
-        matches!(mode.as_str(), "compacted" | "history"),
-        "BUILDER_EVAL_MODE must be compacted or history"
+        matches!(mode.as_str(), "compacted" | "history" | "generated"),
+        "BUILDER_EVAL_MODE must be compacted, history, or generated"
     );
     let memory_mode = std::env::var("BUILDER_EVAL_MEMORY").unwrap_or_else(|_| "off".into());
     ensure!(
@@ -317,6 +482,11 @@ async fn live_behavior_suite() -> Result<()> {
         "BUILDER_EVAL_MEMORY must be off or on"
     );
     config.memory.enabled = memory_mode == "on";
+    // Explicit diagnostic opt-in: these files contain synthetic conversation data.
+    let trace_dir = std::env::var("BUILDER_EVAL_TRACE_DIR").ok();
+    if let Some(path) = &trace_dir {
+        std::fs::create_dir(path)?; // Refuse to overwrite a previous trace.
+    }
     let mut reports = Vec::new();
     for scenario in [
         Scenario::Resume,
@@ -339,7 +509,14 @@ async fn live_behavior_suite() -> Result<()> {
                 repeats
             );
             let temp = tempfile::tempdir()?;
-            std::fs::write(temp.path().join("rates.json"), scenario.initial())?;
+            std::fs::write(
+                temp.path().join("rates.json"),
+                if mode == "generated" && matches!(scenario, Scenario::Stale) {
+                    CONFIG.to_string()
+                } else {
+                    scenario.initial()
+                },
+            )?;
             std::fs::write(
                 temp.path().join("expectations.json"),
                 "{\"arena_shield_chance\":0.025,\"schema_version\":1}\n",
@@ -348,14 +525,13 @@ async fn live_behavior_suite() -> Result<()> {
             let workspace = Workspace::new(temp.path())?;
             let mut store = Store::open(temp.path())?;
             let session = store.create("behavior eval", &profile_name, temp.path(), SYSTEM)?;
-            seed(
-                &mut store,
-                &session,
-                &workspace,
-                scenario,
-                mode == "compacted",
-            )
-            .await?;
+            seed(&mut store, &session, &workspace, scenario, &mode).await?;
+            if mode == "generated" {
+                for index in 0..20 {
+                    store.append(&session, &Message::text(Role::User, format!("Background question {index}: explain in general how independent configuration fields can be compared. This is an informational question, not a new implementation requirement or permission. Describe why an observed historical value differs from a requested future value, and why a failed edit may require a fresh read. Keep the original task and restrictions applicable.")))?;
+                    store.append(&session, &Message::text(Role::Assistant, "Historical observations describe past state; current evidence and user requirements determine edits. No changes made."))?;
+                }
+            }
             let original_count = store.history_messages(&session)?.len();
             // Exercise actual durable resume rather than only an in-memory run.
             drop(store);
@@ -374,22 +550,129 @@ async fn live_behavior_suite() -> Result<()> {
             let mut prompt_bytes = 0;
             let mut compactions = 0;
             let mut denied = 0;
-            let run = tokio::time::timeout(std::time::Duration::from_secs(seconds as u64), agent.run(&mut store, &mut |event| match event {
-                AgentEvent::Model(Event::Prompt {bytes}) => {prompts+=1;prompt_bytes+=bytes;},
-                AgentEvent::Compacted {..} => compactions+=1,
+            let mut emit = |event| match event {
+                AgentEvent::Model(Event::Prompt { bytes }) => {
+                    prompts += 1;
+                    prompt_bytes += bytes;
+                }
+                AgentEvent::Compacted { .. } => {
+                    compactions += 1;
+                    eprintln!("  {}: checkpoint {compactions} saved", scenario.name());
+                }
                 _ => {}
-            }, &mut |action| {
+            };
+            let mut inspection_only = false;
+            let mut approve = |action: &Action, inspection_only: bool| {
                 // No generated code or shell is executed. Filesystem access is
                 // confined by Workspace; mutations require an exact allowlist.
-                let allowed = !matches!(scenario,Scenario::Unknown) && matches!(action,Action::EditFile{path,..}|Action::WriteFile{path,..} if matches!(path.as_str(),"rates.json"|"expectations.json"));
-                if !allowed {denied+=1;}
+                let allowed = permits_mutation(scenario, inspection_only, action);
+                if !allowed {
+                    denied += 1;
+                }
                 allowed
-            })).await;
+            };
+            let mut completed_cycles = 0;
+            let evaluation = async {
+                let cycles = if mode == "generated" { 3 } else { 1 };
+                for cycle in 0..cycles {
+                    if mode == "generated" {
+                        inspection_only = cycle < cycles - 1;
+                        // Real tool results add enough context to require a useful
+                        // reduction, and move prior requests beyond the retained tail.
+                        append_inspections(&mut store, &session, &agent.workspace, cycle).await?;
+                        store.append(&session, &Message::text(Role::User, if inspection_only {
+                            "For this turn, inspect the relevant files and report what remains to do. Do not edit yet. Keep the original task and all its requirements for the implementation turn."
+                        } else {
+                            "Now carry out the original task with all corrections and constraints. Verify the result and follow the originally requested final answer format."
+                        }))?;
+                        let originals = store.history_messages(&session)?;
+                        ensure!(
+                            agent.compact(&mut store, &mut emit).await?,
+                            "compaction did not create a checkpoint"
+                        );
+                        // Reopen each checkpoint, not only the initial fixture.
+                        store = Store::open(temp.path())?;
+                        ensure!(
+                            store.history_messages(&session)? == originals,
+                            "compaction changed original history"
+                        );
+                        let active = store.messages(&session)?;
+                        if let Some(path) = &trace_dir {
+                            std::fs::write(
+                                Path::new(path).join(format!(
+                                    "{}-{}-checkpoint-{}.json",
+                                    scenario.name(),
+                                    repetition + 1,
+                                    cycle + 1
+                                )),
+                                serde_json::to_vec_pretty(&active)?,
+                            )?;
+                        }
+                        ensure!(
+                            active
+                                .iter()
+                                .any(|m| m.content.as_deref().is_some_and(
+                                    |s| s.starts_with("[Source-backed user memory v1]")
+                                )),
+                            "bounded source-backed memory not exercised"
+                        );
+                        if !inspection_only && matches!(scenario, Scenario::Stale) {
+                            // An external change after summarization must survive edits.
+                            std::fs::write(temp.path().join("rates.json"), scenario.initial())?;
+                        }
+                    }
+                    agent
+                        .run(&mut store, &mut emit, &mut |action| {
+                            approve(action, inspection_only)
+                        })
+                        .await?;
+                    ensure!(
+                        !pending(&store.messages(&session)?),
+                        "cycle ended with pending work"
+                    );
+                    completed_cycles += 1;
+                    eprintln!(
+                        "  {}: continuation {completed_cycles}/{cycles} complete",
+                        scenario.name()
+                    );
+                    if inspection_only {
+                        ensure!(
+                            std::fs::read_to_string(temp.path().join("rates.json"))?
+                                == if matches!(scenario, Scenario::Stale) {
+                                    CONFIG.to_string()
+                                } else {
+                                    scenario.initial()
+                                },
+                            "inspection changed rates.json"
+                        );
+                        ensure!(
+                            serde_json::from_str::<Value>(&std::fs::read_to_string(
+                                temp.path().join("expectations.json")
+                            )?)? == json!({"arena_shield_chance":0.025,"schema_version":1}),
+                            "inspection changed expectations.json"
+                        );
+                    }
+                }
+                Ok::<(), anyhow::Error>(())
+            };
+            let run =
+                tokio::time::timeout(std::time::Duration::from_secs(seconds as u64), evaluation)
+                    .await;
             let mut failures = Vec::new();
             match run {
                 Err(_) => failures.push("wall-clock timeout; task incomplete".into()),
-                Ok(Err(error)) => failures.push(format!("agent stopped: {error}")),
+                Ok(Err(error)) => failures.push(format!("agent stopped: {error:#}")),
                 Ok(Ok(())) => {}
+            }
+            if let Some(path) = &trace_dir {
+                std::fs::write(
+                    Path::new(path).join(format!(
+                        "{}-{}-history.json",
+                        scenario.name(),
+                        repetition + 1
+                    )),
+                    serde_json::to_vec_pretty(&store.history_messages(&session)?)?,
+                )?;
             }
             let messages = store.messages(&session)?;
             if pending(&messages) {
@@ -413,7 +696,18 @@ async fn live_behavior_suite() -> Result<()> {
                 failures.push(format!("{denied} disallowed mutation or shell requests"));
             }
             let history = store.history_messages(&session)?;
-            let recent = &history[original_count..];
+            let recent = history[original_count..]
+                .iter()
+                .filter(|m| {
+                    !m.tool_calls
+                        .iter()
+                        .any(|c| c.id.starts_with("compaction_fixture_"))
+                        && !m
+                            .tool_call_id
+                            .as_deref()
+                            .is_some_and(|id| id.starts_with("compaction_fixture_"))
+                })
+                .collect::<Vec<_>>();
             let calls = recent
                 .iter()
                 .flat_map(|m| &m.tool_calls)
@@ -423,7 +717,8 @@ async fn live_behavior_suite() -> Result<()> {
             let mut verification = HashSet::new();
             let mut changed_paths = HashSet::new();
             let mut failed_tools = 0;
-            for message in recent {
+            let mut tool_errors = Vec::new();
+            for message in &recent {
                 let Some(call) = message
                     .tool_call_id
                     .as_deref()
@@ -434,10 +729,13 @@ async fn live_behavior_suite() -> Result<()> {
                 let content = message.content.as_deref().unwrap_or("");
                 if content.starts_with("ERROR:") || content.starts_with("DENIED:") {
                     failed_tools += 1;
+                    tool_errors.push(json!({"tool":call.function.name,"error":content.chars().take(800).collect::<String>()}));
                     continue;
                 }
                 match Action::from_call(call)? {
-                    Action::EditFile { path, .. } | Action::WriteFile { path, .. }
+                    Action::EditFile { path, .. }
+                    | Action::WriteFile { path, .. }
+                    | Action::MultiEdit { path, .. }
                         if !content.starts_with("UNCHANGED:") =>
                     {
                         verification.remove(&path);
@@ -460,7 +758,7 @@ async fn live_behavior_suite() -> Result<()> {
             {
                 failures.push("missing read-back verification after final changes".into());
             }
-            let report = json!({"answer_excerpt":answer.chars().take(1200).collect::<String>(),"case":scenario.name(),"repetition":repetition+1,"passed":failures.is_empty(),"failures":failures,"elapsed_ms":started.elapsed().as_millis(),"model_requests_including_compaction":prompts,"serialized_prompt_bytes":prompt_bytes,"tool_calls":calls.len(),"failed_tools":failed_tools,"repeated_identical_read_bytes":repeated_read_bytes,"compactions":compactions});
+            let report = json!({"answer_excerpt":answer.chars().take(1200).collect::<String>(),"case":scenario.name(),"repetition":repetition+1,"passed":failures.is_empty(),"failures":failures,"elapsed_ms":started.elapsed().as_millis(),"model_requests_including_compaction":prompts,"serialized_prompt_bytes":prompt_bytes,"tool_calls":calls.len(),"failed_tools":failed_tools,"tool_errors":tool_errors,"repeated_identical_read_bytes":repeated_read_bytes,"compactions":compactions,"completed_cycles":completed_cycles});
             eprintln!("{report}");
             reports.push(report);
         }
@@ -470,7 +768,7 @@ async fn live_behavior_suite() -> Result<()> {
         "No evaluation matched BUILDER_EVAL_CASE"
     );
     let passed = reports.iter().filter(|r| r["passed"] == true).count();
-    let report = json!({"suite_version":2,"memory":memory_mode,"profile_name":profile_name,"model":profile.model,"mode":mode,"completion_options":profile.completion,"context_tokens":profile.context_tokens,"max_output_tokens":profile.max_output_tokens,"max_rounds":20,"timeout_secs":seconds,"passed":passed,"total":reports.len(),"cases":reports});
+    let report = json!({"suite_version":5,"instruction_retention":"bounded_source_quotes","memory":memory_mode,"profile_name":profile_name,"model":profile.model,"mode":mode,"completion_options":profile.completion,"context_tokens":profile.context_tokens,"max_output_tokens":profile.max_output_tokens,"max_rounds":20,"timeout_secs":seconds,"request_timeout_secs":profile.request_timeout_secs,"idle_timeout_secs":profile.idle_timeout_secs,"passed":passed,"total":reports.len(),"cases":reports});
     // Opt-in report path is caller-selected. Never serialize credentials, headers,
     // endpoint URLs, or raw transcripts. Refuse to overwrite an earlier report.
     if let Ok(path) = std::env::var("BUILDER_EVAL_REPORT") {
