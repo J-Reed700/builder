@@ -1,6 +1,9 @@
 //! Durable, checkout-scoped code index generations. Indexed text is a navigation
 //! hint; callers must validate `file_hash` against the workspace before use.
-use crate::{memory::validate_vector, store::Store};
+use crate::{
+    memory::validate_vector,
+    store::{CodeIndexGuard, Store},
+};
 use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -158,7 +161,7 @@ pub struct CodeHistorySnapshot {
 
 impl Store {
     pub fn code_index_status(&self, scope: &str) -> Result<Option<CodeIndexStatus>> {
-        Ok(self.index()?.query_row(
+        Ok(self.index(scope)?.query_row(
             "SELECT generation,snapshot_hash,status,completed_at,files,chunks,source_bytes,skipped
              FROM code_index_state WHERE scope=?1",
             [scope],
@@ -174,10 +177,10 @@ impl Store {
     /// visible if validation, serialization, or any SQLite write fails.
     pub fn code_index_replace(
         &mut self,
-        scope: &str,
+        writer: &CodeIndexGuard,
         snapshot: &CodeIndexSnapshot,
     ) -> Result<bool> {
-        ensure!(!scope.is_empty(), "Code index scope cannot be empty");
+        let scope = writer.scope();
         ensure!(
             !snapshot.snapshot_hash.is_empty(),
             "Code index snapshot hash is missing"
@@ -214,9 +217,8 @@ impl Store {
                 "Invalid code chunk size"
             );
         }
-        let tx = self
-            .index_mut()?
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut index = self.index(scope)?;
+        let tx = index.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute("DELETE FROM code_index_symbols WHERE scope=?1", [scope])?;
         let generation: i64 = tx.query_row(
             "SELECT COALESCE(MAX(generation),0)+1 FROM code_index_state WHERE scope=?1",
@@ -309,7 +311,7 @@ impl Store {
         ensure!(!expression.is_empty(), "Code index query is empty");
         // Paths and extracted references repeat across passages; give source
         // text and declarations greater weight than duplicated metadata.
-        let index = self.index()?;
+        let index = self.index(scope)?;
         let mut stmt = index.prepare(
             "SELECT c.body,bm25(code_index_fts,0,0,0.1,1,0.1,1) FROM code_index_fts
              JOIN code_index_chunks c ON c.scope=code_index_fts.scope AND c.id=code_index_fts.id
@@ -332,7 +334,7 @@ impl Store {
         fingerprint: &str,
         limit: usize,
     ) -> Result<Vec<CodeChunk>> {
-        let index = self.index()?;
+        let index = self.index(scope)?;
         let mut stmt = index.prepare(
             "SELECT MIN(c.body) FROM code_index_chunks c
              LEFT JOIN code_index_vectors v ON v.content_hash=c.content_hash AND v.fingerprint=?2
@@ -345,34 +347,9 @@ impl Store {
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
 
-    pub fn code_index_set_vector(
-        &mut self,
-        content_hash: &str,
-        fingerprint: &str,
-        vector: &[f32],
-    ) -> Result<()> {
-        validate_vector(vector)?;
-        ensure!(
-            self.index()?.query_row(
-                "SELECT EXISTS(SELECT 1 FROM code_index_chunks WHERE content_hash=?1)",
-                [content_hash],
-                |row| row.get::<_, bool>(0),
-            )?,
-            "Code chunk changed before its embedding completed"
-        );
-        let bytes = vector
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect::<Vec<_>>();
-        self.index()?.execute(
-            "INSERT OR REPLACE INTO code_index_vectors(content_hash,fingerprint,vector) VALUES(?1,?2,?3)",
-            params![content_hash,fingerprint,bytes],
-        )?;
-        Ok(())
-    }
-
     pub fn code_index_set_vectors(
         &mut self,
+        writer: &CodeIndexGuard,
         fingerprint: &str,
         vectors: &[(String, Vec<f32>)],
     ) -> Result<()> {
@@ -380,12 +357,12 @@ impl Store {
             !vectors.is_empty() && vectors.len() <= 128,
             "Invalid code vector batch"
         );
+        let scope = writer.scope();
         for (_, vector) in vectors {
             validate_vector(vector)?;
         }
-        let tx = self
-            .index_mut()?
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut index = self.index(scope)?;
+        let tx = index.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         for (content_hash, vector) in vectors {
             ensure!(
                 tx.query_row(
@@ -414,7 +391,7 @@ impl Store {
         fingerprint: &str,
         limit: usize,
     ) -> Result<Vec<(CodeChunk, Vec<f32>)>> {
-        let index = self.index()?;
+        let index = self.index(scope)?;
         let mut stmt = index.prepare(
             "SELECT c.body,v.vector FROM code_index_chunks c JOIN code_index_vectors v
              ON v.content_hash=c.content_hash WHERE c.scope=?1 AND v.fingerprint=?2
@@ -444,7 +421,7 @@ impl Store {
         scope: &str,
         fingerprint: &str,
     ) -> Result<(usize, usize)> {
-        Ok(self.index()?.query_row(
+        Ok(self.index(scope)?.query_row(
             "SELECT COUNT(DISTINCT CASE WHEN v.content_hash IS NOT NULL THEN c.content_hash END),
                     COUNT(DISTINCT c.content_hash)
              FROM code_index_chunks c LEFT JOIN code_index_vectors v
@@ -454,10 +431,10 @@ impl Store {
         )?)
     }
 
-    pub fn code_index_remove_path(&mut self, scope: &str, path: &str) -> Result<()> {
-        let tx = self
-            .index_mut()?
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    pub fn code_index_remove_path(&mut self, writer: &CodeIndexGuard, path: &str) -> Result<()> {
+        let scope = writer.scope();
+        let mut index = self.index(scope)?;
+        let tx = index.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute(
             "DELETE FROM code_index_symbols WHERE scope=?1 AND path=?2",
             params![scope, path],
@@ -485,13 +462,18 @@ impl Store {
 
     /// Record a failed complete scan without deleting or replacing the last
     /// queryable generation.
-    pub fn code_index_record_failure(&mut self, scope: &str, detail: &str) -> Result<()> {
+    pub fn code_index_record_failure(
+        &mut self,
+        writer: &CodeIndexGuard,
+        detail: &str,
+    ) -> Result<()> {
+        let scope = writer.scope();
         let mut detail = detail.replace(['\r', '\n'], " ");
         if detail.len() > 500 {
             detail.truncate(500);
         }
         let status = format!("refresh_failed: {detail}");
-        self.index()?.execute(
+        self.index(scope)?.execute(
             "INSERT INTO code_index_state(scope,generation,snapshot_hash,status,completed_at,files,chunks,source_bytes,skipped)
              VALUES(?1,0,'',?2,?3,0,0,0,0)
              ON CONFLICT(scope) DO UPDATE SET status=excluded.status,completed_at=excluded.completed_at",
@@ -504,10 +486,10 @@ impl Store {
     /// not source excerpts, prompts, model output, or credentials.
     pub fn code_index_record_query(
         &mut self,
-        scope: &str,
+        writer: &CodeIndexGuard,
         telemetry: &CodeQueryTelemetry,
     ) -> Result<i64> {
-        ensure!(!scope.is_empty(), "Code query scope cannot be empty");
+        let scope = writer.scope();
         ensure!(
             !telemetry.query.is_empty() && telemetry.query.len() <= 1000,
             "Code query telemetry exceeds query bound"
@@ -520,9 +502,8 @@ impl Store {
                     .all(|path| !path.is_empty() && path.len() <= 4096),
             "Code query telemetry exceeds result bound"
         );
-        let tx = self
-            .index_mut()?
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut index = self.index(scope)?;
+        let tx = index.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO code_index_queries(scope,session,source,query,created_at,elapsed_ms,
              candidates,returned,stale_suppressed,semantic,coverage_indexed,coverage_total,result_paths)
@@ -554,7 +535,7 @@ impl Store {
     }
 
     pub fn code_index_query_summary(&self, scope: &str) -> Result<CodeQuerySummary> {
-        self.index()?
+        self.index(scope)?
             .query_row(
                 "SELECT COUNT(*),COALESCE(SUM(returned=0),0),COALESCE(SUM(stale_suppressed),0),
              CAST(COALESCE(ROUND(AVG(elapsed_ms)),0) AS INTEGER),MAX(created_at)
@@ -575,10 +556,10 @@ impl Store {
 
     pub fn code_history_replace(
         &mut self,
-        scope: &str,
+        writer: &CodeIndexGuard,
         snapshot: &CodeHistorySnapshot,
     ) -> Result<bool> {
-        ensure!(!scope.is_empty(), "Code history scope cannot be empty");
+        let scope = writer.scope();
         ensure!(
             !snapshot.head.is_empty() && !snapshot.snapshot_hash.is_empty(),
             "Code history snapshot identity is missing"
@@ -588,7 +569,7 @@ impl Store {
             "Code history exceeds storage bound"
         );
         if self
-            .index()?
+            .index(scope)?
             .query_row(
                 "SELECT snapshot_hash FROM code_history_state WHERE scope=?1",
                 [scope],
@@ -612,9 +593,8 @@ impl Store {
                 "Invalid code history entry"
             );
         }
-        let tx = self
-            .index_mut()?
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut index = self.index(scope)?;
+        let tx = index.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute("DELETE FROM code_history_fts WHERE scope=?1", [scope])?;
         tx.execute("DELETE FROM code_history_entries WHERE scope=?1", [scope])?;
         for entry in &snapshot.entries {
@@ -645,7 +625,7 @@ impl Store {
     }
 
     pub fn code_history_available(&self, scope: &str) -> Result<bool> {
-        Ok(self.index()?.query_row(
+        Ok(self.index(scope)?.query_row(
             "SELECT EXISTS(SELECT 1 FROM code_history_state WHERE scope=?1)",
             [scope],
             |row| row.get(0),
@@ -659,7 +639,7 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<(CodeHistoryEntry, f64)>> {
         ensure!(!expression.is_empty(), "Code history query is empty");
-        let index = self.index()?;
+        let index = self.index(scope)?;
         let mut statement = index.prepare(
             "SELECT e.body,bm25(code_history_fts) FROM code_history_fts
              JOIN code_history_entries e ON e.scope=code_history_fts.scope
@@ -684,7 +664,7 @@ impl Store {
         chunks_per_path: usize,
     ) -> Result<Vec<CodeChunk>> {
         ensure!(paths.len() <= 100, "Too many code history paths");
-        let index = self.index()?;
+        let index = self.index(scope)?;
         let mut statement = index.prepare(
             "SELECT body FROM code_index_chunks WHERE scope=?1 AND path=?2
              ORDER BY CAST(json_extract(body,'$.start_line') AS INTEGER) LIMIT ?3",
@@ -710,7 +690,7 @@ impl Store {
     ) -> Result<Vec<(CodeChunk, String, String)>> {
         ensure!(symbols.len() <= 32, "Too many exact code symbols");
         let limit = limit.clamp(1, 500);
-        let index = self.index()?;
+        let index = self.index(scope)?;
         let mut statement = index.prepare(
             "SELECT c.body,s.symbol,s.role FROM code_index_symbols s
              JOIN code_index_chunks c ON c.scope=s.scope AND c.id=s.chunk_id
@@ -779,8 +759,9 @@ mod tests {
     fn complete_generation_is_searchable_and_failed_replacement_preserves_it() {
         let home = tempfile::tempdir().unwrap();
         let mut store = Store::open(home.path()).unwrap();
+        let writer = store.try_code_index_lock("repo").unwrap().unwrap();
         let valid = snapshot("fn shield_drop() {}");
-        assert!(store.code_index_replace("repo", &valid).unwrap());
+        assert!(store.code_index_replace(&writer, &valid).unwrap());
         assert_eq!(
             store.code_index_lexical("repo", "\"shield\"", 10).unwrap()[0]
                 .0
@@ -794,7 +775,7 @@ mod tests {
         assert_eq!(exact[0].2, "declaration");
         let mut invalid = snapshot("fn boss_collision() {}");
         invalid.files.clear();
-        assert!(store.code_index_replace("repo", &invalid).is_err());
+        assert!(store.code_index_replace(&writer, &invalid).is_err());
         assert_eq!(
             store.code_index_status("repo").unwrap().unwrap().generation,
             1
@@ -806,7 +787,7 @@ mod tests {
             "fn shield_drop() {}"
         );
         store
-            .code_index_record_failure("repo", "bounded scan failed\nsecret second line")
+            .code_index_record_failure(&writer, "bounded scan failed\nsecret second line")
             .unwrap();
         let state = store.code_index_status("repo").unwrap().unwrap();
         assert_eq!(state.generation, 1);
@@ -818,9 +799,10 @@ mod tests {
     fn query_telemetry_is_bounded_and_aggregated_without_source_text() {
         let home = tempfile::tempdir().unwrap();
         let mut store = Store::open(home.path()).unwrap();
+        let writer = store.try_code_index_lock("repo").unwrap().unwrap();
         let id = store
             .code_index_record_query(
-                "repo",
+                &writer,
                 &CodeQueryTelemetry {
                     session: "session".into(),
                     source: CodeQuerySource::Tool,
@@ -855,6 +837,7 @@ mod tests {
     fn history_replacement_is_atomic_searchable_and_content_addressed() {
         let home = tempfile::tempdir().unwrap();
         let mut store = Store::open(home.path()).unwrap();
+        let writer = store.try_code_index_lock("repo").unwrap().unwrap();
         let snapshot = CodeHistorySnapshot {
             head: "abc".into(),
             snapshot_hash: "history-one".into(),
@@ -865,8 +848,8 @@ mod tests {
                 paths: vec!["src/arena.rs".into()],
             }],
         };
-        assert!(store.code_history_replace("repo", &snapshot).unwrap());
-        assert!(!store.code_history_replace("repo", &snapshot).unwrap());
+        assert!(store.code_history_replace(&writer, &snapshot).unwrap());
+        assert!(!store.code_history_replace(&writer, &snapshot).unwrap());
         let hits = store
             .code_history_lexical("repo", "\"shield\"", 10)
             .unwrap();
@@ -879,7 +862,7 @@ mod tests {
             snapshot_hash: "history-two".into(),
             ..snapshot
         };
-        assert!(store.code_history_replace("repo", &invalid).is_err());
+        assert!(store.code_history_replace(&writer, &invalid).is_err());
         assert_eq!(
             store
                 .code_history_lexical("repo", "\"shield\"", 10)

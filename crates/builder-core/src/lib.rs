@@ -2,6 +2,7 @@
 pub mod code_index;
 pub mod config;
 pub mod protocol;
+pub mod schedule;
 pub mod store;
 
 pub mod memory;

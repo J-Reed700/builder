@@ -7,7 +7,7 @@ use builder_core::{
     config::PipelineSettings,
     memory::cosine,
     protocol::{Message, Role},
-    store::Store,
+    store::{CodeIndexGuard, Store},
 };
 use builder_tools::Workspace;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -104,25 +104,24 @@ pub fn refresh(
     settings: &PipelineSettings,
 ) -> Result<bool> {
     ensure!(settings.code_index, "Code index is disabled in /settings");
-    let index_scope = scope(workspace);
-    let Some(_guard) = store.try_code_index_lock(&index_scope)? else {
-        // Another process already owns the rebuild. Readers continue using the
+    let Some(writer) = store.try_code_index_lock(&scope(workspace))? else {
+        // Another holder already owns the rebuild. Readers continue using the
         // last atomically published generation instead of queuing more work.
         return Ok(false);
     };
-    refresh_locked(store, workspace, settings, &index_scope)
+    refresh_locked(store, &writer, workspace, settings)
 }
 
 fn refresh_locked(
     store: &mut Store,
+    writer: &CodeIndexGuard,
     workspace: &Workspace,
     settings: &PipelineSettings,
-    index_scope: &str,
 ) -> Result<bool> {
     match builder_tools::code_index::capture(workspace, settings) {
-        Ok(snapshot) => store.code_index_replace(index_scope, &snapshot),
+        Ok(snapshot) => store.code_index_replace(writer, &snapshot),
         Err(error) => {
-            store.code_index_record_failure(index_scope, &error.to_string())?;
+            store.code_index_record_failure(writer, &error.to_string())?;
             Err(error)
         }
     }
@@ -139,12 +138,14 @@ pub async fn maintain(
         return Ok(());
     }
     let index_scope = scope(workspace);
-    let Some(_guard) = store.try_code_index_lock(&index_scope)? else {
+    // Held for the whole pass so two processes on one checkout never embed
+    // the same chunks twice; foreground callers skip writes meanwhile.
+    let Some(writer) = store.try_code_index_lock(&index_scope)? else {
         return Ok(());
     };
-    refresh_locked(store, workspace, settings, &index_scope)?;
+    refresh_locked(store, &writer, workspace, settings)?;
     if settings.code_history {
-        let _ = refresh_history_locked(store, workspace, settings, &index_scope).await;
+        let _ = refresh_history_locked(store, &writer, workspace, settings).await;
     }
     if !settings.code_index_semantic {
         return Ok(());
@@ -177,13 +178,13 @@ pub async fn maintain(
             .zip(vectors)
             .map(|(chunk, vector)| (chunk.content_hash, vector))
             .collect::<Vec<_>>();
-        store.code_index_set_vectors(fingerprint, &batch)?;
+        store.code_index_set_vectors(&writer, fingerprint, &batch)?;
         // A large first-time vector build must not postpone current-code
         // publication. Reconcile a debounced change between bounded batches.
         if let Some(watch) = watch.as_deref_mut()
             && watch.take_pending(settings.code_index_debounce_ms).await
         {
-            refresh_locked(store, workspace, settings, &index_scope)?;
+            refresh_locked(store, &writer, workspace, settings)?;
         }
         tokio::task::yield_now().await;
     }
@@ -228,10 +229,23 @@ pub async fn search_with_trace(
         !query.trim().is_empty() && query.len() <= 1000,
         "Code search query needs 1–1000 bytes"
     );
-    // A foreground index query publishes a current lexical generation before
-    // ranking. Background refresh makes this normally a content-hash no-op.
-    refresh(store, workspace, settings)?;
     let scope = scope(workspace);
+    // A foreground index query publishes a current lexical generation before
+    // ranking when no other holder is writing this checkout; background
+    // refresh makes this normally a content-hash no-op. The writer lock is
+    // released before ranking so maintenance is never held behind a search.
+    let history_available = match store.try_code_index_lock(&scope)? {
+        Some(writer) => {
+            refresh_locked(store, &writer, workspace, settings)?;
+            if settings.code_history {
+                Some(refresh_history_locked(store, &writer, workspace, settings).await)
+            } else {
+                None
+            }
+        }
+        None if settings.code_history => Some(store.code_history_available(&scope)),
+        None => None,
+    };
     let terms = query_terms(query);
     ensure!(
         !terms.is_empty(),
@@ -265,9 +279,9 @@ pub async fn search_with_trace(
         }
     }
 
-    let (history_hits, history_error) = if settings.code_history {
-        match refresh_history(store, workspace, settings).await {
-            Ok(available) if available => (
+    let (history_hits, history_error) = match history_available {
+        Some(available) => match available {
+            Ok(true) => (
                 store.code_history_lexical(
                     &scope,
                     &expression,
@@ -275,11 +289,10 @@ pub async fn search_with_trace(
                 )?,
                 None,
             ),
-            Ok(_) => (Vec::new(), None),
+            Ok(false) => (Vec::new(), None),
             Err(error) => (Vec::new(), Some(clip(&error.to_string(), 300))),
-        }
-    } else {
-        (Vec::new(), None)
+        },
+        None => (Vec::new(), None),
     };
     let mut history_paths = HashMap::<String, usize>::new();
     for (rank, (entry, _)) in history_hits.iter().enumerate() {
@@ -494,9 +507,18 @@ pub async fn search_with_trace(
             "excerpt":clip(&candidate.chunk.content, 1400),
         }));
     }
-    for path in &stale_paths {
-        store.code_index_remove_path(&scope, path)?;
-    }
+    // Stale pruning and telemetry are optional writes: when another holder is
+    // publishing, validated results are already correct without them.
+    let writer = store.try_code_index_lock(&scope)?;
+    let stale_paths_removed = match &writer {
+        Some(writer) => {
+            for path in &stale_paths {
+                store.code_index_remove_path(writer, path)?;
+            }
+            true
+        }
+        None => false,
+    };
     let status = store.code_index_status(&scope)?;
     let telemetry = CodeQueryTelemetry {
         session: session.into(),
@@ -513,13 +535,15 @@ pub async fn search_with_trace(
             .filter_map(|result| result["path"].as_str().map(str::to_owned))
             .collect(),
     };
-    let telemetry_status = match settings.code_index_telemetry {
-        true => match store.code_index_record_query(&scope, &telemetry) {
+    let telemetry_status = match (settings.code_index_telemetry, &writer) {
+        (true, Some(writer)) => match store.code_index_record_query(writer, &telemetry) {
             Ok(id) => json!({"recorded":true,"id":id}),
             Err(error) => json!({"recorded":false,"error":clip(&error.to_string(),300)}),
         },
-        false => json!({"recorded":false,"reason":"disabled in /settings"}),
+        (true, None) => json!({"recorded":false,"reason":"index maintenance in progress"}),
+        (false, _) => json!({"recorded":false,"reason":"disabled in /settings"}),
     };
+    drop(writer);
     let value = json!({
         "results":results,
         "abstained":results.is_empty(),
@@ -547,7 +571,8 @@ pub async fn search_with_trace(
             })).collect::<Vec<_>>(),
         },
         "index":status,
-        "stale_paths_removed":stale_paths,
+        "stale_paths_suppressed":stale_paths,
+        "stale_paths_removed":stale_paths_removed,
         "telemetry":telemetry_status,
         "limits":format!("{} results; excerpts 1400 bytes; {} indexed chunks maximum", limit, settings.code_index_max_chunks),
         "usage":"Navigation evidence only. Read the returned current range before editing; tests and runtime checks establish behavior.",
@@ -559,23 +584,11 @@ pub fn status(store: &Store, workspace: &Workspace) -> Result<Option<CodeIndexSt
     store.code_index_status(&scope(workspace))
 }
 
-async fn refresh_history(
-    store: &mut Store,
-    workspace: &Workspace,
-    settings: &PipelineSettings,
-) -> Result<bool> {
-    let index_scope = scope(workspace);
-    let Some(_guard) = store.try_code_index_lock(&index_scope)? else {
-        return store.code_history_available(&index_scope);
-    };
-    refresh_history_locked(store, workspace, settings, &index_scope).await
-}
-
 async fn refresh_history_locked(
     store: &mut Store,
+    writer: &CodeIndexGuard,
     workspace: &Workspace,
     settings: &PipelineSettings,
-    index_scope: &str,
 ) -> Result<bool> {
     let Some(snapshot) = builder_tools::git_history::capture(
         workspace,
@@ -586,7 +599,7 @@ async fn refresh_history_locked(
     else {
         return Ok(false);
     };
-    store.code_history_replace(index_scope, &snapshot)?;
+    store.code_history_replace(writer, &snapshot)?;
     Ok(true)
 }
 
@@ -608,11 +621,12 @@ pub fn query_summary(
     store.code_index_query_summary(&scope(workspace))
 }
 
-/// A nonblocking foreground packet. It reads only an already published lexical
-/// generation and validates selected files; embedding work stays in maintenance
-/// or the explicit search tool.
+/// A nonblocking foreground packet. It only reads an already published lexical
+/// generation and validates selected files; it never writes the index, so it
+/// cannot wait on or fail behind a publishing writer. Stale candidates are
+/// skipped and left for maintenance, which is already rescanning the change.
 pub fn packet(
-    store: &mut Store,
+    store: &Store,
     session: &str,
     workspace: &Workspace,
     settings: &PipelineSettings,
@@ -642,7 +656,6 @@ pub fn packet(
     )?;
     let mut selected = Vec::new();
     let mut paths = BTreeSet::new();
-    let mut stale = BTreeSet::new();
     for (chunk, _) in candidates {
         if selected.len() == settings.code_index_auto_files || paths.contains(&chunk.path) {
             continue;
@@ -659,12 +672,7 @@ pub fn packet(
                 "source_sha256":chunk.file_hash,
                 "excerpt":clip(&chunk.content,700),
             }));
-        } else {
-            stale.insert(chunk.path);
         }
-    }
-    for path in stale {
-        store.code_index_remove_path(&index_scope, &path)?;
     }
     if selected.is_empty() {
         return Ok(None);
@@ -888,6 +896,45 @@ mod tests {
         .unwrap();
         assert_eq!(changed["results"][0]["symbols"][0], "boss_collision");
         assert!(!changed.to_string().contains("old_shield_drop"));
+    }
+
+    #[tokio::test]
+    async fn search_serves_published_generation_while_another_holder_writes() {
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("arena.rs"), "fn shield_drop() {}\n").unwrap();
+        let workspace = Workspace::new(root.path()).unwrap();
+        let mut store = Store::open(home.path()).unwrap();
+        let settings = PipelineSettings {
+            code_index_semantic: false,
+            ..Default::default()
+        };
+        refresh(&mut store, &workspace, &settings).unwrap();
+        let maintenance = Store::open(home.path()).unwrap();
+        let _writer = maintenance
+            .try_code_index_lock(workspace.root().to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let result: Value = serde_json::from_str(
+            &search(
+                &mut store,
+                "session",
+                &workspace,
+                None,
+                &settings,
+                "shield_drop",
+                None,
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["results"][0]["path"], "arena.rs");
+        assert_eq!(result["stale_paths_removed"], false);
+        assert_eq!(
+            result["telemetry"]["reason"],
+            "index maintenance in progress"
+        );
     }
 
     #[tokio::test]
@@ -1142,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_packet_uses_published_fresh_source_and_removes_raced_changes() {
+    fn automatic_packet_uses_published_fresh_source_and_skips_raced_changes_read_only() {
         let home = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1163,25 +1210,46 @@ mod tests {
                 &Message::text(Role::User, "Please decrease the arena shield drop rate"),
             )
             .unwrap();
-        let first = packet(&mut store, &session, &workspace, &settings)
+        let first = packet(&store, &session, &workspace, &settings)
             .unwrap()
             .unwrap()
             .content
             .unwrap();
         assert!(first.contains("shield_drop_rate"));
         std::fs::write(root.path().join("arena.rs"), "fn boss_collision() {}\n").unwrap();
+        // A publishing writer holds the checkout lock and the SQLite writer.
+        // The foreground packet must neither wait on nor fail behind it.
+        let writer = store
+            .try_code_index_lock(workspace.root().to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let blocker = rusqlite::Connection::open(
+            home.path()
+                .join("code-index")
+                .read_dir()
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.extension().is_some_and(|ext| ext == "sqlite3"))
+                .unwrap(),
+        )
+        .unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let started = std::time::Instant::now();
         assert!(
-            packet(&mut store, &session, &workspace, &settings)
+            packet(&store, &session, &workspace, &settings)
                 .unwrap()
                 .is_none()
         );
+        assert!(started.elapsed() < std::time::Duration::from_millis(200));
+        blocker.execute_batch("ROLLBACK;").unwrap();
+        drop(writer);
         assert_eq!(
             store
                 .code_index_status(workspace.root().to_str().unwrap())
                 .unwrap()
                 .unwrap()
                 .status,
-            "stale"
+            "ready"
         );
     }
 

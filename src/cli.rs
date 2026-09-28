@@ -54,6 +54,17 @@ impl From<Approval> for ApprovalMode {
 }
 #[derive(Subcommand)]
 pub enum Command {
+    /// Create and manage persistent local automations.
+    Schedule(builder::scheduler::commands::ScheduleArgs),
+    /// Run saved automations independently of any terminal conversation.
+    Daemon {
+        /// Execute at most one due or queued job, then exit.
+        #[arg(long)]
+        once: bool,
+        /// Print a service definition for installation with the OS service manager.
+        #[arg(long, value_enum, conflicts_with = "once")]
+        service: Option<builder::scheduler::service::ServiceFormat>,
+    },
     /// Control this workspace from a browser directly or through Builder Gateway.
     Remote {
         #[command(subcommand)]

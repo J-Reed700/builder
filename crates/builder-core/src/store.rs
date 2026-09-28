@@ -1,14 +1,18 @@
 use crate::protocol::Message;
 mod pages;
+mod schedules;
 mod subagents;
 use crate::protocol::Role;
 use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
 pub use pages::{ChatSession, HistoryEntry, HistoryPage};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+pub use schedules::SchedulerGuard;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    cell::{RefCell, RefMut},
+    collections::HashMap,
     fs::File,
     path::{Path, PathBuf},
     time::Duration,
@@ -16,15 +20,23 @@ use std::{
 
 const JOURNAL_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub const INTERRUPTED_SIDE_EFFECT_FREE: &str = "ERROR: Interrupted before this result was saved. The call has no side effects; repeat it if the result is still needed.";
-const INDEX_OPEN_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
+// Each checkout index has exactly one writer (its CodeIndexGuard holder), so
+// a busy wait only covers first-open initialization races between processes.
+const INDEX_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+// A full generation publish is one transaction, so the WAL briefly reaches the
+// size of that generation. Truncate it back after each checkpoint reset rather
+// than retaining the high-water mark indefinitely.
+const INDEX_WAL_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+const INDEX_DIR: &str = "code-index";
+const LEGACY_SHARED_INDEX: &str = "builder-index.sqlite3";
 
 pub struct Store {
     pub(crate) conn: Connection,
     /// Derived repository indexes live outside the authoritative conversation
-    /// journal. A bulk index write must never take the writer lock needed to
-    /// save a user message, tool claim, or tool result.
-    pub(crate) index_conn: Option<Connection>,
-    index_error: Option<String>,
+    /// journal, one database per checkout, opened on first use. A bulk index
+    /// write can never take the writer lock needed to save a user message,
+    /// tool claim, or tool result, nor block another checkout's index.
+    indexes: RefCell<HashMap<String, Connection>>,
     home: PathBuf,
 }
 
@@ -42,10 +54,19 @@ pub struct SessionGuard {
     file: File,
 }
 
-/// Serializes rebuildable index maintenance for one checkout across Builder
-/// processes. Losing the process releases the advisory lock automatically.
+/// The sole-writer capability for one checkout's index across Builder
+/// processes. Every index mutation requires it, so SQLite never sees two
+/// writers on one index database and readers never wait on a writer (WAL).
+/// Losing the process releases the advisory lock automatically.
 pub struct CodeIndexGuard {
     file: File,
+    scope: String,
+}
+
+impl CodeIndexGuard {
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
 }
 
 impl Drop for SessionGuard {
@@ -144,17 +165,29 @@ fn private_lock_options() -> std::fs::OpenOptions {
     options
 }
 
-fn open_index(home: &Path) -> Result<Connection> {
-    let path = home.join("builder-index.sqlite3");
+fn index_identity(scope: &str) -> Result<String> {
+    ensure!(
+        !scope.is_empty() && scope.len() <= 16 * 1024,
+        "Invalid code index scope"
+    );
+    Ok(format!("{:x}", Sha256::digest(scope.as_bytes())))
+}
+
+fn open_index(path: &Path) -> Result<Connection> {
+    if let Some(parent) = path.parent() {
+        crate::config::ensure_home(parent)?;
+    }
     let options = private_database_options();
-    match options.open(&path) {
+    match options.open(path) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error.into()),
     }
-    let mut conn = Connection::open(&path)?;
-    conn.busy_timeout(INDEX_OPEN_BUSY_TIMEOUT)?;
-    conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
+    let mut conn = Connection::open(path)?;
+    conn.busy_timeout(INDEX_BUSY_TIMEOUT)?;
+    conn.execute_batch(&format!(
+        "PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA journal_size_limit={INDEX_WAL_LIMIT_BYTES};"
+    ))?;
     let mut version: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     ensure!(
         version <= 1,
@@ -212,10 +245,10 @@ impl Store {
         conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
         let mut version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         ensure!(
-            version <= 13,
+            version <= 14,
             "Session database was created by a newer Builder version; upgrade Builder"
         );
-        if version < 13 {
+        if version < 14 {
             // WAL mode is persistent. Only migrations may change it or acquire
             // a write lock; opening a current journal is a read-only fast path.
             conn.execute_batch("PRAGMA journal_mode=WAL;")?;
@@ -226,7 +259,7 @@ impl Store {
             // connection waited for the writer lock.
             version = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
             ensure!(
-                version <= 13,
+                version <= 14,
                 "Session database was created by a newer Builder version; upgrade Builder"
             );
             tx.execute_batch("CREATE TABLE IF NOT EXISTS sessions (
@@ -320,6 +353,9 @@ impl Store {
                 }
                 tx.execute_batch("PRAGMA user_version=13;")?;
             }
+            if version < 14 {
+                tx.execute_batch(crate::schedule::SCHEMA)?;
+            }
             tx.commit()?;
         }
         let journal_mode: String =
@@ -328,37 +364,46 @@ impl Store {
             journal_mode.eq_ignore_ascii_case("wal"),
             "Authoritative journal is not in WAL mode"
         );
-        // A rebuildable sidecar must never make the authoritative journal
-        // unavailable. Automatic code context degrades with an explicit notice;
-        // a later Store open retries initialization.
-        let (index_conn, index_error) = match open_index(home) {
-            Ok(connection) => (Some(connection), None),
-            Err(error) => (None, Some(format!("{error:#}"))),
-        };
+        // Releases before per-checkout indexes shared one database across
+        // every repository and process, so one checkout's bulk publish locked
+        // out another's foreground reads and writes. The data is derived and
+        // rebuilt per checkout on first use. Removal is best-effort: an older
+        // process keeps its open descriptors until it exits.
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(home.join(format!("{LEGACY_SHARED_INDEX}{suffix}")));
+        }
         Ok(Self {
             conn,
-            index_conn,
-            index_error,
+            indexes: RefCell::default(),
             home: home.into(),
         })
     }
 
-    pub(crate) fn index(&self) -> Result<&Connection> {
-        self.index_conn.as_ref().with_context(|| {
-            format!(
-                "Derived code index unavailable: {}",
-                self.index_error.as_deref().unwrap_or("unknown error")
-            )
-        })
+    fn index_path(&self, scope: &str, extension: &str) -> Result<PathBuf> {
+        Ok(self
+            .home
+            .join(INDEX_DIR)
+            .join(format!("{}.{extension}", index_identity(scope)?)))
     }
 
-    pub(crate) fn index_mut(&mut self) -> Result<&mut Connection> {
-        self.index_conn.as_mut().with_context(|| {
-            format!(
-                "Derived code index unavailable: {}",
-                self.index_error.as_deref().unwrap_or("unknown error")
-            )
-        })
+    /// The checkout's derived index connection. A rebuildable sidecar must
+    /// never make the authoritative journal unavailable: failure to open is
+    /// reported to the caller, which degrades, and the next use retries.
+    pub(crate) fn index(&self, scope: &str) -> Result<RefMut<'_, Connection>> {
+        let mut indexes = self
+            .indexes
+            .try_borrow_mut()
+            .context("Code index connection is already in use")?;
+        if !indexes.contains_key(scope) {
+            let path = self.index_path(scope, "sqlite3")?;
+            let connection = open_index(&path).context("Derived code index unavailable")?;
+            indexes.insert(scope.to_owned(), connection);
+        }
+        Ok(RefMut::map(indexes, |indexes| {
+            indexes
+                .get_mut(scope)
+                .expect("index connection opened above")
+        }))
     }
 
     /// Acquire the journal writer at the transaction boundary. SQLite's
@@ -371,16 +416,19 @@ impl Store {
             .context("Authoritative journal remained busy before a durable write")
     }
 
+    /// Nonblocking: `None` means another holder is writing this checkout's
+    /// index, and callers continue on the last published generation.
     pub fn try_code_index_lock(&self, scope: &str) -> Result<Option<CodeIndexGuard>> {
-        ensure!(
-            !scope.is_empty() && scope.len() <= 16 * 1024,
-            "Invalid code index lock scope"
-        );
-        let identity = format!("{:x}", Sha256::digest(scope.as_bytes()));
-        let file = private_lock_options()
-            .open(self.home.join(format!("builder-index-{identity}.lock")))?;
+        let path = self.index_path(scope, "lock")?;
+        if let Some(parent) = path.parent() {
+            crate::config::ensure_home(parent)?;
+        }
+        let file = private_lock_options().open(path)?;
         match file.try_lock_exclusive() {
-            Ok(()) => Ok(Some(CodeIndexGuard { file })),
+            Ok(()) => Ok(Some(CodeIndexGuard {
+                file,
+                scope: scope.to_owned(),
+            })),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
             Err(error) => Err(error).context("Could not acquire code index maintenance lock"),
         }
