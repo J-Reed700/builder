@@ -4,6 +4,7 @@ mod compaction;
 mod context_memory;
 pub mod doctor;
 pub mod input;
+pub mod scheduler;
 pub mod ui;
 
 pub mod memory;

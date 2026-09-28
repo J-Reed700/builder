@@ -54,6 +54,10 @@ pub fn help(width: usize) -> String {
             "/settings",
             "Pipeline features and budgets for this profile",
         ),
+        panel::field(
+            "/schedule",
+            "Schedule tasks; list, pause, resume, and inspect runs",
+        ),
         panel::field("/memory", "Local memory settings and model setup"),
         panel::section("Session"),
         panel::field("/help", "This list"),

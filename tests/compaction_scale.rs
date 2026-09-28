@@ -128,7 +128,9 @@ async fn many_user_turns_keep_active_context_bounded() -> Result<()> {
         assert!(result?);
         assert!(estimate_tokens(&after) < estimate_tokens(&before));
         assert!(
-            estimate_tokens(&after) < 6000,
+            // The recent rolling window can use 12,000 tokens; the bounded
+            // instruction memory and small synthetic handoff use the remainder.
+            estimate_tokens(&after) < 16000,
             "active context grows with archived user text"
         );
         assert!(after.iter().any(|m| {
@@ -197,10 +199,10 @@ async fn live_many_turns_preserve_early_middle_and_recent_findings() -> Result<(
         "{}",
         json!({"rounds":rounds,"before":measurements(&before),"after":measurements(&compacted)})
     );
-    if failures.is_empty() {
-        if let Err(error) = agent.run(&mut store, &mut |_| {}, &mut |_| false).await {
-            failures.push(format!("continuation failed: {error:#}"));
-        }
+    if failures.is_empty()
+        && let Err(error) = agent.run(&mut store, &mut |_| {}, &mut |_| false).await
+    {
+        failures.push(format!("continuation failed: {error:#}"));
     }
     let active = store.messages(&session)?;
     let answer = active

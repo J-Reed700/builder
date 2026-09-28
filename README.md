@@ -155,6 +155,7 @@ and memory content is sent to the model endpoint you configure.
 
 | Guide | What it covers |
 | :--- | :--- |
+| [Scheduling](docs/SCHEDULING.md) | Persistent local automations, execution history, and background services |
 | [CLI guide](docs/CLI_GUIDE.md) | Commands, configuration, permissions, authentication, and imports |
 | [Remote control](docs/REMOTE_CONTROL.md) | Browser access, gateway deployment, networking, and recovery |
 | [Memory](docs/MEMORY.md) | Local and remote embeddings, provenance, invalidation, and retention |

@@ -58,6 +58,10 @@ impl Router {
 }
 
 impl Provider for Router {
+    async fn parallel_capacity(&self) -> Option<usize> {
+        Some(4)
+    }
+
     async fn complete(
         &self,
         messages: &[Message],
@@ -254,6 +258,9 @@ async fn parallel_subagents_return_reports_without_their_raw_reads() {
 
     let parent = agent.provider.parent_requests();
     assert!(tool_names(&parent[0].1).contains(&"subagent"));
+    let prompt = serde_json::to_string(&parent[0].0).unwrap();
+    assert!(prompt.contains("server reports 4 parallel inference slots"));
+    assert!(prompt.contains("up to 4 research subagents concurrently"));
     let context = serde_json::to_string(&parent[1].0).unwrap();
     assert!(context.contains("notes.txt:1 holds the marker."));
     assert!(context.contains("Only notes.txt exists."));
@@ -412,4 +419,43 @@ async fn disabled_subagents_are_hidden_and_reject_queued_calls() {
     );
     assert!(!tool_names(&agent.provider.parent_requests()[0].1).contains(&"subagent"));
     assert!(agent.provider.child_requests().is_empty());
+}
+
+#[tokio::test]
+async fn advertised_four_slots_run_four_subagents_together() {
+    let mut f = Fixture::new();
+    let prompts = [
+        "Investigate A",
+        "Investigate B",
+        "Investigate C",
+        "Investigate D",
+    ];
+    let args: Vec<_> = prompts
+        .iter()
+        .enumerate()
+        .map(|(i, prompt)| delegate(&format!("capacity-{i}"), prompt, prompt))
+        .collect();
+    let batch: Vec<_> = args
+        .iter()
+        .map(|(id, name, args)| (id.as_str(), *name, args.clone()))
+        .collect();
+    let mut router = Router::new(
+        vec![
+            calls(&batch),
+            Message::text(Role::Assistant, "All four reports received."),
+        ],
+        prompts
+            .iter()
+            .map(|prompt| {
+                (
+                    *prompt,
+                    vec![Message::text(Role::Assistant, "Investigation complete.")],
+                )
+            })
+            .collect(),
+    );
+    router.overlap = Some(tokio::sync::Barrier::new(4));
+    let agent = f.agent(Profile::default(), router);
+    f.run(&agent).await.0.unwrap();
+    assert_eq!(agent.provider.child_requests().len(), 4);
 }

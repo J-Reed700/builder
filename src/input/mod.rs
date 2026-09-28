@@ -31,6 +31,7 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("/help", "Keyboard shortcuts and commands"),
     ("/status", "Context usage and session details"),
     ("/settings", "Pipeline features and budgets"),
+    ("/schedule", "Persistent automations and execution history"),
     ("/memory", "Local memory settings and model setup"),
     ("/history", "Show the saved conversation"),
     ("/todo", "Show the agent's current todo list"),

@@ -58,7 +58,7 @@ guards classify decoded actions and recorded outcomes. A successful direct write
 resets inspection only when bounded before/after source hashes differ; candidate
 application validates nonempty changing patches. Provider messages are unchanged.
 
-SQLite WAL and full synchronization protect committed writes within the guarantees of the operating system and storage device. `builder.sqlite3` is the authoritative conversation, tool, recovery, research, and memory journal. Schema v12 physically separates rebuildable repository indexes into `builder-index.sqlite3`; an index generation or vector batch therefore cannot acquire the journal's writer lock. A current-schema journal open performs no write and requests no writer lock. Migrations re-read the version after acquiring an `IMMEDIATE` transaction, and every multi-statement journal mutation obtains its writer reservation before reading transactional state. This avoids a read-to-write upgrade race while retaining a bounded busy timeout. Pre-v12 index tables remain untouched in the journal but are no longer read or written, avoiding a large destructive migration on the availability-critical path. Both files reject schema versions newer than the binary. A sidecar initialization or integrity failure degrades code-index retrieval with an explicit notice but cannot prevent the authoritative journal from opening. Schema v2 adds an active flag to messages and a durable composer draft table in a transaction; the v1 upgrade preserves existing messages and tool claims. User-facing IDs are UUIDs; unique prefixes are resolved before obtaining the lock.
+SQLite WAL and full synchronization protect committed writes within the guarantees of the operating system and storage device. `builder.sqlite3` is the authoritative conversation, tool, recovery, research, and memory journal. Schema v12 physically separates rebuildable repository indexes into per-checkout databases under `code-index/`; an index generation or vector batch therefore cannot acquire the journal's writer lock, nor another checkout's. The pre-per-checkout shared `builder-index.sqlite3` is derived and is deleted on open. A current-schema journal open performs no write and requests no writer lock. Migrations re-read the version after acquiring an `IMMEDIATE` transaction, and every multi-statement journal mutation obtains its writer reservation before reading transactional state. This avoids a read-to-write upgrade race while retaining a bounded busy timeout. Pre-v12 index tables remain untouched in the journal but are no longer read or written, avoiding a large destructive migration on the availability-critical path. Both files reject schema versions newer than the binary. A sidecar initialization or integrity failure degrades code-index retrieval with an explicit notice but cannot prevent the authoritative journal from opening. Schema v2 adds an active flag to messages and a durable composer draft table in a transaction; the v1 upgrade preserves existing messages and tool claims. User-facing IDs are UUIDs; unique prefixes are resolved before obtaining the lock.
 
 ## Failure semantics
 
@@ -359,8 +359,13 @@ and explicit indexed search synchronously reconciles the current checkout.
 
 A capture either satisfies every configured file/byte/chunk bound or fails. The
 derived index store publishes its files, chunks, FTS rows, state and new generation
-in one `builder-index.sqlite3` transaction. Sidecar lock waits are short and
-failure is recoverable because the entire database is derived. The authoritative `builder.sqlite3`
+in one transaction in that checkout's own `code-index/<sha256(path)>.sqlite3`.
+Every index mutation requires the checkout's `CodeIndexGuard`, so each index
+database has exactly one writer and WAL readers never wait on it. Foreground
+paths never block on that guard: automatic context is read-only, and
+`code_search` refreshes, prunes stale paths and records telemetry only when the
+guard is free. The WAL is truncated to 64 MiB after checkpoints. Failure is
+recoverable because the entire database is derived. The authoritative `builder.sqlite3`
 journal is a separate WAL database, so even a maximum-size index publication cannot
 delay user-message or tool-result persistence. Publication never exposes a prefix or mixes generations. If capture or
 publication fails, the previous complete generation remains queryable and the
@@ -465,3 +470,43 @@ adapter, so later runs reload the same file used by the CLI. Startup migrates on
 legacy config text, using a synced owner-private temporary file and atomic
 no-overwrite publication. Legacy config and all durable data remain untouched.
 Invalid or oversized legacy config fails before publication without quoting secrets.
+
+
+## Durable scheduling
+
+`builder-core::schedule` owns typed definitions, closed lifecycle states, and pure
+cadence calculation. `store::schedules` owns schema 14, transaction boundaries,
+execution history, and the process-lifetime scheduler lock. `builder::scheduler`
+executes claimed work using the existing agent, provider, workspace instructions,
+and tool journal. `scheduler::commands` is the shared shell/slash adapter;
+`scheduler::service` only renders OS service definitions.
+
+A schedule contains a workspace, named profile, prompt, cadence, explicit access
+mode, deadline, and round budget. Calendar schedules carry an IANA timezone;
+intervals retain phase and do not round to cron expressions. Each execution gets a
+fresh conversation. No model is needed to parse a schedule or determine its next
+occurrence. Profile settings reload for each execution.
+
+The daemon serializes execution across its home and holds an exclusive advisory
+file lock. An immediate SQLite transaction either claims a queued manual run or
+inserts a scheduled occurrence and advances its next timestamp. Partial unique
+indexes enforce one scheduled record per occurrence and one pending execution per
+job. Missed ticks coalesce; completion advances over ticks missed during execution.
+Pause/delete cancel queued work without claiming to cancel an active agent.
+Deletion is a tombstone so audit history remains available.
+
+Session linkage precedes execution. Cancellation drops the agent future (and its
+owned subprocesses) before recording the interrupted execution. After process
+loss, the next exclusive runner marks abandoned claims interrupted and pauses
+their schedules. Failed, blocked, and timed-out jobs also pause. There is no blind
+job-level retry; existing provider transport retries retain their usual semantics.
+The journal cannot atomically commit external command effects, so scheduling
+preserves the existing no-automatic-replay guarantee rather than claiming
+exactly-once effects.
+
+The default is read-only, regardless of the creating conversation's approval
+mode. Explicit job trust permits the existing tools. Jobs share their saved
+checkout with ordinary conversations; execution serialization is not workspace
+isolation or an OS sandbox. Terminal and shell commands expose the same records;
+JSON output is available for scripting. Services are explicit and local: the host
+and its model endpoint must be available for execution.

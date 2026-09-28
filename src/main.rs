@@ -251,7 +251,35 @@ async fn app(cli: Cli) -> Result<()> {
         }
         return Ok(());
     }
+    if let Some(Command::Daemon { once, service }) = &cli.command {
+        ensure!(
+            !cli.auto && matches!(cli.approval, cli::Approval::Ask),
+            "Daemon permissions are stored per schedule. Use schedule add --allow-writes to authorize tools; --auto and --approval do not apply to the runner."
+        );
+        if let Some(format) = service {
+            print!(
+                "{}",
+                builder::scheduler::service::render(
+                    *format,
+                    &std::env::current_exe()?,
+                    cli.home.as_deref(),
+                    &home
+                )?
+            );
+            return Ok(());
+        }
+        return builder::scheduler::serve(&home, &config_home, *once).await;
+    }
     let mut store = Store::open(&home)?;
+    if let Some(Command::Schedule(args)) = &cli.command {
+        return builder::scheduler::commands::handle(
+            args,
+            &mut store,
+            &config,
+            &cli.workspace,
+            cli.profile.as_deref(),
+        );
+    }
     match &cli.command {
         Some(Command::Sessions) => {
             let sessions = store.sessions()?;
@@ -677,6 +705,20 @@ async fn app(cli: Cli) -> Result<()> {
         match line {
             "/exit" | "/quit" => break,
             "/help" => println!("\n{}", ui::help(ui::panel::width())),
+            command if command == "/schedule" || command.starts_with("/schedule ") => {
+                let result = builder::scheduler::commands::parse_slash(command).and_then(|args| {
+                    builder::scheduler::commands::handle(
+                        &args,
+                        &mut store,
+                        &config,
+                        agent.workspace.root(),
+                        Some(&profile_name),
+                    )
+                });
+                if let Err(error) = result {
+                    report(&error);
+                }
+            }
             "/memory" => {
                 stop_memory_task(&mut memory_task).await;
                 let chosen = builder::input::memory::choose(&config.memory, plain);

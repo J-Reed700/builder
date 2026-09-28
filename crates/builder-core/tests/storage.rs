@@ -1,5 +1,16 @@
 use builder_core::store::{Store, ToolRunState};
 
+/// The one per-checkout index database in a test home.
+fn index_database(home: &std::path::Path) -> std::path::PathBuf {
+    let mut databases = std::fs::read_dir(home.join("code-index"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "sqlite3"))
+        .collect::<Vec<_>>();
+    assert_eq!(databases.len(), 1);
+    databases.pop().unwrap()
+}
+
 #[test]
 fn tool_completion_is_idempotent_and_requires_a_claim() {
     let home = tempfile::tempdir().unwrap();
@@ -101,10 +112,19 @@ fn database_is_private_without_changing_existing_directory_permissions() {
     use std::os::unix::fs::PermissionsExt;
     let home = tempfile::tempdir().unwrap();
     std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-    let _store = Store::open(home.path()).unwrap();
+    let store = Store::open(home.path()).unwrap();
+    assert!(store.code_index_status("repo").unwrap().is_none());
     assert_eq!(
         std::fs::metadata(home.path()).unwrap().permissions().mode() & 0o777,
         0o755
+    );
+    assert_eq!(
+        std::fs::metadata(home.path().join("code-index"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
     );
     assert_eq!(
         std::fs::metadata(home.path().join("builder.sqlite3"))
@@ -115,7 +135,7 @@ fn database_is_private_without_changing_existing_directory_permissions() {
         0o600
     );
     assert_eq!(
-        std::fs::metadata(home.path().join("builder-index.sqlite3"))
+        std::fs::metadata(index_database(home.path()))
             .unwrap()
             .permissions()
             .mode()
@@ -160,7 +180,8 @@ fn bulk_index_writer_cannot_block_conversation_persistence() {
         source_bytes: 12,
         skipped: 0,
     };
-    store.code_index_replace("repo", &snapshot).unwrap();
+    let writer = store.try_code_index_lock("repo").unwrap().unwrap();
+    store.code_index_replace(&writer, &snapshot).unwrap();
 
     let main = rusqlite::Connection::open(home.path().join("builder.sqlite3")).unwrap();
     let legacy_tables: usize = main
@@ -172,7 +193,7 @@ fn bulk_index_writer_cannot_block_conversation_persistence() {
         .unwrap();
     assert_eq!(legacy_tables, 0);
 
-    let index = rusqlite::Connection::open(home.path().join("builder-index.sqlite3")).unwrap();
+    let index = rusqlite::Connection::open(index_database(home.path())).unwrap();
     assert_eq!(
         index
             .query_row("SELECT COUNT(*) FROM code_index_chunks", [], |row| {
@@ -246,8 +267,10 @@ fn broken_derived_index_does_not_make_the_journal_unavailable() {
     use builder_core::protocol::{Message, Role};
 
     let home = tempfile::tempdir().unwrap();
-    drop(Store::open(home.path()).unwrap());
-    std::fs::write(home.path().join("builder-index.sqlite3"), b"not sqlite").unwrap();
+    let store = Store::open(home.path()).unwrap();
+    assert!(store.code_index_status("repo").unwrap().is_none());
+    drop(store);
+    std::fs::write(index_database(home.path()), b"not sqlite").unwrap();
 
     let mut store = Store::open(home.path()).unwrap();
     let session = store
@@ -284,7 +307,6 @@ fn v11_upgrade_preserves_journal_and_archives_legacy_index_in_place() {
         .create("schema twelve", "local", home.path(), "system")
         .unwrap();
     drop(store);
-    std::fs::remove_file(home.path().join("builder-index.sqlite3")).unwrap();
 
     let main = rusqlite::Connection::open(home.path().join("builder.sqlite3")).unwrap();
     main.execute_batch(
@@ -305,7 +327,7 @@ fn v11_upgrade_preserves_journal_and_archives_legacy_index_in_place() {
     assert_eq!(
         main.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        13
+        14
     );
     assert_eq!(
         main.query_row("SELECT COUNT(*) FROM code_index_state", [], |row| {
@@ -713,4 +735,52 @@ fn clear_archives_the_conversation_and_deactivates_checkpoints() {
     let messages = store.messages(&id).unwrap();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].role, Role::System);
+}
+
+#[test]
+fn checkout_indexes_are_isolated_databases_so_one_writer_cannot_block_another() {
+    let home = tempfile::tempdir().unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    let busy = store.try_code_index_lock("repo-a").unwrap().unwrap();
+    store.code_index_record_failure(&busy, "seed").unwrap();
+    let blocker = rusqlite::Connection::open(index_database(home.path())).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE;").unwrap();
+
+    let started = std::time::Instant::now();
+    let other = store.try_code_index_lock("repo-b").unwrap().unwrap();
+    store
+        .code_index_record_failure(&other, "independent")
+        .unwrap();
+    assert!(store.code_index_status("repo-a").unwrap().is_some());
+    assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    assert!(
+        store
+            .code_index_status("repo-b")
+            .unwrap()
+            .unwrap()
+            .status
+            .contains("independent")
+    );
+    blocker.execute_batch("ROLLBACK;").unwrap();
+}
+
+#[test]
+fn legacy_shared_index_is_removed_on_open() {
+    let home = tempfile::tempdir().unwrap();
+    for suffix in ["", "-wal", "-shm"] {
+        std::fs::write(
+            home.path().join(format!("builder-index.sqlite3{suffix}")),
+            b"legacy",
+        )
+        .unwrap();
+    }
+    let _store = Store::open(home.path()).unwrap();
+    for suffix in ["", "-wal", "-shm"] {
+        assert!(
+            !home
+                .path()
+                .join(format!("builder-index.sqlite3{suffix}"))
+                .exists()
+        );
+    }
 }

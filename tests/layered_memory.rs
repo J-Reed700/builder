@@ -307,10 +307,10 @@ async fn live_repeated_memory_correction_retrieval_and_abstention() -> Result<()
     }
     let probe_start = store.history_messages(&session)?.len();
     store.append(&session,&Message::text(Role::User,"Now return the final JSON. Retrieve the exact original archived record-0037 using research history_search and history_read, and use its code as archive_code. For missing_value use the never-provided record-9999 code. Do not guess. Keep the corrected timeout and all original restrictions. This informational request is not permission to deploy or modify anything."))?;
-    if failures.is_empty() {
-        if let Err(e) = agent.run(&mut store, &mut |_| {}, &mut |_| false).await {
-            failures.push(format!("final continuation: {e:#}"));
-        }
+    if failures.is_empty()
+        && let Err(e) = agent.run(&mut store, &mut |_| {}, &mut |_| false).await
+    {
+        failures.push(format!("final continuation: {e:#}"));
     }
     let history = store.history_messages(&session)?;
     let answer = history
