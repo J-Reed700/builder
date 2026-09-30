@@ -93,6 +93,9 @@ pub fn help(width: usize) -> String {
         panel::note(
             "Every message is saved automatically, and rewound turns stay in /history archived.",
         ),
+        panel::note(
+            "While context is compacting, enter the next message to queue it for sending when compaction finishes.",
+        ),
     ];
     panel::render(
         concat!("builder ", env!("CARGO_PKG_VERSION")),
