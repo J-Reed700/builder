@@ -44,11 +44,12 @@ if (typeof matchMedia === 'function') matchMedia('(min-width: 561px)').addEventL
 function atEnd() { const pane = document.querySelector('.conversation'), page = document.scrollingElement; return pane.scrollHeight - pane.scrollTop - pane.clientHeight < 90 && (!page || page.scrollHeight - page.scrollTop - page.clientHeight < 90); }
 function scrollToEnd() { const pane = document.querySelector('.conversation'), page = document.scrollingElement; pane.scrollTop = pane.scrollHeight; if (page) page.scrollTop = page.scrollHeight; }
 let listVersion = 0, runsKey = '', searchTimer, dialogAction = null, dialogChat = null, dialogTip = null;
-const drafts = new Map(), posting = new Set();
+const drafts = new Map(), queued = new Map(), posting = new Set();
 const draftKey = () => selected || 'new';
 const state = () => states.find(s => s.session === selected) || {};
 const active = s => ['running', 'awaiting_approval'].includes(s.phase);
 const busy = () => active(state());
+const compacting = s => (s.compacting || s.operation === 'compact') && ['running', 'maintaining'].includes(s.phase);
 function requestId() { const b = crypto.getRandomValues(new Uint8Array(16)); b[6] = (b[6] & 15) | 64; b[8] = (b[8] & 63) | 128; const h = [...b].map(x => x.toString(16).padStart(2,'0')).join(''); return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`; }
 function error(message) { $('error').textContent = message; $('error').hidden = false; }
 $('error').onclick = () => { $('error').hidden = true; };
@@ -93,13 +94,13 @@ function saveDraft() {
 }
 const phaseLabel = phase => ({ idle: 'Ready', running: 'Working on your host', awaiting_approval: 'Waiting for approval', maintaining: 'Answer saved · updating memory', complete: 'Answer saved', paused: 'Paused · history saved', failed: 'Stopped · inspect history' })[phase] || 'Ready';
 function controls() {
-  const s = state(), pending = posting.has(draftKey()), archived = info?.archived;
-  $('send').disabled = pending || busy() || archived;
+  const s = state(), key = draftKey(), pending = posting.has(key), queuedPrompt = queued.get(key), archived = info?.archived;
+  $('send').disabled = pending || archived || (busy() && !compacting(s));
   $('prompt').disabled = !!archived;
   $('retry').hidden = !selected || busy() || !info?.pending || archived; $('retry').disabled = pending;
   $('cancel-turn').hidden = $('retry').hidden; $('cancel-turn').disabled = pending;
   $('pause').hidden = !active(s) && s.phase !== 'maintaining';
-  $('phase').textContent = archived ? 'Archived · restore this chat to continue' : pending ? 'Saving your request…' : phaseLabel(s.phase);
+  $('phase').textContent = archived ? 'Archived · restore this chat to continue' : queuedPrompt ? 'Queued · sends after compaction' : pending ? 'Saving your request…' : phaseLabel(s.phase);
   $('activity').textContent = busy() ? s.notices?.at(-1) || '' : '';
   $('live').hidden = !s.preview && !s.thinking; $('thinking-live').hidden = !s.thinking; $('thinking').textContent = s.thinking || ''; $('preview').textContent = (s.preview || '') + (s.preview_limited ? '\n[Preview limit reached. The complete committed response will appear in history.]' : '');
   todoBoard(s);
@@ -234,6 +235,7 @@ async function refresh() {
     if (allKey !== runsKey) { runsKey = allKey; await sessions(); }
     const s = state(), key = [s.run_id, s.phase, s.notices?.length, selected].join('|');
     if (selected && (busy() || key !== historyKey)) { const version = epoch; await Promise.all([history(), metadata()]); if (version === epoch) historyKey = key; }
+    maybeSendQueued();
   } catch (e) { if (token) error(e.message + ' · No action is automatically resubmitted.'); } finally { polling = false; }
 }
 // The token is a host credential. It is stored only when the user asks, in this browser's local storage, so a return visit reconnects without pasting it again.
@@ -252,7 +254,7 @@ async function connect(value, remember) {
   } catch (e) { if (version !== connection) return; if (gatewayMode) { showGatewaySetup(); } else { token = ''; if (remember && /token/i.test(e.message)) rememberToken(''); $('app').hidden = true; $('login').hidden = false; } error(e.message); }
 }
 $('connect').onsubmit = event => { event.preventDefault(); const value = $('token').value.trim(); $('token').value = ''; connect(value, $('remember').checked); };
-$('disconnect').onclick = () => { token = gatewayMode ? 'gateway' : ''; rememberToken(''); newFolder = ''; setDrawer(false); $('folder-dialog').close(); connection++; epoch++; listVersion++; selected = null; items = []; states = []; info = null; sessionItems = []; drafts.clear(); posting.clear(); $('manage-dialog').close(); $('export-dialog').close(); $('app').hidden = true; if (gatewayMode) showGatewaySetup(); else $('login').hidden = false; $('messages').replaceChildren(); $('sessions').replaceChildren(); $('prompt').value = ''; $('error').hidden = true; };
+$('disconnect').onclick = () => { token = gatewayMode ? 'gateway' : ''; rememberToken(''); newFolder = ''; setDrawer(false); $('folder-dialog').close(); connection++; epoch++; listVersion++; selected = null; items = []; states = []; info = null; sessionItems = []; drafts.clear(); queued.clear(); posting.clear(); $('manage-dialog').close(); $('export-dialog').close(); $('app').hidden = true; if (gatewayMode) showGatewaySetup(); else $('login').hidden = false; $('messages').replaceChildren(); $('sessions').replaceChildren(); $('prompt').value = ''; $('error').hidden = true; };
 $('create-invitation').onclick = async () => {
   $('create-invitation').disabled = true; $('error').hidden = true;
   try {
@@ -270,24 +272,39 @@ $('search').oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeou
 $('chat-filter').onchange = () => sessions().catch(e => error(e.message));
 $('older').onclick = () => history(true).catch(e => error(e.message));
 $('archived').onchange = () => { epoch++; viewLimited = false; items = []; nextBefore = null; renderMessages(); history().catch(e => error(e.message)); };
-$('prompt').oninput = () => { saveDraft(); renderSessions(); };
+$('prompt').oninput = () => { const key = draftKey(); if (queued.has(key)) { if ($('prompt').value.trim()) queued.set(key, $('prompt').value); else queued.delete(key); } saveDraft(); renderSessions(); };
 async function run(action) {
   const id = selected, key = draftKey(), version = connection, request_id = requestId();
-  if (posting.has(key) || busy() || info?.archived) return;
-  const submittedDraft = $('prompt').value;
+  const submittedDraft = action.action === 'message' && typeof action.prompt === 'string' ? action.prompt : $('prompt').value;
+  if (posting.has(key) || info?.archived) return;
+  if (compacting(state()) && action.action === 'message') {
+    if (!submittedDraft.trim() || !saveDraft()) return;
+    queued.set(key, submittedDraft);
+    controls();
+    return;
+  }
+  if (busy()) return;
+  const queuedSend = action.action === 'message' && queued.get(key) === submittedDraft;
   if (!saveDraft()) return; posting.add(key); controls(); $('error').hidden = true;
   async function accepted(result) {
     if (action.action === 'message' && drafts.get(key) === submittedDraft) { drafts.delete(key); if (draftKey() === key) $('prompt').value = ''; }
+    if (queuedSend && queued.get(key) === submittedDraft) queued.delete(key);
     if (selected === id) await openSession(result.session);
     await sessions(); await refresh();
   }
   try { await accepted(await api('run', { request_id, session: id, profile: id ? null : $('profile').value, workspace: id ? null : newFolder, approval: $('approval-mode').value, operation: action })); }
   catch (e) {
     if (version !== connection) return;
+    if (queuedSend) queued.delete(key);
     error(e.message + ' · Check this chat before sending again.');
     // A lost acknowledgement is recovered only by its exact request ID. Never replay a write.
     try { const result = await api('status'); states = result.states; const found = states.find(s => s.run_id === request_id); if (found) { await sessions(); await refresh(); } /* Keep the draft until the user inspects durable history. */ } catch { /* Original error remains visible. */ }
   } finally { posting.delete(key); controls(); }
+}
+function maybeSendQueued() {
+  const key = draftKey(), prompt = queued.get(key), s = state();
+  if (!prompt || !selected || posting.has(key) || info?.archived || s.phase !== 'complete' || s.compacting) return;
+  run({ action: 'message', prompt });
 }
 $('composer').onsubmit = e => { e.preventDefault(); const prompt = $('prompt').value; if (prompt.trim()) run({ action: 'message', prompt }); };
 const touch = () => typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;

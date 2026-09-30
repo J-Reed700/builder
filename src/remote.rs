@@ -66,6 +66,13 @@ struct Snapshot {
     phase: Phase,
     /// Approval mode this run was started with.
     approval_mode: Option<&'static str>,
+    /// The operation currently represented by this run. The browser combines
+    /// this with `compacting` to identify where a queued message belongs.
+    operation: Option<&'static str>,
+    /// True while this run is inside context compaction. Automatic compaction
+    /// happens inside an ordinary message run, so the operation name alone is
+    /// not enough for clients to identify this window.
+    compacting: bool,
     run_id: Option<String>,
     session: Option<String>,
     preview: String,
@@ -527,6 +534,14 @@ enum RunAction {
     Retry,
     Compact,
 }
+
+fn operation_name(operation: &RunAction) -> &'static str {
+    match operation {
+        RunAction::Message { .. } => "message",
+        RunAction::Retry => "retry",
+        RunAction::Compact => "compact",
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RunRequest {
@@ -683,6 +698,7 @@ async fn start(State(shared): State<Arc<Shared>>, Json(request): Json<RunRequest
             }
         };
     let run_id = request.request_id.clone();
+    let operation = operation_name(&request.operation);
     let (cancel, receiver) = watch::channel(false);
     if shared.closing.load(Ordering::Acquire) {
         return problem(StatusCode::SERVICE_UNAVAILABLE, "Host is stopping");
@@ -691,6 +707,8 @@ async fn start(State(shared): State<Arc<Shared>>, Json(request): Json<RunRequest
         snapshot: Mutex::new(Snapshot {
             phase: Phase::Running,
             approval_mode: Some(approval_name(approval)),
+            operation: Some(operation),
+            compacting: false,
             run_id: Some(run_id.clone()),
             session: Some(session.clone()),
             cancel: Some(cancel),
@@ -867,6 +885,7 @@ async fn drive(
         let mut state = run.snapshot.lock().unwrap();
         state.approval = None;
         state.reply = None;
+        state.compacting = false;
         // A preview is never represented as a committed answer.
         state.preview.clear();
         state.preview_limited = false;
@@ -932,6 +951,11 @@ fn event_update(run: &Run, event: AgentEvent) {
             state.thinking.clear();
         }
         event => {
+            if matches!(&event, AgentEvent::Compacting { .. }) {
+                state.compacting = true;
+            } else if matches!(&event, AgentEvent::Compacted { .. }) {
+                state.compacting = false;
+            }
             let notice = match event {
                 AgentEvent::ToolStarted { name, .. } => {
                     state.preview.clear();
