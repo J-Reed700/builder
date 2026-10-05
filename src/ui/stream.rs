@@ -83,6 +83,7 @@ pub struct Reflow {
     separator: String,
     column: usize,
     line_start: bool,
+    word_started: Option<std::time::Instant>,
 }
 
 impl Default for Reflow {
@@ -92,6 +93,7 @@ impl Default for Reflow {
             separator: String::new(),
             column: 0,
             line_start: true,
+            word_started: None,
         }
     }
 }
@@ -115,6 +117,9 @@ impl Reflow {
                     self.separator.push_str(grapheme);
                 }
             } else {
+                if self.word.is_empty() {
+                    self.word_started = Some(std::time::Instant::now());
+                }
                 self.word.push_str(grapheme);
                 // Bound an endpoint-controlled token even if it never emits a
                 // separator (a URL, minified source, or malformed response).
@@ -133,6 +138,22 @@ impl Reflow {
         out
     }
 
+    /// Release a partial word after a short quiet period so a stalled stream
+    /// remains visible. Subsequent fragments continue on the same display line
+    /// and still pass through the normal cell-width wrapping logic.
+    pub fn flush_partial(&mut self, width: usize, indent: &str) -> String {
+        if self
+            .word_started
+            .is_some_and(|started| started.elapsed() >= std::time::Duration::from_millis(100))
+        {
+            let mut out = String::new();
+            self.emit_word(&mut out, width.max(1), indent);
+            out
+        } else {
+            String::new()
+        }
+    }
+
     pub fn reset(&mut self) {
         *self = Self::default();
     }
@@ -141,6 +162,7 @@ impl Reflow {
         if self.word.is_empty() {
             return;
         }
+        self.word_started = None;
         if !self.line_start && self.column + self.separator.width() + self.word.width() > width {
             out.push('\n');
             self.column = 0;
@@ -197,5 +219,15 @@ mod reflow_tests {
         let mut text = reflow.push("one\n\n  two abcdefghi", 6, "  ");
         text.push_str(&reflow.finish(6, "  "));
         assert_eq!(text, "  one\n\n    two\n  abcdef\n  ghi");
+    }
+
+    #[test]
+    fn stale_partial_word_becomes_visible_and_continues_normally() {
+        let mut reflow = Reflow::default();
+        assert_eq!(reflow.push("unfinished visible", 40, ""), "unfinished");
+        std::thread::sleep(std::time::Duration::from_millis(110));
+        assert_eq!(reflow.flush_partial(40, ""), " visible");
+        assert_eq!(reflow.push(" only", 40, ""), "");
+        assert_eq!(reflow.finish(40, ""), " only");
     }
 }

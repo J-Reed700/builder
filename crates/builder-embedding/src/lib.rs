@@ -1,4 +1,5 @@
 //! Offline CPU embeddings. Only explicit installation performs network I/O.
+
 use anyhow::{Context, Result, ensure};
 use builder_core::memory::{digest, validate_vector};
 use fastembed::{
@@ -45,6 +46,7 @@ const FILES: &[(&str, u64, &str)] = &[
         "bd2e06a5b20fd1b13ca988bedc8763d332d242381b4fbc98f8fead4524158f79",
     ),
 ];
+
 fn checked_file(root: &Path, name: &str) -> Result<Vec<u8>> {
     let (_, size, hash) = FILES
         .iter()
@@ -109,6 +111,7 @@ pub struct LocalEmbedding {
     // Subsequent callers cannot queue additional model loads/inferences behind it.
     model: Arc<Mutex<Option<TextEmbedding>>>,
 }
+
 impl LocalEmbedding {
     pub fn new(root: Option<PathBuf>) -> Self {
         Self {
@@ -116,10 +119,12 @@ impl LocalEmbedding {
             model: Arc::new(Mutex::new(None)),
         }
     }
+
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let mut vectors = self.embed_batch(vec![text.to_owned()]).await?;
         Ok(vectors.remove(0))
     }
+
     pub async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
         ensure!(
             !texts.is_empty()

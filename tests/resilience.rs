@@ -225,7 +225,10 @@ async fn progress_check_preserves_large_context_and_clears_after_edit() {
     // The count and the read history change every round, so they travel in
     // the trailing continuation instead of the cached leading system block.
     let nudge = recovered.last().unwrap()["content"].as_str().unwrap();
-    assert!(nudge.contains("Progress check: 12 tool calls"), "{nudge}");
+    assert!(
+        nudge.contains("Progress check: 12 calls without new inspection evidence"),
+        "{nudge}"
+    );
     assert!(
         nudge.contains("12 successful reads of 1 file, 11 of them repeats: rate.ts ×12"),
         "{nudge}"
@@ -242,6 +245,62 @@ async fn progress_check_preserves_large_context_and_clears_after_edit() {
             .unwrap_or("")
             .contains("Runtime progress check")
     }));
+}
+
+#[tokio::test]
+async fn twelve_distinct_successful_reads_keep_discovery_tools_available() {
+    let server = server(vec![text_reply("The requested evidence is available.")]).await;
+    let home = tempfile::tempdir().unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    let session = store
+        .create("distinct-reads", "local", home.path(), "system")
+        .unwrap();
+    store
+        .append(
+            &session,
+            &Message::text(Role::User, "Investigate the repository"),
+        )
+        .unwrap();
+    for index in 0..12 {
+        let id = format!("distinct_read_{index}");
+        let path = format!("src/module_{index}.rs");
+        store
+            .append(&session, &read_message(&id, json!({"path":path})))
+            .unwrap();
+        store.claim_tool(&session, &id).unwrap();
+        store
+            .complete_tool_with_outcome(
+                &session,
+                &id,
+                &format!("source evidence {index}"),
+                ToolOutcome::Succeeded,
+            )
+            .unwrap();
+    }
+    let agent = Agent {
+        memory: None,
+        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        profile: server.profile.clone(),
+        workspace: Workspace::new(home.path()).unwrap(),
+        session,
+        approval: ApprovalMode::Trust,
+        max_rounds: 2,
+    };
+    agent
+        .run(&mut store, &mut |_| {}, &mut |_| false)
+        .await
+        .unwrap();
+
+    let requests = server.mock.requests.lock().unwrap();
+    let names = requests[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(names.contains("list_files"));
+    assert!(names.contains("search"));
+    assert!(names.contains("subagent"));
 }
 
 #[tokio::test]
@@ -323,7 +382,7 @@ async fn unique_shell_commands_consume_durable_liveness_budget_after_restart() {
     assert!(
         requests[0]["messages"]
             .to_string()
-            .contains("Progress check: 12 tool calls")
+            .contains("Progress check: 12 calls without new inspection evidence")
     );
 }
 
@@ -415,11 +474,7 @@ async fn ignored_progress_check_forces_a_tool_free_conclusion() {
                     "{}{}",
                     delta(json!({"tool_calls":[{
                         "index":0,"id":format!("loop_{i}"),"type":"function",
-                        "function": if i < 5 {
-                            json!({"name":"read_file","arguments":"{\"path\":\"rate.ts\"}"})
-                        } else {
-                            json!({"name":"edit_file","arguments":json!({"path":"rate.ts","old":"missing exact text","new":"new rate"}).to_string()})
-                        }
+                        "function": json!({"name":"write_file","arguments":json!({"path":format!("denied_{}.txt", i),"content":"no"}).to_string()})
                     }]})),
                     finish("tool_calls")
                 ),
@@ -436,14 +491,34 @@ async fn ignored_progress_check_forces_a_tool_free_conclusion() {
     let session = store
         .create("loop", "local", home.path(), "system")
         .unwrap();
-    seed_investigation(&mut store, &session);
+    store
+        .append(&session, &Message::text(Role::User, "Investigate safely"))
+        .unwrap();
+    for index in 0..12 {
+        let id = format!("prior_denial_{index}");
+        let mut denied = tool_message();
+        denied.tool_calls[0].id = id.clone();
+        denied.tool_calls[0].function.name = "write_file".into();
+        denied.tool_calls[0].function.arguments =
+            json!({"path":format!("prior_{index}.txt"),"content":"no"}).to_string();
+        store.append(&session, &denied).unwrap();
+        store.claim_tool(&session, &id).unwrap();
+        store
+            .complete_tool_with_outcome(
+                &session,
+                &id,
+                "DENIED: read-only mode",
+                ToolOutcome::Denied,
+            )
+            .unwrap();
+    }
     let agent = Agent {
         memory: None,
         provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
-        approval: ApprovalMode::Trust,
+        approval: ApprovalMode::ReadOnly,
         max_rounds: 20,
     };
     agent
@@ -468,6 +543,7 @@ async fn ignored_progress_check_forces_a_tool_free_conclusion() {
             .collect::<Vec<_>>();
         assert!(!names.contains(&"list_files"), "{names:?}");
         assert!(!names.contains(&"search"), "{names:?}");
+        assert!(names.contains(&"write_file"), "{names:?}");
     }
 }
 
@@ -2269,8 +2345,9 @@ async fn cli_auto_approves_mutations_while_default_denies_without_a_terminal() {
             command.arg("--auto");
         }
         let output = command.output().await.unwrap();
-        assert!(
+        assert_eq!(
             output.status.success(),
+            auto,
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
@@ -3508,7 +3585,7 @@ async fn recovery_resolves_queued_batch_and_retains_denials_without_granting_per
 async fn recovery_restricts_broad_discovery_and_rejects_unknown_batches() {
     for outcome in ["edit", "answer", "unavailable"] {
         let mut replies = vec![];
-        for i in 0..4 {
+        for i in 0..13 {
             replies.push((
                 StatusCode::OK,
                 format!(
@@ -3559,11 +3636,11 @@ async fn recovery_restricts_broad_discovery_and_rejects_unknown_batches() {
             workspace: Workspace::new(home.path()).unwrap(),
             session: session.clone(),
             approval: ApprovalMode::Trust,
-            max_rounds: 12,
+            max_rounds: 16,
         };
         let result = agent.run(&mut store, &mut |_| {}, &mut |_| true).await;
         let requests = server.mock.requests.lock().unwrap();
-        let decision_tools: Vec<_> = requests[4]["tools"]
+        let decision_tools: Vec<_> = requests[13]["tools"]
             .as_array()
             .unwrap()
             .iter()

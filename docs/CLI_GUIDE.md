@@ -88,9 +88,20 @@ The agent can `list_files`, `read_file`, `search`, `code_search`, `write_file`, 
 
 Once the agent knows enough to implement multi-step work, it records an ordered todo list with `todo_write`. The terminal draws the list as a board each time it changes (✓ done, ▸ current, ○ pending), and so does the browser adapter. Every later model request carries the unfinished list and names the current item, so the agent follows its plan instead of re-exploring, including after compaction. `/todo` shows the current board, and a resumed session shows any unfinished one. The list is at most 20 single-line items with one in progress; writing it needs no approval, grants no permission, and does not count as file progress. Disable it with `config pipeline set todos=false`.
 
-The agent is nudged toward a plan, never forced. Halfway to `progress_check_calls` without a file change or a todo list, requests end with a short planning reminder. At the check itself, broad `list_files`/`search`/`subagent` discovery pauses and each request ends with a decision prompt. It shows the model which files it has read since the last file change, how often, and whether each result is still in context. Then it lists the choices: write the todo list (recommended), make one targeted read for a named missing fact, or answer. With a list active, the prompt points at the current item instead. Reads, edits and commands stay available throughout. The terminal prints a line such as `12 actions without a file change · 11 repeated reads · no plan yet, nudged to write a todo list`, and repeats it at each further multiple of the check. After two checks' worth of calls without a plan, the prompt says so plainly.
+The agent is nudged toward a plan, never forced. Halfway to `progress_check_calls` without new inspection evidence or a file change, requests end with a short planning reminder. A distinct, typed successful read, search, or subagent result resets stagnation; its normalized request and result must both be new. Repeated results, empty results, failures, denials, shell commands, memory operations, and research operations consume the budget. At the check itself, broad `list_files`/`search`/`subagent` discovery pauses and each request ends with a decision prompt. It shows the model which files it has read since the last file change, how often, and whether each result is still in context. Then it lists the choices: write the todo list (recommended), make one targeted read for a named missing fact, or answer. With a list active, the prompt points at the current item instead. Reads, edits and commands stay available throughout. The terminal prints a line such as `12 actions without new evidence or a file change · 11 repeated reads · no plan yet, nudged to write a todo list`, and repeats it at each further multiple of the check. After two checks' worth of calls without a plan, the prompt says so plainly.
 
 `read_file` returns files up to 200 lines whole. A rangeless read of a larger file returns an outline of its declarations with line numbers (grammar-backed for Rust, Python, JavaScript/TypeScript, Go and Java, including functions bound to `const`, such as React components and hooks) followed by its first 200 lines, so the next read can target the right range. Each read is limited to 500 lines and 12 KiB of formatted output. Limits shape the result rather than rejecting it: a range that overflows the byte budget returns the lines that fit and the exact `start_line` to continue with, and a single line longer than the budget is shown cut and marked as not exact source. A lone `start_line` reads the next chunk forward, a lone `end_line` reads the chunk ending there, and ranges clamp to the file with explicit notes about preceding or remaining lines. Search returns at most 30 matches and 8 KiB, with explicit truncation notices. Targeted reads always read current file contents; previously inspected files are not blocked or served from a stale cache.
+
+Writes and exact edits to an existing file require a read in the current Builder workspace first. Builder compares the file with the version read and refuses the write if it changed; after resuming a session or restarting Builder, read the file again before editing it. New files do not need a prior read. Builder processes serialize their own writes with a workspace lock, but external editors do not use that lock, so a change in the brief interval before the atomic replacement may still race.
+
+Shell commands retain bounded head and tail output separately for stdout and stderr.
+A nonzero exit is a failed tool; a timeout after launch is uncertain because side
+effects may already have happened. An identical timed-out command is not replayed
+under a new call ID or a longer timeout. Inspect the workspace before authorizing
+another attempt. Noninteractive runs exit nonzero for unresolved failures, denied
+actions, or uncertain execution, even if the model's final answer says it is done.
+A plain answer without verification remains unverified, not proof of success.
+`doctor` also exits nonzero when required configured capabilities fail its probes.
 
 `multi_edit` applies several exact replacements to one file in a single write: edits apply in order, each must match exactly once unless it sets `replace_all`, and if any edit fails none are applied. It needs the same approval as `edit_file`.
 
@@ -198,9 +209,9 @@ Literal credentials remain plaintext in the local config, saved atomically with 
 
 Builder uses each selected profile's `context_tokens` value directly. Automatic summarization occurs only when the estimated request reaches `compact_at_percent` of that configured window and `auto_compact` is enabled; `/compact` is the only other path that creates a summary checkpoint. The progress and failure guards never summarize or archive active context.
 
-Builder checks for stalled work using the original unrewound history, including calls archived by normal context compaction. By default, 12 completed tool calls without a successful file edit add focused recovery guidance and temporarily remove broad list/search discovery; the full active conversation remains intact. Successful shell output, memory updates, failed or denied mutations, and model-authored status do not masquerade as file progress. A successful typed file edit or new user instruction resets the counter.
+Builder checks for stalled work using the original unrewound history, including calls archived by normal context compaction. By default, 12 completed calls without fresh inspection evidence or a successful file edit add focused recovery guidance and temporarily remove broad list/search discovery; the full active conversation remains intact. A distinct, typed successful read, search, or subagent result resets stagnation when both the normalized request and result are new. Repeated or empty inspection results, successful shell output, memory updates, failed or denied mutations, and model-authored status consume the budget. A successful typed file edit or new user instruction also resets the counter.
 
-The guard settings are saved per profile and editable in `/settings`: `progress_check_calls`, `progress_recovery_rounds`, `failure_check_calls`, `failure_recovery_rounds`, `identical_shell_calls`, and `tool_calls_per_response`. Concurrency is set by `parallel_tools`, `subagent_parallel` and `subagent_rounds`. A parallel group admits only as many calls as the no-progress budget still allows, and each subagent counts as one call. Defaults permit 100 no-progress calls (12 before the progress nudge plus 88 recovery rounds), three identical shell calls, and 128 calls in one response. Oversized, malformed, duplicate-ID, reused-ID, and unknown-tool batches are rejected before execution. Saved pending batches are checked before every unclaimed call, while interrupted claimed calls retain uncertainty precedence and are never replayed. An identical execute or mutation request following a denied or uncertain outcome remains blocked until the user sends a new instruction. These are model-independent liveness guards, not a guarantee of task completion.
+The guard settings are saved per profile and editable in `/settings`: `progress_check_calls`, `progress_recovery_rounds`, `failure_check_calls`, `failure_recovery_rounds`, `identical_shell_calls`, and `tool_calls_per_response`. Concurrency is set by `parallel_tools`, `subagent_parallel` and `subagent_rounds`. A parallel group admits only as many calls as the no-progress budget still allows, and each subagent counts as one call. Defaults permit 100 calls without fresh evidence (12 before the progress nudge plus 88 recovery rounds), three identical shell calls, and 128 calls in one response. Oversized, malformed, duplicate-ID, reused-ID, and unknown-tool batches are rejected before execution. Saved pending batches are checked before every unclaimed call, while interrupted claimed calls retain uncertainty precedence and are never replayed. An identical execute or mutation request following a denied or uncertain outcome remains blocked until the user sends a new instruction. These are model-independent liveness guards, not a guarantee of task completion.
 
 An opt-in live test exercises a resumed compacted investigation against the configured endpoint in a disposable fixture, allowing only edits to its fixture file (no shell):
 
@@ -214,15 +225,21 @@ Resume uses the saved workspace and profile name. Profiles are resolved at start
 
 ## Architecture and development
 
-Four crates, a one-way dependency graph, and no application `unsafe` code:
+Seven workspace packages, an acyclic dependency graph, and no application `unsafe` code:
 
 ```text
 builder (CLI + application engine)
   ├── builder-provider (Provider trait, HTTP retries, SSE decoding)
   │     └── builder-core
+  ├── builder-embedding (pinned local model + CPU inference)
+  │     └── builder-core
   ├── builder-tools (typed actions, workspace I/O, subprocess lifetime)
   │     └── builder-core
+  ├── builder-remote-protocol (shared wire messages)
   └── builder-core (typed messages, config, durable session repository)
+
+builder-gateway (remote enrollment + request proxy)
+  └── builder-remote-protocol
 ```
 
 Read [ARCHITECTURE.md](../ARCHITECTURE.md) for the state machine, invariants, tradeoffs, and extension seams.

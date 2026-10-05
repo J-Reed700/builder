@@ -22,6 +22,7 @@ workspace = true
 
 [dependencies]
 builder-core = { path = "crates/builder-core" }
+builder-embedding = { path = "crates/builder-embedding" }
 builder-provider = { path = "crates/builder-provider" }
 builder-remote-protocol = { path = "crates/builder-remote-protocol" }
 builder-tools = { path = "crates/builder-tools" }

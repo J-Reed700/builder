@@ -7,7 +7,7 @@ use builder_core::{
     store::{Store, ToolOutcome},
 };
 use builder_provider::{Event, Provider};
-use builder_tools::Workspace;
+use builder_tools::{Action, Workspace};
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Mutex, time::Duration};
 
@@ -311,6 +311,59 @@ async fn parallel_subagents_return_reports_without_their_raw_reads() {
             .unwrap()
             .iter()
             .any(|message| message.content.as_deref() == Some("notes.txt:1 holds the marker."))
+    );
+}
+
+#[tokio::test]
+async fn child_read_does_not_refresh_the_parents_stale_write_observation() {
+    let mut f = Fixture::new();
+    let task = delegate(
+        "sub",
+        "read the latest notes",
+        "Read notes.txt and report its contents.",
+    );
+    let router = Router::new(
+        vec![
+            calls(&[(&task.0, task.1, task.2)]),
+            Message::text(Role::Assistant, "The child reported the latest notes."),
+        ],
+        vec![(
+            "Read notes.txt and report its contents.",
+            vec![
+                calls(&[("read", "read_file", json!({"path":"notes.txt"}))]),
+                Message::text(Role::Assistant, "The latest notes say newer user content."),
+            ],
+        )],
+    );
+    let agent = f.agent(Profile::default(), router);
+    agent
+        .workspace
+        .execute(&Action::ReadFile {
+            path: "notes.txt".into(),
+            start_line: None,
+            end_line: None,
+        })
+        .await
+        .unwrap();
+
+    std::fs::write(f.root.path().join("notes.txt"), "newer user content\n").unwrap();
+    let (result, _) = f.run(&agent).await;
+    result.unwrap();
+    let report = f.store.tool_result(&f.session, "sub").unwrap().unwrap();
+    assert!(report.contains("newer user content"));
+
+    let error = agent
+        .workspace
+        .execute(&Action::WriteFile {
+            path: "notes.txt".into(),
+            content: "stale parent overwrite".into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("changed since it was read"));
+    assert_eq!(
+        std::fs::read_to_string(f.root.path().join("notes.txt")).unwrap(),
+        "newer user content\n"
     );
 }
 

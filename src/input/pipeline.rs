@@ -187,7 +187,7 @@ const FIELDS: &[Field] = &[
     (
         "progress_check_calls",
         "Progress check after calls",
-        "1–1000 completed tools without a file change before the progress nudge. A lighter planning reminder starts at half this.",
+        "1–1000 completed tools without new inspection evidence or a file change before the progress nudge. A lighter planning reminder starts at half this.",
         "Loop guards",
     ),
     (

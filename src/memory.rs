@@ -16,7 +16,7 @@ use std::{
 };
 
 enum Embedding {
-    Local(builder_provider::local_embedding::LocalEmbedding),
+    Local(builder_embedding::LocalEmbedding),
     Remote(Box<OpenAiCompatible>),
 }
 
@@ -78,13 +78,10 @@ impl MemoryRuntime {
         let mut runtime = Self::lexical();
         match config.memory.embedding_backend {
             EmbeddingBackend::Local => {
-                runtime.fingerprint =
-                    digest(builder_provider::local_embedding::FINGERPRINT.as_bytes());
-                runtime.embedding = Some(Embedding::Local(
-                    builder_provider::local_embedding::LocalEmbedding::new(
-                        config.memory.local_model_dir.clone(),
-                    ),
-                ));
+                runtime.fingerprint = digest(builder_embedding::FINGERPRINT.as_bytes());
+                runtime.embedding = Some(Embedding::Local(builder_embedding::LocalEmbedding::new(
+                    config.memory.local_model_dir.clone(),
+                )));
                 return Ok(Some(runtime));
             }
             EmbeddingBackend::Lexical => return Ok(Some(runtime)),

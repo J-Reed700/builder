@@ -213,6 +213,7 @@ dependencies = [
  "anyhow",
  "axum",
  "builder-core",
+ "builder-embedding",
  "builder-provider",
  "builder-remote-protocol",
  "builder-tools",
@@ -264,6 +265,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "builder-embedding"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "builder-core",
+ "fastembed",
+ "futures-util",
+ "reqwest",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "builder-gateway"
 version = "0.1.0"
 dependencies = [
@@ -288,12 +302,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "builder-core",
- "fastembed",
  "futures-util",
  "rand 0.9.5",
  "reqwest",
  "serde_json",
- "tempfile",
  "tokio",
 ]
 
@@ -311,6 +323,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "builder-core",
+ "fs2",
  "globset",
  "ignore",
  "nix",

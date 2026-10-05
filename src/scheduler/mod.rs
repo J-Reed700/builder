@@ -137,20 +137,30 @@ async fn execute(
         !pending(&store.messages(&agent.session)?),
         "Agent stopped with unfinished work; inspect the session"
     );
-    let outcomes = store.tool_outcomes(&agent.session)?;
-    if outcomes
-        .values()
-        .any(|v| *v == builder_core::store::ToolOutcome::Denied)
-    {
-        return Ok((
-            RunStatus::Blocked,
-            format!(
-                "A requested tool exceeded this schedule's permissions. Schedule paused; inspect session {}",
-                agent.session
-            ),
-        ));
-    }
-    Ok((RunStatus::Succeeded, format!("Session {}", agent.session)))
+    let outcome = crate::completion::assess(
+        store,
+        &agent.session,
+        &agent.workspace,
+        &agent.profile.pipeline,
+    )?;
+    let status = match outcome {
+        crate::completion::Outcome::Verified => RunStatus::Succeeded,
+        crate::completion::Outcome::Unverified => RunStatus::Unverified,
+        crate::completion::Outcome::Failed => RunStatus::Failed,
+        _ => RunStatus::Blocked,
+    };
+    Ok((
+        status,
+        format!(
+            "Task outcome: {outcome:?}. Session {}{}",
+            agent.session,
+            if matches!(status, RunStatus::Succeeded | RunStatus::Unverified) {
+                ""
+            } else {
+                ". Schedule paused; inspect the recorded evidence before resuming."
+            }
+        ),
+    ))
 }
 async fn shutdown_signal() -> Result<()> {
     #[cfg(unix)]

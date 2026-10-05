@@ -61,6 +61,14 @@ job at a time. `builder daemon --once` executes at most one queued or due job an
 exits, which also supports an external service timer. A job failure is recorded
 in history and pauses that schedule; the daemon remains available for other jobs.
 
+History distinguishes a **succeeded** task with a fresh verified research finish
+from an **unverified** response that ended without objective completion evidence.
+Ordinary status reports can remain unverified and recur normally. Assistant prose
+alone never upgrades a run to succeeded. An unresolved tool failure marks the run
+failed; denied or uncertain execution marks it blocked. A successful retry of the
+same operation resolves its failure, but a different successful read does not.
+Failures and blocked runs pause the schedule for inspection.
+
 ## Time and permissions
 
 - `--every 90m`: exactly 90 minutes, preserving its original phase. Intervals

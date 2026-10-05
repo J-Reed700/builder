@@ -760,14 +760,16 @@ impl Renderer {
         }
     }
     pub fn flush(&mut self) {
-        if self.pending.is_empty() {
-            return;
-        }
-        let text = self.pending.take();
         let width = (console::Term::stdout().size().1 as usize)
             .saturating_sub(4)
             .clamp(12, 96);
-        let text = self.reflow.push(&text, width, "    ");
+        let mut text = if self.pending.is_empty() {
+            String::new()
+        } else {
+            let pending = self.pending.take();
+            self.reflow.push(&pending, width, "    ")
+        };
+        text.push_str(&self.reflow.flush_partial(width, "    "));
         self.write_stream(&text);
     }
     fn finish_stream(&mut self) {
@@ -830,7 +832,7 @@ pub fn nudge_line(
     repeated_reads: usize,
     planning: bool,
 ) -> String {
-    let mut line = format!("{calls} actions without a file change");
+    let mut line = format!("{calls} actions without new evidence or a file change");
     if repeated_reads > 0 {
         line.push_str(&format!(
             " · {repeated_reads} repeated read{}",

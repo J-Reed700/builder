@@ -21,6 +21,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS schedule_inflight ON schedule_runs(schedule_id
 CREATE INDEX IF NOT EXISTS schedule_history ON schedule_runs(schedule_id,occurrence DESC);
 PRAGMA user_version=14;";
 
+// SQLite cannot alter a CHECK constraint. Rebuild only the run table inside
+// the journal migration transaction, retaining every occurrence and index.
+pub(crate) const OUTCOME_SCHEMA: &str = "
+CREATE TABLE schedule_runs_v15 (
+ id TEXT PRIMARY KEY, schedule_id TEXT NOT NULL REFERENCES schedules(id),
+ occurrence INTEGER NOT NULL, manual INTEGER NOT NULL, status TEXT NOT NULL
+ CHECK(status IN ('queued','running','succeeded','unverified','failed','interrupted','blocked','cancelled')),
+ session_id TEXT REFERENCES sessions(id), started_at INTEGER, finished_at INTEGER, detail TEXT);
+INSERT INTO schedule_runs_v15 SELECT * FROM schedule_runs;
+DROP TABLE schedule_runs;
+ALTER TABLE schedule_runs_v15 RENAME TO schedule_runs;
+CREATE UNIQUE INDEX schedule_occurrence ON schedule_runs(schedule_id,occurrence) WHERE manual=0;
+CREATE UNIQUE INDEX schedule_inflight ON schedule_runs(schedule_id) WHERE status IN ('queued','running');
+CREATE INDEX schedule_history ON schedule_runs(schedule_id,occurrence DESC);
+PRAGMA user_version=15;";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Cadence {
@@ -166,6 +182,7 @@ pub enum RunStatus {
     Queued,
     Running,
     Succeeded,
+    Unverified,
     Failed,
     Interrupted,
     Blocked,
@@ -177,6 +194,7 @@ impl RunStatus {
             Self::Queued => "queued",
             Self::Running => "running",
             Self::Succeeded => "succeeded",
+            Self::Unverified => "unverified",
             Self::Failed => "failed",
             Self::Interrupted => "interrupted",
             Self::Blocked => "blocked",

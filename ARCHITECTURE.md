@@ -8,12 +8,47 @@ Builder is a local, durable agent runtime with a terminal adapter. Its central d
 | --- | --- | --- |
 | `builder-core` | Role/message types, configuration, SQLite repository, session locks | HTTP transport, terminal UI, tool execution |
 | `builder-provider` | Provider contract, request serialization, retry classification, stream assembly | Durable messages, permission decisions, filesystem execution |
+| `builder-embedding` | Pinned local model installation and CPU embedding inference | Chat transport, retrieval policy, durable memory |
 | `builder-tools` | Typed action decoding, tool schemas, path resolution, bounded I/O, subprocess ownership | Model calls, conversation policy, permission UI |
+| `builder-remote-protocol` | Serializable host/gateway messages | HTTP/WebSocket routing, authentication, application state |
+| `builder-gateway` | Remote enrollment, authentication, connection registry, request proxying | Agent orchestration, workspace access, model calls |
 | `builder` | Agent orchestration, context budget, approval policy, CLI and rendering | Provider-specific retry decisions or ad-hoc file mutations |
 
 `Agent<P: Provider>` uses static dispatch. The provider interface returns a future without requiring a runtime trait-object allocation or an async-trait dependency. Terminal rendering consumes application events; the provider only emits model events. A second provider can be implemented independently of the agent, tools, and storage. A second UI can call the application engine independently of the terminal adapter.
 
 The core repository is intentionally concrete SQLite, not a generic storage abstraction with one implementation. Extract a repository trait when a second backend or a demonstrable testing need exists. The same rule applies to plugin registries and distributed services: add abstractions for real variation.
+
+## Module layout and dependency direction
+
+The workspace follows an inward dependency rule: adapters and orchestration may depend on domain and infrastructure crates, while those lower-level crates never depend on the CLI, terminal UI, or agent loop.
+
+```text
+builder (application + adapters)
+├── main.rs                 composition root only
+├── commands/               one-shot CLI command handlers
+├── interactive/            session loop, compaction, maintenance, driver
+├── agent.rs + agent/       model-round orchestration, execution, guards, progress
+├── code_index/             query policy, index maintenance, filesystem watcher
+└── remote/                 host API, authentication, catalog, run execution
+
+builder-core                durable domain types and SQLite repositories
+builder-provider            chat/embedding transport contracts and OpenAI adapter
+builder-embedding           optional local embedding model runtime
+builder-tools               typed actions, schemas, display metadata, safe execution
+builder-remote-protocol     transport-neutral relay messages
+builder-gateway             relay API, security policy, credential persistence
+```
+
+Directory modules expose narrow facades and keep implementation modules private. For example, `code_index` re-exports query and maintenance operations without exposing ranking internals; `builder-tools` re-exports typed actions while keeping schema/display assembly internal; and the remote and gateway adapters keep authentication and credential persistence out of request orchestration.
+
+The organization applies SOLID principles pragmatically:
+
+- **Single responsibility:** transport, persistence, policy, execution, and presentation live in separate modules or crates.
+- **Open/closed and dependency inversion:** the real variation point, `Provider`, is an interface owned at the provider boundary; the agent is generic over it. Closed action and protocol enums remain exhaustive because security, recovery, and wire compatibility benefit from compiler-checked handling.
+- **Interface segregation:** modules consume focused types (`Provider`, `Workspace`, `Store`, `AgentEvent`) instead of a shared application context or service locator.
+- **Liskov substitution:** every provider implementation must satisfy the same complete-message, retry, cancellation, and tool-call contract tests.
+
+Avoid cross-layer convenience imports that reverse this direction. New CLI commands belong in `commands/`; interactive lifecycle work belongs in `interactive/`; provider-specific serialization stays in `builder-provider`; durable facts and migrations stay in `builder-core`; and filesystem/process behavior stays in `builder-tools`.
 
 ## Turn state machine
 

@@ -1,5 +1,4 @@
 //! Provider boundary and OpenAI-compatible transport. No UI or filesystem tools.
-pub mod local_embedding;
 mod openai;
 mod sse;
 use anyhow::Result;

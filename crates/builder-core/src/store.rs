@@ -245,10 +245,10 @@ impl Store {
         conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
         let mut version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         ensure!(
-            version <= 14,
+            version <= 15,
             "Session database was created by a newer Builder version; upgrade Builder"
         );
-        if version < 14 {
+        if version < 15 {
             // WAL mode is persistent. Only migrations may change it or acquire
             // a write lock; opening a current journal is a read-only fast path.
             conn.execute_batch("PRAGMA journal_mode=WAL;")?;
@@ -259,7 +259,7 @@ impl Store {
             // connection waited for the writer lock.
             version = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
             ensure!(
-                version <= 14,
+                version <= 15,
                 "Session database was created by a newer Builder version; upgrade Builder"
             );
             tx.execute_batch("CREATE TABLE IF NOT EXISTS sessions (
@@ -355,6 +355,9 @@ impl Store {
             }
             if version < 14 {
                 tx.execute_batch(crate::schedule::SCHEMA)?;
+            }
+            if version < 15 {
+                tx.execute_batch(crate::schedule::OUTCOME_SCHEMA)?;
             }
             tx.commit()?;
         }

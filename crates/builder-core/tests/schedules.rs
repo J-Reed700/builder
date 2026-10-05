@@ -220,6 +220,44 @@ fn schema_thirteen_upgrade_preserves_conversations() {
 }
 
 #[test]
+fn schema_fourteen_upgrade_preserves_runs_and_supports_unverified() {
+    let home = tempfile::tempdir().unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    let schedule = store
+        .schedule_create(&definition(home.path()), 1000)
+        .unwrap();
+    let owner = store.scheduler_lock().unwrap();
+    let (_, run) = store.schedule_claim(&owner, 1060).unwrap().unwrap();
+    store
+        .schedule_finish(&run.id, RunStatus::Succeeded, "preserved", 1061)
+        .unwrap();
+    drop(owner);
+    drop(store);
+    let db = rusqlite::Connection::open(home.path().join("builder.sqlite3")).unwrap();
+    db.execute_batch("PRAGMA user_version=14;").unwrap();
+    drop(db);
+    let mut store = Store::open(home.path()).unwrap();
+    assert_eq!(
+        store.schedule_run(&run.id).unwrap().detail.as_deref(),
+        Some("preserved")
+    );
+    let owner = store.scheduler_lock().unwrap();
+    let (_, next) = store.schedule_claim(&owner, 1120).unwrap().unwrap();
+    store
+        .schedule_finish(&next.id, RunStatus::Unverified, "response only", 1121)
+        .unwrap();
+    assert_eq!(
+        store.schedule_run(&next.id).unwrap().status,
+        RunStatus::Unverified
+    );
+    assert!(matches!(
+        store.schedule_get(&schedule.id).unwrap().state,
+        ScheduleState::Active
+    ));
+    assert!(store.schedule_claim(&owner, 1121).unwrap().is_none());
+}
+
+#[test]
 fn calendar_uses_conventional_weekday_numbers_and_day_or_semantics() {
     let weekdays = Cadence::Cron {
         expression: "0 9 * * 1-5".into(),

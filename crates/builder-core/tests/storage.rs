@@ -327,7 +327,7 @@ fn v11_upgrade_preserves_journal_and_archives_legacy_index_in_place() {
     assert_eq!(
         main.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        14
+        15
     );
     assert_eq!(
         main.query_row("SELECT COUNT(*) FROM code_index_state", [], |row| {

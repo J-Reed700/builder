@@ -211,7 +211,7 @@ impl Store {
                 detail.chars().take(4096).collect::<String>()
             ],
         )?;
-        if status != RunStatus::Succeeded {
+        if !matches!(status, RunStatus::Succeeded | RunStatus::Unverified) {
             tx.execute(
                 "UPDATE schedules SET state='paused' WHERE id=?1 AND state!='deleted'",
                 [&saved.schedule_id],

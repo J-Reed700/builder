@@ -161,7 +161,7 @@ async fn runner_uses_saved_profile_workspace_instruction_and_fresh_sessions() {
     }
     let runs = store.schedule_runs(&schedule.id, 10).unwrap();
     assert_eq!(runs.len(), 2);
-    assert!(runs.iter().all(|r| r.status == RunStatus::Succeeded));
+    assert!(runs.iter().all(|r| r.status == RunStatus::Unverified));
     assert_ne!(runs[0].session_id, runs[1].session_id);
     let seen = requests.lock().unwrap();
     assert_eq!(seen.len(), 2);
@@ -196,6 +196,38 @@ async fn unattended_readonly_never_executes_mutation_and_pauses_blocked_job() {
     ));
     server.abort();
 }
+
+#[tokio::test]
+async fn nonzero_shell_exit_cannot_be_reported_as_schedule_success() {
+    let reply = json!({"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"check","type":"function","function":{"name":"shell","arguments":"{\"command\":\"exit 7\",\"timeout_secs\":5}"}}]},"finish_reason":"tool_calls"}]});
+    let answer = json!({"choices":[{"message":{"role":"assistant","content":"The required check failed. I cannot complete the task."},"finish_reason":"stop"}]});
+    let (home, _, server) = fixture(vec![reply, answer]).await;
+    let mut store = Store::open(home.path()).unwrap();
+    let mut definition = definition(home.path());
+    definition.access = Access::Trust;
+    let schedule = store
+        .schedule_create(&definition, builder::scheduler::now())
+        .unwrap();
+    store
+        .schedule_enqueue(&schedule.id, builder::scheduler::now())
+        .unwrap();
+    builder::scheduler::serve(home.path(), home.path(), true)
+        .await
+        .unwrap();
+    let runs = store.schedule_runs(&schedule.id, 10).unwrap();
+    assert_eq!(runs[0].status, RunStatus::Failed);
+    assert_eq!(
+        store
+            .tool_outcomes(runs[0].session_id.as_deref().unwrap())
+            .unwrap()["check"],
+        builder_core::store::ToolOutcome::Failed
+    );
+    assert!(matches!(
+        store.schedule_get(&schedule.id).unwrap().state,
+        ScheduleState::Paused
+    ));
+    server.abort();
+}
 #[tokio::test]
 async fn configuration_failure_is_durable_and_does_not_poison_other_jobs() {
     let (home, _, server) = fixture(vec![]).await;
@@ -218,7 +250,7 @@ async fn configuration_failure_is_durable_and_does_not_poison_other_jobs() {
         .unwrap();
     assert_eq!(
         store.schedule_runs(&b.id, 10).unwrap()[0].status,
-        RunStatus::Succeeded
+        RunStatus::Unverified
     );
     server.abort();
 }

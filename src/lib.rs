@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod code_index;
 mod compaction;
+pub mod completion;
 mod context_memory;
 pub mod doctor;
 pub mod input;

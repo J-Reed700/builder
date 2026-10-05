@@ -1,14 +1,20 @@
 use crate::Action;
 use anyhow::{Context, Result, bail, ensure};
+use fs2::FileExt;
 use globset::Glob;
 use ignore::WalkBuilder;
 use std::{
+    collections::HashMap,
     io::Write,
     path::{Path, PathBuf},
-    process::Stdio,
-    time::Duration,
+    sync::{Arc, Mutex},
 };
-use tokio::io::{AsyncRead, AsyncReadExt};
+
+mod shell;
+
+#[cfg(unix)]
+pub(crate) use shell::ProcessGroup;
+pub use shell::{ShellFailure, ShellFailureKind};
 
 const MAX_FILE: u64 = 2 * 1024 * 1024;
 const MAX_OUTPUT: usize = 32 * 1024;
@@ -24,12 +30,16 @@ const OUTLINE_BYTES: usize = 3 * 1024;
 #[derive(Clone)]
 pub struct Workspace {
     root: PathBuf,
+    observed: Arc<Mutex<HashMap<PathBuf, String>>>,
 }
 impl Workspace {
     pub fn new(root: &Path) -> Result<Self> {
         let root = root.canonicalize().context("Workspace does not exist")?;
         ensure!(root.is_dir(), "Workspace must be a directory");
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            observed: Arc::new(Mutex::new(HashMap::new())),
+        })
     }
     pub fn root(&self) -> &Path {
         &self.root
@@ -106,8 +116,32 @@ impl Workspace {
         ensure!(content.len() as u64 <= MAX_FILE, "File exceeds 2 MiB");
         Ok(content)
     }
-    pub(crate) fn write(&self, path: &Path, content: &str) -> Result<String> {
+    pub(crate) fn write(
+        &self,
+        path: &Path,
+        content: &str,
+        expected: Option<&str>,
+    ) -> Result<String> {
         ensure!(content.len() as u64 <= MAX_FILE, "Write exceeds 2 MiB");
+        if path.exists() {
+            ensure!(path.is_file(), "Not a regular file");
+            ensure!(
+                std::fs::metadata(path)?.len() <= MAX_FILE,
+                "Existing file exceeds 2 MiB; refusing an unbounded read or backup"
+            );
+        }
+        if path.exists() && std::fs::read(path)? == content.as_bytes() {
+            self.remember(path, builder_core::memory::digest(content.as_bytes()));
+            return Ok(format!(
+                "UNCHANGED: {} already has the requested contents; no file was written",
+                path.display()
+            ));
+        }
+        ensure!(
+            !path.exists() || expected.is_some(),
+            "Existing file has not been read in this workspace; refusing to overwrite it. Read the current file and retry."
+        );
+        let _lock = self.write_lock()?;
         let mut backup = None;
         if path.exists() {
             ensure!(path.is_file(), "Not a regular file");
@@ -115,12 +149,19 @@ impl Workspace {
                 std::fs::metadata(path)?.len() <= MAX_FILE,
                 "Existing file exceeds 2 MiB; refusing an unbounded backup"
             );
-            if std::fs::read(path)? == content.as_bytes() {
+            let current = std::fs::read(path)?;
+            let current_hash = builder_core::memory::digest(&current);
+            if current == content.as_bytes() {
+                self.remember(path, current_hash);
                 return Ok(format!(
                     "UNCHANGED: {} already has the requested contents; no file was written",
                     path.display()
                 ));
             }
+            ensure!(
+                expected.is_some_and(|hash| hash == current_hash),
+                "File changed since it was read (or has not been read in this workspace); refusing to overwrite newer contents. Read the current file and retry."
+            );
             let dir = self.root.join(".builder/backups");
             // Local metadata must not be redirected outside the workspace.
             for p in [self.root.join(".builder"), dir.clone()] {
@@ -142,6 +183,12 @@ impl Workspace {
             copy.sync_all()?;
             backup = Some(dest);
         }
+        if !path.exists() {
+            ensure!(
+                expected.is_none(),
+                "File was removed since it was read; refusing to recreate it"
+            );
+        }
         let tmp = path.with_file_name(format!(".builder-{}.tmp", uuid::Uuid::new_v4()));
         let result = (|| -> Result<()> {
             let mut file = std::fs::File::options()
@@ -153,6 +200,18 @@ impl Workspace {
             }
             file.write_all(content.as_bytes())?;
             file.sync_all()?;
+            if path.exists() {
+                let now = std::fs::read(path)?;
+                ensure!(
+                    expected.is_some_and(|hash| hash == builder_core::memory::digest(&now)),
+                    "File changed during write; refusing to overwrite newer contents"
+                );
+            } else {
+                ensure!(
+                    expected.is_none(),
+                    "File was removed during write; refusing to recreate it"
+                );
+            }
             std::fs::rename(&tmp, path)?;
             #[cfg(unix)]
             std::fs::File::open(path.parent().unwrap())?.sync_all()?;
@@ -162,6 +221,7 @@ impl Workspace {
             let _ = std::fs::remove_file(&tmp);
         }
         result?;
+        self.remember(path, builder_core::memory::digest(content.as_bytes()));
         Ok(format!(
             "Wrote {} bytes to {}.{}",
             content.len(),
@@ -170,6 +230,46 @@ impl Workspace {
                 .map(|p| format!(" Backup: {}", p.display()))
                 .unwrap_or_default()
         ))
+    }
+    fn remember(&self, path: &Path, hash: String) {
+        self.observed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path.to_path_buf(), hash);
+    }
+    fn observed_hash(&self, path: &Path) -> Option<String> {
+        self.observed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)
+            .cloned()
+    }
+    fn write_lock(&self) -> Result<std::fs::File> {
+        let metadata = self.root.join(".builder");
+        if let Ok(meta) = std::fs::symlink_metadata(&metadata) {
+            ensure!(
+                !meta.file_type().is_symlink(),
+                "Builder metadata cannot be a symlink"
+            );
+        }
+        std::fs::create_dir_all(&metadata)?;
+        let lock_path = metadata.join("write.lock");
+        if let Ok(meta) = std::fs::symlink_metadata(&lock_path) {
+            ensure!(
+                !meta.file_type().is_symlink(),
+                "Write lock cannot be a symlink"
+            );
+        }
+        // Advisory lock shared by Builder processes; unrelated editors do not
+        // participate, so the destination is also rechecked before rename.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)?;
+        file.lock_exclusive()?;
+        Ok(file)
     }
     /// A bounded, numbered range. Limits shape the result instead of
     /// rejecting it: a model that asks for too much still gets the part that
@@ -180,7 +280,9 @@ impl Workspace {
         start_line: Option<usize>,
         end_line: Option<usize>,
     ) -> Result<String> {
-        let content = self.read(&self.resolve(path)?)?;
+        let resolved = self.resolve(path)?;
+        let content = self.read(&resolved)?;
+        self.remember(&resolved, builder_core::memory::digest(content.as_bytes()));
         let total_lines = content.lines().count();
         // One approximate location is enough to begin: a lone start_line
         // reads forward from it, a lone end_line reads the chunk ending at
@@ -356,11 +458,20 @@ impl Workspace {
                 todos.validate()?;
                 todos.receipt()
             }
-            Action::WriteFile { path, content } => self.write(&self.resolve(path)?, content)?,
+            Action::WriteFile { path, content } => {
+                let resolved = self.resolve(path)?;
+                let expected = self.observed_hash(&resolved);
+                self.write(&resolved, content, expected.as_deref())?
+            }
             Action::EditFile { path, old, new } => {
                 let path = self.resolve(path)?;
+                let expected = self.observed_hash(&path);
                 let content = self.read(&path)?;
-                self.write(&path, &replace(&content, old, new, false)?)?
+                self.write(
+                    &path,
+                    &replace(&content, old, new, false)?,
+                    expected.as_deref(),
+                )?
             }
             Action::MultiEdit { path, edits } => {
                 ensure!(
@@ -369,6 +480,7 @@ impl Workspace {
                     crate::MAX_EDITS
                 );
                 let path = self.resolve(path)?;
+                let expected = self.observed_hash(&path);
                 let mut content = self.read(&path)?;
                 for (index, edit) in edits.iter().enumerate() {
                     content = replace(&content, &edit.old, &edit.new, edit.replace_all).map_err(
@@ -381,96 +493,15 @@ impl Workspace {
                         },
                     )?;
                 }
-                self.write(&path, &content)?
+                self.write(&path, &content, expected.as_deref())?
             }
             Action::Shell {
                 command,
                 timeout_secs,
-            } => {
-                #[cfg(windows)]
-                let mut process = {
-                    let mut p = tokio::process::Command::new("cmd");
-                    p.arg("/C");
-                    p
-                };
-                #[cfg(not(windows))]
-                let mut process = {
-                    let mut p = tokio::process::Command::new("sh");
-                    p.arg("-c");
-                    p
-                };
-                #[cfg(unix)]
-                process.process_group(0);
-                let mut child = process
-                    .arg(command)
-                    .current_dir(&self.root)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .kill_on_drop(true)
-                    .spawn()?;
-                #[cfg(unix)]
-                let _group = ProcessGroup(child.id().context("Missing child process ID")?);
-                let stdout = child.stdout.take().unwrap();
-                let stderr = child.stderr.take().unwrap();
-                let future = async {
-                    let (status, out, err) =
-                        tokio::join!(child.wait(), capture(stdout), capture(stderr));
-                    Ok::<_, anyhow::Error>(format!(
-                        "exit: {}\nstdout:\n{}\nstderr:\n{}",
-                        status?, out?, err?
-                    ))
-                };
-                match tokio::time::timeout(
-                    Duration::from_secs(timeout_secs.unwrap_or(30).clamp(1, 120)),
-                    future,
-                )
-                .await
-                {
-                    Ok(result) => result?,
-                    Err(_) => {
-                        let _ = child.kill().await;
-                        bail!(
-                            "Command timed out. It may have produced side effects; inspect the workspace before retrying."
-                        );
-                    }
-                }
-            }
+            } => shell::run(&self.root, command, timeout_secs.unwrap_or(30)).await?,
         };
         Ok(truncate(output, MAX_OUTPUT))
     }
-}
-/// Own the process group for exactly the lifetime of this tool. Cancellation,
-/// timeout, and normal completion all clean up non-detached descendants.
-#[cfg(unix)]
-pub(crate) struct ProcessGroup(pub(crate) u32);
-#[cfg(unix)]
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        let _ = nix::sys::signal::killpg(
-            nix::unistd::Pid::from_raw(self.0 as i32),
-            nix::sys::signal::Signal::SIGKILL,
-        );
-    }
-}
-async fn capture(mut stream: impl AsyncRead + Unpin) -> Result<String> {
-    let mut saved = Vec::new();
-    let mut buffer = [0; 8192];
-    let mut truncated = false;
-    loop {
-        let n = stream.read(&mut buffer).await?;
-        if n == 0 {
-            break;
-        }
-        let keep = n.min(MAX_OUTPUT.saturating_sub(saved.len()));
-        saved.extend_from_slice(&buffer[..keep]);
-        truncated |= keep < n;
-    }
-    let mut text = String::from_utf8_lossy(&saved).into_owned();
-    if truncated {
-        text.push_str("\n[output truncated]");
-    }
-    Ok(text)
 }
 /// Replace exact text: once and uniquely, or every occurrence when `all`.
 /// A failed match returns a diagnostic anchor, never a fuzzy replacement.

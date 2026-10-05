@@ -48,6 +48,14 @@ async fn exact_edits_make_backups_and_reject_ambiguous_matches() {
         new: "world".into(),
     };
     assert!(workspace.execute(&action).await.is_err());
+    workspace
+        .execute(&Action::ReadFile {
+            path: "test.rs".into(),
+            start_line: None,
+            end_line: None,
+        })
+        .await
+        .unwrap();
     let action = Action::EditFile {
         path: "test.rs".into(),
         old: "hello hello".into(),
@@ -65,6 +73,127 @@ async fn exact_edits_make_backups_and_reject_ambiguous_matches() {
         .unwrap()
         .path();
     assert_eq!(std::fs::read_to_string(backup).unwrap(), "hello hello");
+}
+
+#[tokio::test]
+async fn stale_observations_reject_writes_and_edits_but_allow_fresh_reads_and_new_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.rs");
+    std::fs::write(&path, "original").unwrap();
+    let workspace = Workspace::new(dir.path()).unwrap();
+    let read = || Action::ReadFile {
+        path: "source.rs".into(),
+        start_line: None,
+        end_line: None,
+    };
+
+    let error = workspace
+        .execute(&Action::WriteFile {
+            path: "source.rs".into(),
+            content: "unobserved overwrite".into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("has not been read"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+
+    workspace.execute(&read()).await.unwrap();
+    std::fs::write(&path, "newer user edit").unwrap();
+    let error = workspace
+        .execute(&Action::WriteFile {
+            path: "source.rs".into(),
+            content: "replacement".into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("changed since it was read"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "newer user edit");
+
+    workspace.execute(&read()).await.unwrap();
+    std::fs::write(&path, "another newer edit").unwrap();
+    let error = workspace
+        .execute(&Action::EditFile {
+            path: "source.rs".into(),
+            old: "another newer edit".into(),
+            new: "bad overwrite".into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("changed since it was read"));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "another newer edit"
+    );
+
+    workspace
+        .execute(&Action::WriteFile {
+            path: "new.rs".into(),
+            content: "created".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("new.rs")).unwrap(),
+        "created"
+    );
+}
+
+#[tokio::test]
+async fn independent_workspaces_serialize_writes_and_reject_a_stale_observation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.rs");
+    std::fs::write(&path, "baseline").unwrap();
+    let first = Workspace::new(dir.path()).unwrap();
+    let second = Workspace::new(dir.path()).unwrap();
+    for workspace in [&first, &second] {
+        workspace
+            .execute(&Action::ReadFile {
+                path: "source.rs".into(),
+                start_line: None,
+                end_line: None,
+            })
+            .await
+            .unwrap();
+    }
+    first
+        .execute(&Action::WriteFile {
+            path: "source.rs".into(),
+            content: "first update".into(),
+        })
+        .await
+        .unwrap();
+    let error = second
+        .execute(&Action::WriteFile {
+            path: "source.rs".into(),
+            content: "stale update".into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("changed since it was read"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "first update");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn metadata_lock_symlink_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".builder")).unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("lock"),
+        dir.path().join(".builder/write.lock"),
+    )
+    .unwrap();
+    let workspace = Workspace::new(dir.path()).unwrap();
+    let error = workspace
+        .execute(&Action::WriteFile {
+            path: "new.rs".into(),
+            content: "created".into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Write lock cannot be a symlink"));
+    assert!(!outside.path().join("lock").exists());
 }
 
 #[test]
@@ -367,6 +496,14 @@ async fn rejected_edit_gives_bounded_exact_anchor_without_changing_file() {
     );
     assert!(!dir.path().join(".builder").exists());
     workspace
+        .execute(&Action::ReadFile {
+            path: "large.ts".into(),
+            start_line: Some(285),
+            end_line: Some(300),
+        })
+        .await
+        .unwrap();
+    workspace
         .execute(&Action::EditFile {
             path: "large.ts".into(),
             old: "  allowUltimate = false,\n): OrbVariant {".into(),
@@ -551,6 +688,14 @@ async fn multi_edit_applies_in_order_atomically_or_not_at_all() {
         std::fs::read_to_string(&path).unwrap(),
         "const rate = 1;\nconst cap = rate;\nlog(rate);\n"
     );
+    workspace
+        .execute(&Action::ReadFile {
+            path: "rate.ts".into(),
+            start_line: None,
+            end_line: None,
+        })
+        .await
+        .unwrap();
 
     // An ambiguous single replacement explains how to disambiguate.
     let error = workspace
