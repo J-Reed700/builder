@@ -1,6 +1,5 @@
-//! Long investigations without a file change are nudged, never forced: every
-//! tool except broad discovery stays available, while the trailing runtime
-//! message shows the model its own read history and recommends a todo list.
+//! Repeated evidence consumes the progress budget, while new inspection
+//! results reset it. The trailing runtime message recommends a todo list.
 use builder::agent::{Agent, AgentEvent, ApprovalMode, SYSTEM};
 use builder_core::{
     config::Profile,
@@ -153,15 +152,6 @@ fn tool_names(request: &Request) -> Vec<&str> {
         .collect()
 }
 
-fn leading_system(request: &Request) -> Vec<Option<String>> {
-    request
-        .0
-        .iter()
-        .take_while(|message| message.role == Role::System)
-        .map(|message| message.content.clone())
-        .collect()
-}
-
 #[tokio::test]
 async fn halfway_reminder_suggests_a_plan_with_every_tool_still_available() {
     let mut fixture = Fixture::new();
@@ -171,8 +161,8 @@ async fn halfway_reminder_suggests_a_plan_with_every_tool_still_available() {
     assert_eq!(requests[0].0.last().unwrap().role, Role::Tool);
 
     let mut fixture = Fixture::new();
-    fixture.reads("a.txt", 4);
-    fixture.reads("./b.txt", 2);
+    fixture.reads("a.txt", 3);
+    fixture.reads("./b.txt", 7);
     let (requests, events) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
     assert!(events.is_empty());
     let note = last_text(&requests[0]);
@@ -180,7 +170,7 @@ async fn halfway_reminder_suggests_a_plan_with_every_tool_still_available() {
     assert!(note.contains("no todo list yet"), "{note}");
     assert!(
         note.contains(
-            "6 successful reads of 2 files, 4 of them repeats: a.txt ×4 (latest result still in context), b.txt ×2 (latest result still in context)."
+            "10 successful reads of 2 files, 8 of them repeats: b.txt ×7 (latest result still in context), a.txt ×3 (latest result still in context)."
         ),
         "{note}"
     );
@@ -211,37 +201,45 @@ async fn halfway_reminder_suggests_a_plan_with_every_tool_still_available() {
 #[tokio::test]
 async fn progress_check_recommends_a_plan_but_leaves_the_choice_to_the_model() {
     let mut fixture = Fixture::new();
-    fixture.reads("a.txt", 12);
-    // The model chooses one more read, then answers.
+    fixture.reads("a.txt", 13);
+    // This new file result resets stagnation, so discovery tools return.
     let replies = vec![call("more", "read_file", json!({"path":"b.txt"})), done()];
     let (requests, events) = fixture.run(ApprovalMode::Trust, replies).await;
     assert_eq!(requests.len(), 2);
-    for request in &requests {
-        let tools = tool_names(request);
-        assert!(tools.contains(&"read_file") && tools.contains(&"todo_write"));
-        assert!(tools.contains(&"write_file") && tools.contains(&"shell"));
-        for paused in ["list_files", "search", "subagent"] {
-            assert!(!tools.contains(&paused), "{paused} still offered");
-        }
+    let tools = tool_names(&requests[0]);
+    assert!(tools.contains(&"read_file") && tools.contains(&"todo_write"));
+    assert!(tools.contains(&"write_file") && tools.contains(&"shell"));
+    for paused in ["list_files", "search", "subagent"] {
+        assert!(!tools.contains(&paused), "{paused} still offered");
     }
     let first = last_text(&requests[0]);
-    assert!(first.contains("Progress check: 12 tool calls"), "{first}");
-    assert!(first.contains("a.txt ×12"), "{first}");
+    assert!(
+        first.contains("Progress check: 12 calls without new inspection evidence"),
+        "{first}"
+    );
+    assert!(first.contains("a.txt ×13"), "{first}");
     assert!(
         first.contains("1. Recommended for an implementation request"),
         "{first}"
     );
     assert!(first.contains("call todo_write now"), "{first}");
     assert!(!first.contains("without a plan"), "{first}");
-    let second = last_text(&requests[1]);
-    assert!(second.contains("Progress check: 13 tool calls"), "{second}");
-    assert!(
-        second.contains("13 successful reads of 2 files"),
-        "{second}"
-    );
-    // Everything that changes per round is at the end, so a server's prompt
-    // cache keeps the whole leading block across guided rounds.
-    assert_eq!(leading_system(&requests[0]), leading_system(&requests[1]));
+    let second_tools = tool_names(&requests[1]);
+    for name in ["list_files", "search", "subagent"] {
+        assert!(
+            second_tools.contains(&name),
+            "{name} missing from {second_tools:?}"
+        );
+    }
+    assert!(matches!(
+        events.as_slice(),
+        [AgentEvent::ProgressNudge {
+            calls: 12,
+            step: None,
+            repeated_reads: 12,
+            planning: true,
+        }]
+    ));
     assert!(
         fixture
             .store
@@ -254,7 +252,7 @@ async fn progress_check_recommends_a_plan_but_leaves_the_choice_to_the_model() {
         [AgentEvent::ProgressNudge {
             calls: 12,
             step: None,
-            repeated_reads: 11,
+            repeated_reads: 12,
             planning: true,
         }]
     ));
@@ -263,7 +261,7 @@ async fn progress_check_recommends_a_plan_but_leaves_the_choice_to_the_model() {
 #[tokio::test]
 async fn the_nudge_grows_firmer_and_is_shown_again_while_no_plan_exists() {
     let mut fixture = Fixture::new();
-    fixture.reads("a.txt", 24);
+    fixture.reads("a.txt", 25);
     let (requests, events) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
     let text = last_text(&requests[0]);
     assert!(
@@ -287,7 +285,7 @@ async fn an_active_plan_turns_the_nudge_toward_its_current_step() {
         ]}),
         ToolOutcome::Succeeded,
     );
-    fixture.reads("a.txt", 11);
+    fixture.reads("a.txt", 13);
     let (requests, events) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
     let text = last_text(&requests[0]);
     assert!(
@@ -315,11 +313,11 @@ async fn read_history_starts_over_after_a_file_change() {
         json!({"path":"a.txt","content":"new\n"}),
         ToolOutcome::Changed,
     );
-    fixture.reads("a.txt", 6);
+    fixture.reads("a.txt", 7);
     let (requests, _) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
     let note = last_text(&requests[0]);
     assert!(
-        note.contains("6 successful reads of 1 file, 5 of them repeats: a.txt ×6"),
+        note.contains("7 successful reads of 1 file, 6 of them repeats: a.txt ×7"),
         "{note}"
     );
     assert!(!note.contains("b.txt"), "{note}");
@@ -328,7 +326,7 @@ async fn read_history_starts_over_after_a_file_change() {
 #[tokio::test]
 async fn read_only_sessions_are_nudged_to_answer_instead_of_plan() {
     let mut fixture = Fixture::new();
-    fixture.reads("a.txt", 12);
+    fixture.reads("a.txt", 13);
     let (requests, events) = fixture.run(ApprovalMode::ReadOnly, vec![done()]).await;
     let text = last_text(&requests[0]);
     assert!(text.contains("write the answer now"), "{text}");

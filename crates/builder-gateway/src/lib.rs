@@ -1,5 +1,15 @@
 //! Small public relay for Builder's outbound remote-control connection.
 
+mod security;
+mod storage;
+
+use self::{
+    security::{
+        constant_time_equal, hash, health, identity, is_hex_secret, problem, require_origin,
+        secret, security_headers, validate_origin,
+    },
+    storage::{DeviceRecord, create_private_directory, load_device, save_device},
+};
 use anyhow::{Context, Result, ensure};
 use axum::{
     Json, Router,
@@ -8,8 +18,8 @@ use axum::{
         DefaultBodyLimit, Request, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
-    middleware::{self, Next},
+    http::{HeaderMap, HeaderName, Method, StatusCode},
+    middleware,
     response::{IntoResponse, Response},
     routing::{any, get, post},
 };
@@ -18,18 +28,13 @@ use builder_remote_protocol::{
     PROTOCOL_VERSION,
 };
 use futures_util::SinkExt;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    fs::OpenOptions,
-    io::{Read, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
@@ -57,15 +62,6 @@ struct Shared {
     invitations: Mutex<HashMap<String, Invitation>>,
     connection: Mutex<Option<Connection>>,
     pending: Mutex<HashMap<String, PendingRequest>>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-struct DeviceRecord {
-    version: u16,
-    id: String,
-    name: String,
-    owner: String,
-    token_hash: String,
 }
 
 struct Invitation {
@@ -160,185 +156,6 @@ impl Gateway {
             .layer(middleware::from_fn(security_headers))
             .with_state(self.shared.clone())
     }
-}
-
-fn validate_origin(origin: &str) -> Result<()> {
-    ensure!(
-        origin.starts_with("http://") || origin.starts_with("https://"),
-        "BUILDER_GATEWAY_ORIGIN must start with http:// or https://"
-    );
-    let authority = origin.split_once("://").unwrap().1;
-    ensure!(
-        !authority.is_empty()
-            && !authority.contains(['/', '?', '#', '@', '"', '\''])
-            && !authority.chars().any(char::is_whitespace),
-        "BUILDER_GATEWAY_ORIGIN must be an exact browser origin"
-    );
-    HeaderValue::from_str(origin).context("Invalid BUILDER_GATEWAY_ORIGIN")?;
-    Ok(())
-}
-
-fn create_private_directory(path: &Path) -> Result<()> {
-    std::fs::create_dir_all(path)?;
-    let metadata = std::fs::symlink_metadata(path)?;
-    ensure!(
-        metadata.file_type().is_dir(),
-        "Gateway data path must be a directory"
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
-fn load_device(path: &Path) -> Result<Option<DeviceRecord>> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    ensure!(
-        metadata.file_type().is_file(),
-        "device.json must be a regular file"
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        ensure!(
-            metadata.permissions().mode() & 0o077 == 0,
-            "device.json must be private"
-        );
-    }
-    let mut contents = String::new();
-    std::fs::File::open(path)?
-        .take(16 * 1024 + 1)
-        .read_to_string(&mut contents)?;
-    ensure!(contents.len() <= 16 * 1024, "device.json is too large");
-    let device: DeviceRecord = serde_json::from_str(&contents).context("Invalid device.json")?;
-    ensure!(device.version == 1, "Unsupported device.json version");
-    validate_device(&device)?;
-    Ok(Some(device))
-}
-
-fn validate_device(device: &DeviceRecord) -> Result<()> {
-    ensure!(Uuid::parse_str(&device.id).is_ok(), "Invalid device ID");
-    ensure!(
-        !device.name.is_empty() && device.name.len() <= 128,
-        "Invalid device name"
-    );
-    ensure!(
-        !device.owner.is_empty() && device.owner.len() <= 256,
-        "Invalid device owner"
-    );
-    ensure!(
-        is_hex_secret(&device.token_hash),
-        "Invalid device token hash"
-    );
-    Ok(())
-}
-
-struct TemporaryFile(Option<PathBuf>);
-impl Drop for TemporaryFile {
-    fn drop(&mut self) {
-        if let Some(path) = &self.0 {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
-fn save_device(path: &Path, device: &DeviceRecord) -> Result<()> {
-    validate_device(device)?;
-    let temporary_path = path.with_extension(format!("{}.tmp", Uuid::new_v4().simple()));
-    let mut cleanup = TemporaryFile(Some(temporary_path.clone()));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary_path)?;
-    serde_json::to_writer(&mut file, device)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    std::fs::rename(&temporary_path, path)?;
-    cleanup.0 = None;
-    if let Some(parent) = path.parent() {
-        std::fs::File::open(parent)?.sync_all()?;
-    }
-    Ok(())
-}
-
-fn secret() -> String {
-    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
-}
-
-fn hash(value: &str) -> String {
-    format!("{:x}", Sha256::digest(value.as_bytes()))
-}
-
-fn is_hex_secret(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn constant_time_equal(left: &str, right: &str) -> bool {
-    left.len() == right.len() && bool::from(left.as_bytes().ct_eq(right.as_bytes()))
-}
-
-async fn security_headers(request: Request, next: Next) -> Response {
-    let mut response = next.run(request).await;
-    for (key, value) in [
-        ("cache-control", "no-store"),
-        ("x-content-type-options", "nosniff"),
-        ("referrer-policy", "no-referrer"),
-        ("x-frame-options", "DENY"),
-        (
-            "content-security-policy",
-            "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
-        ),
-    ] {
-        response
-            .headers_mut()
-            .insert(key, HeaderValue::from_static(value));
-    }
-    response
-}
-
-async fn health() -> &'static str {
-    "ok"
-}
-
-fn problem(status: StatusCode, message: impl Into<String>) -> Response {
-    (status, Json(json!({"error": message.into()}))).into_response()
-}
-
-fn identity(headers: &HeaderMap, shared: &Shared) -> Result<String, Box<Response>> {
-    let Some(header) = &shared.identity_header else {
-        return Ok("local".into());
-    };
-    let value = headers
-        .get(header)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    if value.is_empty() || value.len() > 256 {
-        return Err(Box::new(problem(
-            StatusCode::UNAUTHORIZED,
-            "Sign in through the configured gateway before using Builder",
-        )));
-    }
-    Ok(value.into())
-}
-
-fn require_origin(headers: &HeaderMap, shared: &Shared) -> Result<(), Box<Response>> {
-    if headers.get("origin").and_then(|value| value.to_str().ok()) != Some(shared.origin.as_str()) {
-        return Err(Box::new(problem(
-            StatusCode::FORBIDDEN,
-            "Browser origin does not match the gateway",
-        )));
-    }
-    Ok(())
 }
 
 async fn gateway_status(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Response {

@@ -8,7 +8,7 @@ use builder_core::{
     todo::Status,
 };
 use builder_provider::{Event, Provider};
-use builder_tools::Workspace;
+use builder_tools::{Action, Workspace};
 use serde_json::{Value, json};
 use std::sync::Mutex;
 
@@ -148,6 +148,17 @@ async fn a_recorded_list_is_shown_and_reminds_every_later_request() {
             Message::text(Role::Assistant, "Changed a.txt."),
         ],
     );
+    // The recorded edit acts on an existing file, so establish the version
+    // the simulated agent has read before its scripted todo flow begins.
+    agent
+        .workspace
+        .execute(&Action::ReadFile {
+            path: "a.txt".into(),
+            start_line: None,
+            end_line: None,
+        })
+        .await
+        .unwrap();
     let events = run(&mut f, &agent).await;
     assert_eq!(
         events,

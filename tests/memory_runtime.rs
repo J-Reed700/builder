@@ -879,7 +879,7 @@ async fn default_local_memory_never_contacts_a_saved_remote_profile() {
 async fn local_semantic_vectors_persist_and_retrieve_offline() {
     use builder_core::config::{Config, EmbeddingBackend};
     let root = std::path::PathBuf::from(std::env::var("BUILDER_LOCAL_MODEL_DIR").unwrap());
-    let local = builder_provider::local_embedding::LocalEmbedding::new(Some(root.clone()));
+    let local = builder_embedding::LocalEmbedding::new(Some(root.clone()));
     let vector = local.embed("An automobile is a vehicle.").await.unwrap();
     assert_eq!(vector.len(), 384);
     assert!((vector.iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 0.001);

@@ -13,6 +13,7 @@ pub struct OpenAiCompatible {
     client: reqwest::Client,
     profile: Profile,
     headers: reqwest::header::HeaderMap,
+    capacity: tokio::sync::OnceCell<Option<usize>>,
 }
 
 #[derive(Debug)]
@@ -117,6 +118,7 @@ impl OpenAiCompatible {
             client,
             profile,
             headers,
+            capacity: tokio::sync::OnceCell::new(),
         })
     }
     fn request(&self, method: reqwest::Method, suffix: &str) -> reqwest::RequestBuilder {
@@ -132,6 +134,35 @@ impl OpenAiCompatible {
             .error_for_status()?
             .json()
             .await?)
+    }
+    // Probe once per connection, including unsupported/error responses. Strip only
+    // the compatibility API suffix so reverse-proxy path prefixes are preserved.
+    async fn discover_parallel_capacity(&self) -> Option<usize> {
+        let base = self.profile.base_url.trim_end_matches('/');
+        let root = base.strip_suffix("/v1").unwrap_or(base);
+        let response = self
+            .client
+            .get(format!("{root}/props"))
+            .headers(self.headers.clone())
+            .query(&[("model", self.profile.model.as_str())])
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.ok()?;
+            if bytes.len().saturating_add(chunk.len()) > 1024 * 1024 {
+                return None;
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let value: Value = serde_json::from_slice(&bytes).ok()?;
+        let slots = usize::try_from(value.get("total_slots")?.as_u64()?).ok()?;
+        (slots > 0).then_some(slots)
     }
     /// A bounded, read-only embedding request. Never logs response bodies or credentials.
     pub async fn embed(&self, input: &str) -> Result<Vec<f32>> {
@@ -347,6 +378,17 @@ impl OpenAiCompatible {
 }
 
 impl Provider for OpenAiCompatible {
+    async fn parallel_capacity(&self) -> Option<usize> {
+        *self
+            .capacity
+            .get_or_init(|| async {
+                tokio::time::timeout(Duration::from_secs(2), self.discover_parallel_capacity())
+                    .await
+                    .unwrap_or(None)
+            })
+            .await
+    }
+
     async fn complete(
         &self,
         messages: &[Message],

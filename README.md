@@ -155,11 +155,13 @@ and memory content is sent to the model endpoint you configure.
 
 | Guide | What it covers |
 | :--- | :--- |
+| [Scheduling](docs/SCHEDULING.md) | Persistent local automations, execution history, and background services |
 | [CLI guide](docs/CLI_GUIDE.md) | Commands, configuration, permissions, authentication, and imports |
 | [Remote control](docs/REMOTE_CONTROL.md) | Browser access, gateway deployment, networking, and recovery |
 | [Memory](docs/MEMORY.md) | Local and remote embeddings, provenance, invalidation, and retention |
 | [Code index](docs/CODE_INDEX.md) | Index lifecycle, ranking, freshness, and settings |
 | [Research runtime](docs/RESEARCH_RUNTIME.md) | Evidence, candidate experiments, verification, and feature switches |
+| [Releases](docs/RELEASING.md) | Release gates, tagged GitHub releases, and manual build artifacts |
 | [Architecture](ARCHITECTURE.md) | Crate boundaries, persistence invariants, and failure semantics |
 
 ## Contributing

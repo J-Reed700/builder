@@ -1,0 +1,18 @@
+[package]
+name = "builder-embedding"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Pinned, offline local embeddings for Builder."
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1"
+builder-core = { path = "../builder-core" }
+fastembed = { version = "=6.0.3", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "sync"] }

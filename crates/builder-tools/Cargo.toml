@@ -12,6 +12,7 @@ anyhow = "1"
 builder-core = { path = "../builder-core" }
 url = "2"
 tempfile = "3"
+fs2 = "0.4"
 syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 globset = "0.4"

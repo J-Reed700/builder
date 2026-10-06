@@ -175,7 +175,7 @@ const FIELDS: &[Field] = &[
     (
         "subagent_parallel",
         "Concurrent subagents",
-        "1–8 subagents talking to the model at once. Match your server's parallel request slots.",
+        "0 auto-detects server slots (fallback 3); 1–8 caps concurrent subagents. Also limited by parallel tools.",
         "Agent",
     ),
     (
@@ -187,7 +187,7 @@ const FIELDS: &[Field] = &[
     (
         "progress_check_calls",
         "Progress check after calls",
-        "1–1000 completed tools without a file change before the progress nudge. A lighter planning reminder starts at half this.",
+        "1–1000 completed tools without new inspection evidence or a file change before the progress nudge. A lighter planning reminder starts at half this.",
         "Loop guards",
     ),
     (

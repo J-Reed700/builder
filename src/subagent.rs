@@ -121,7 +121,10 @@ impl<P: Provider> Agent<P> {
             memory: None,
             max_rounds: self.profile.pipeline.subagent_rounds,
             profile,
-            workspace: self.workspace.clone(),
+            // A delegated report is not a current source read by the parent.
+            // Keep its observations separate so a child cannot silently bless
+            // the parent's stale write after another actor changes a file.
+            workspace: builder_tools::Workspace::new(self.workspace.root())?,
             session: session.clone(),
             approval: ApprovalMode::ReadOnly,
         };

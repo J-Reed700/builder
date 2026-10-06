@@ -274,6 +274,20 @@ pub async fn apply_patches(workspace: &Workspace, patches: &[Patch]) -> Result<(
             workspace.source_hash(&patch.path)? == patch.source_hash,
             "Source changed during apply; inspect any earlier edits"
         );
+        // Candidate patches are applied only after their source hash is
+        // revalidated. Record the exact version through the normal read path
+        // so Workspace's write guard can reject any drift before mutation.
+        workspace
+            .execute(&Action::ReadFile {
+                path: patch.path.clone(),
+                start_line: None,
+                end_line: None,
+            })
+            .await?;
+        ensure!(
+            workspace.source_hash(&patch.path)? == patch.source_hash,
+            "Source changed while preparing apply; inspect before retrying"
+        );
         workspace
             .execute(&Action::EditFile {
                 path: patch.path.clone(),
@@ -331,12 +345,26 @@ pub async fn check(workspace: &Workspace, command: &str, timeout: Option<u64>) -
         !command.trim().is_empty() && command.len() <= 4000,
         "Command needs 1–4000 bytes"
     );
-    workspace
+    match workspace
         .execute(&Action::Shell {
             command: command.into(),
             timeout_secs: timeout,
         })
         .await
+    {
+        Ok(output) => Ok(output),
+        Err(error) => match error.downcast_ref::<crate::ShellFailure>() {
+            Some(failure) if failure.kind == crate::ShellFailureKind::NonZeroExit => Ok(format!(
+                "exit: {}\n{}",
+                failure.exit_code.map_or_else(
+                    || "terminated by signal".to_owned(),
+                    |code| code.to_string()
+                ),
+                failure.output
+            )),
+            _ => Err(error),
+        },
+    }
 }
 pub fn passed(output: &str) -> bool {
     output

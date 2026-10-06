@@ -195,9 +195,9 @@ async fn a_group_never_runs_past_the_no_progress_limit() {
         .append(
             &session,
             &batch(&[
-                ("r1", "read_file", json!({"path":"a.txt"})),
-                ("r2", "read_file", json!({"path":"b.txt"})),
-                ("r3", "read_file", json!({"path":"c.txt"})),
+                ("r1", "read_file", json!({"path":"missing-a.txt"})),
+                ("r2", "read_file", json!({"path":"missing-b.txt"})),
+                ("r3", "read_file", json!({"path":"missing-c.txt"})),
             ]),
         )
         .unwrap();
@@ -211,6 +211,7 @@ async fn a_group_never_runs_past_the_no_progress_limit() {
         error.contains("Stopped before executing saved read_file call r3"),
         "{error}"
     );
+    assert!(store.tool_result(&session, "r1").unwrap().is_some());
     assert!(store.tool_result(&session, "r2").unwrap().is_some());
     assert!(store.tool_result(&session, "r3").unwrap().is_none());
 }

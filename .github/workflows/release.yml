@@ -6,7 +6,40 @@ on:
 permissions:
   contents: read
 jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Browser draft recovery regression
+        run: node tests/remote_web.cjs
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - name: Retrieval quality gates (offline)
+        run: cargo run --locked --example retrieval_eval -- eval/retrieval/cases.json
+      - name: Retrieval failure exit regression
+        run: python3 tests/retrieval_eval_cli.py target/debug/examples/retrieval_eval
+      - name: Retrieval manifest validation
+        run: cargo test --locked --example retrieval_eval
+      - run: cargo build --locked
+      - name: Real terminal paste and resize regression
+        run: python3 tests/terminal_smoke.py target/debug/builder
+      - name: Real terminal interruption and rewind regression
+        run: python3 tests/terminal_interrupt.py target/debug/builder
+      - name: Real terminal compaction regression
+        run: python3 tests/terminal_compact.py target/debug/builder
+      - name: Docker remote-to-host regression
+        run: python3 tests/remote_container.py target/debug/builder
+
   binary:
+    needs: quality
     strategy:
       matrix:
         include:
@@ -46,7 +79,25 @@ jobs:
           path: |
             builder-*.tar.gz*
             builder-*.zip*
+  github-release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [quality, binary]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: builder-*
+          path: release-assets
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
   gateway-image:
+    needs: quality
     runs-on: ubuntu-latest
     permissions:
       contents: read

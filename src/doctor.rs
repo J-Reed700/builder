@@ -21,6 +21,36 @@ pub struct ConformanceReport {
     pub parallel_tool_calls: ProbeStatus,
 }
 
+impl ConformanceReport {
+    /// Probes that gate `doctor` follow the capabilities the profile will use.
+    /// Generation and structured JSON are fundamental; tool probes are required
+    /// only when tools are enabled, and parallel calls only when concurrency is
+    /// configured above one.
+    pub fn required_failures(
+        &self,
+        tools_enabled: bool,
+        parallel_tools: usize,
+    ) -> Vec<&'static str> {
+        let mut failures = Vec::new();
+        if matches!(self.normal_generation, ProbeStatus::Failed { .. }) {
+            failures.push("normal_generation");
+        }
+        if matches!(self.json_object, ProbeStatus::Failed { .. }) {
+            failures.push("json_object");
+        }
+        if tools_enabled && matches!(self.native_tool_call, ProbeStatus::Failed { .. }) {
+            failures.push("native_tool_call");
+        }
+        if tools_enabled
+            && parallel_tools > 1
+            && matches!(self.parallel_tool_calls, ProbeStatus::Failed { .. })
+        {
+            failures.push("parallel_tool_calls");
+        }
+        failures
+    }
+}
+
 pub async fn conformance<P: Provider>(provider: &P, tools_enabled: bool) -> ConformanceReport {
     let normal_generation = match provider
         .complete_with_budget(
@@ -242,5 +272,30 @@ mod tests {
             validate_tool_calls(&message, "wrong", &["first", "second"]),
             ProbeStatus::Failed { .. }
         ));
+    }
+
+    #[test]
+    fn required_probe_failures_follow_profile_capabilities() {
+        let report = ConformanceReport {
+            normal_generation: ProbeStatus::Passed,
+            json_object: ProbeStatus::Failed {
+                reason: "bad JSON".into(),
+            },
+            native_tool_call: ProbeStatus::Failed {
+                reason: "no tools".into(),
+            },
+            parallel_tool_calls: ProbeStatus::Failed {
+                reason: "not parallel".into(),
+            },
+        };
+        assert_eq!(report.required_failures(false, 8), ["json_object"]);
+        assert_eq!(
+            report.required_failures(true, 1),
+            ["json_object", "native_tool_call"]
+        );
+        assert_eq!(
+            report.required_failures(true, 8),
+            ["json_object", "native_tool_call", "parallel_tool_calls"]
+        );
     }
 }

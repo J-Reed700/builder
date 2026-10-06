@@ -1,4 +1,9 @@
-//! Authenticated application adapter. The existing agent owns all durable execution semantics.
+use super::{
+    ApprovalRequest, FinishRun, MAX_RETAINED_CHATS, MAX_RUNS, Phase, RemoteOptions, Run, Shared,
+    Snapshot,
+    auth::{failure, problem},
+    catalog::{chat_folder, scoped_session},
+};
 use crate::{
     agent::{Agent, AgentEvent, ApprovalMode, SYSTEM},
     memory::MemoryRuntime,
@@ -6,21 +11,19 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, Query, Request, State},
-    http::{HeaderValue, StatusCode},
-    middleware::{self, Next},
+    extract::State,
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use builder_core::{config::Config, store::Store};
 use builder_provider::{Activity, Event, OpenAiCompatible};
 use builder_tools::{Action, Workspace};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    io::{Read, Write},
-    path::{Path as FilePath, PathBuf},
+    io::Read,
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -28,315 +31,15 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use subtle::ConstantTimeEq;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::watch;
 use uuid::Uuid;
 
-pub struct RemoteOptions {
-    pub home: PathBuf,
-    pub config_home: PathBuf,
-    pub workspace: PathBuf,
-    pub profile: Option<String>,
-    pub approval: ApprovalMode,
-    pub max_rounds: Option<usize>,
-    pub origin: String,
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum Phase {
-    #[default]
-    Idle,
-    Running,
-    AwaitingApproval,
-    Maintaining,
-    Complete,
-    Paused,
-    Failed,
-}
-
-#[derive(Clone, Serialize)]
-struct ApprovalRequest {
-    id: String,
-    description: String,
-}
-
-#[derive(Default, Serialize)]
-struct Snapshot {
-    phase: Phase,
-    /// Approval mode this run was started with.
-    approval_mode: Option<&'static str>,
-    run_id: Option<String>,
-    session: Option<String>,
-    preview: String,
-    preview_limited: bool,
-    /// Reasoning streamed for the response in progress, shown beside the preview.
-    thinking: String,
-    notices: VecDeque<String>,
-    /// The session's current todo list, refreshed whenever the agent records one.
-    todos: Option<builder_core::todo::List>,
-    approval: Option<ApprovalRequest>,
-    error: Option<String>,
-    #[serde(skip)]
-    reply: Option<mpsc::SyncSender<bool>>,
-    #[serde(skip)]
-    cancel: Option<watch::Sender<bool>>,
-}
-
-const MAX_RUNS: u32 = 4;
-const MAX_RETAINED_CHATS: usize = 64;
-
-struct Run {
-    snapshot: Mutex<Snapshot>,
-    done: AtomicBool,
-}
-struct FinishRun(Arc<Run>);
-impl Drop for FinishRun {
-    fn drop(&mut self) {
-        self.0.done.store(true, Ordering::Release);
-    }
-}
-#[derive(Default)]
-struct Registry {
-    runs: HashMap<String, Arc<Run>>,
-    order: VecDeque<String>,
-    requests: HashSet<String>,
-}
-
-struct Shared {
-    options: RemoteOptions,
-    token: String,
-    registry: Mutex<Registry>,
-    starts: Arc<Semaphore>,
-    closing: AtomicBool,
-    worker: Arc<Semaphore>,
-    readers: Arc<Semaphore>,
-}
-
-/// Dropping the owner cancels the host worker, including a pending approval.
-pub struct RemoteControl {
-    shared: Arc<Shared>,
-}
-impl RemoteControl {
-    pub fn new(mut options: RemoteOptions) -> Result<Self> {
-        options.workspace = Workspace::new(&options.workspace)?.root().to_owned();
-        ensure!(
-            options.origin.starts_with("http://") || options.origin.starts_with("https://"),
-            "Origin must start with http:// or https://"
-        );
-        let authority = options.origin.split_once("://").unwrap().1;
-        ensure!(
-            !authority.is_empty()
-                && !authority.contains(['/', '?', '#', '@'])
-                && !authority.chars().any(char::is_whitespace),
-            "Origin must be an exact browser origin without a path or trailing slash"
-        );
-        HeaderValue::from_str(&options.origin).context("Invalid origin")?;
-        let config = Config::load(&options.config_home)?;
-        config.profile(options.profile.as_deref())?;
-        let token = load_token(&options.home)?;
-        Ok(Self {
-            shared: Arc::new(Shared {
-                options,
-                token,
-                registry: Mutex::new(Registry::default()),
-                starts: Arc::new(Semaphore::new(1)),
-                closing: AtomicBool::new(false),
-                worker: Arc::new(Semaphore::new(MAX_RUNS as usize)),
-                readers: Arc::new(Semaphore::new(16)),
-            }),
-        })
-    }
-    pub fn workspace(&self) -> &FilePath {
-        &self.shared.options.workspace
-    }
-    pub fn token_path(&self) -> PathBuf {
-        self.shared.options.home.join("remote-token")
-    }
-    pub(crate) fn token(&self) -> &str {
-        &self.shared.token
-    }
-    pub fn router(&self) -> Router {
-        let api = Router::new()
-            .route("/api/status", get(status))
-            .route("/api/sessions", get(sessions))
-            .route("/api/sessions/{id}/messages", get(history))
-            .route("/api/sessions/{id}", get(chat_info).post(manage_chat))
-            .route("/api/profiles", get(profiles))
-            .route("/api/folders", get(folders))
-            .route("/api/run", post(start))
-            .route("/api/pause", post(pause))
-            .route("/api/approval", post(approval))
-            .layer(DefaultBodyLimit::max(128 * 1024))
-            .route_layer(middleware::from_fn_with_state(
-                self.shared.clone(),
-                authenticate,
-            ));
-        Router::new()
-            .merge(api)
-            .route(
-                "/",
-                get(|| async {
-                    (
-                        [("content-type", "text/html; charset=utf-8")],
-                        include_str!("../remote/web/index.html"),
-                    )
-                }),
-            )
-            .route(
-                "/app.js",
-                get(|| async {
-                    (
-                        [("content-type", "text/javascript; charset=utf-8")],
-                        include_str!("../remote/web/app.js"),
-                    )
-                }),
-            )
-            .route(
-                "/style.css",
-                get(|| async {
-                    (
-                        [("content-type", "text/css; charset=utf-8")],
-                        include_str!("../remote/web/style.css"),
-                    )
-                }),
-            )
-            .layer(middleware::from_fn(headers))
-            .with_state(self.shared.clone())
-    }
-    pub async fn shutdown(&self) {
-        self.cancel();
-        // Wait for every worker's RAII cleanup, not just the last selected chat.
-        let _ = tokio::time::timeout(
-            Duration::from_secs(5),
-            self.shared.worker.acquire_many(MAX_RUNS),
-        )
-        .await;
-    }
-    fn cancel(&self) {
-        self.shared.closing.store(true, Ordering::Release);
-        for run in self.shared.registry.lock().unwrap().runs.values() {
-            if let Some(cancel) = &run.snapshot.lock().unwrap().cancel {
-                let _ = cancel.send(true);
-            }
-        }
-    }
-}
-impl Drop for RemoteControl {
-    fn drop(&mut self) {
-        self.cancel();
-    }
-}
-
-fn load_token(home: &FilePath) -> Result<String> {
-    drop(Store::open(home)?);
-    let path = home.join("remote-token");
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    match options.open(&path) {
-        Ok(mut file) => {
-            let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-            file.write_all(token.as_bytes())?;
-            file.sync_all()?;
-            Ok(token)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let metadata = std::fs::symlink_metadata(&path)?;
-            ensure!(
-                metadata.file_type().is_file(),
-                "remote-token must be a regular file"
-            );
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                ensure!(
-                    metadata.permissions().mode() & 0o077 == 0,
-                    "remote-token must be private: chmod 600 the token file"
-                );
-            }
-            let mut token = String::new();
-            std::fs::File::open(path)?
-                .take(129)
-                .read_to_string(&mut token)?;
-            ensure!(
-                token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()),
-                "Invalid remote-token; stop remote control and remove the file to regenerate it"
-            );
-            Ok(token)
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
-async fn headers(request: Request, next: Next) -> Response {
-    let mut response = next.run(request).await;
-    for (key, value) in [
-        ("cache-control", "no-store"),
-        ("x-content-type-options", "nosniff"),
-        ("referrer-policy", "no-referrer"),
-        ("x-frame-options", "DENY"),
-        (
-            "content-security-policy",
-            "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
-        ),
-    ] {
-        response
-            .headers_mut()
-            .insert(key, HeaderValue::from_static(value));
-    }
-    response
-}
-
-async fn authenticate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -> Response {
-    let supplied = request
-        .headers()
-        .get("x-builder-token")
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-    if supplied.len() != shared.token.len()
-        || !bool::from(supplied.as_bytes().ct_eq(shared.token.as_bytes()))
-    {
-        return problem(
-            StatusCode::UNAUTHORIZED,
-            "Enter the host's remote-control token",
-        );
-    }
-    // No cookie auth or CORS. Browser writes must come from the configured exact origin.
-    let origin = request
-        .headers()
-        .get("origin")
-        .and_then(|h| h.to_str().ok());
-    if origin.is_some_and(|origin| origin != shared.options.origin)
-        || (request.method() != axum::http::Method::GET
-            && origin != Some(shared.options.origin.as_str()))
-    {
-        return problem(
-            StatusCode::FORBIDDEN,
-            "Browser origin differs from builder remote --origin",
-        );
-    }
-    let Ok(_permit) = shared.readers.clone().try_acquire_owned() else {
-        return problem(StatusCode::TOO_MANY_REQUESTS, "Too many requests");
-    };
-    match tokio::time::timeout(Duration::from_secs(10), next.run(request)).await {
-        Ok(response) => response,
-        Err(_) => problem(
-            StatusCode::REQUEST_TIMEOUT,
-            "Request timed out; refresh status before taking another action",
-        ),
-    }
-}
-
-fn problem(code: StatusCode, message: &str) -> Response {
-    (code, Json(json!({"error":message}))).into_response()
-}
-fn failure(error: anyhow::Error) -> Response {
-    problem(StatusCode::CONFLICT, &format!("{error:#}"))
+pub(super) fn router() -> Router<Arc<Shared>> {
+    Router::new()
+        .route("/api/status", get(status))
+        .route("/api/run", post(start))
+        .route("/api/pause", post(pause))
+        .route("/api/approval", post(approval))
 }
 
 async fn status(State(shared): State<Arc<Shared>>) -> Response {
@@ -378,154 +81,20 @@ fn run_approval(options: &RemoteOptions, requested: Option<&str>) -> Result<Appr
     );
     Ok(mode)
 }
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SessionQuery {
-    #[serde(default)]
-    offset: u32,
-    #[serde(default)]
-    archived: bool,
-    #[serde(default)]
-    search: String,
-}
-async fn sessions(
-    State(shared): State<Arc<Shared>>,
-    Query(query): Query<SessionQuery>,
-) -> Response {
-    read(shared, move |store, options| {
-        let sessions = store.chat_sessions_within(
-            &options.workspace,
-            query.offset,
-            query.archived,
-            &query.search,
-        )?;
-        let next = (sessions.len() == 50).then_some(query.offset.saturating_add(50));
-        let sessions: Vec<Value> = sessions
-            .iter()
-            .map(|chat| {
-                let mut value = serde_json::to_value(chat).unwrap();
-                value["folder"] = json!(folder_name(options, &chat.session.workspace));
-                value
-            })
-            .collect();
-        Ok(json!({"sessions":sessions,"next_offset":next}))
-    })
-    .await
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HistoryQuery {
-    before: Option<i64>,
-    #[serde(default)]
-    include_archived: bool,
-}
-async fn history(
-    State(shared): State<Arc<Shared>>,
-    Path(id): Path<String>,
-    Query(query): Query<HistoryQuery>,
-) -> Response {
-    read(shared, move |store, options| {
-        scoped_session(store, options, &id)?;
-        Ok(serde_json::to_value(store.history_page(
-            &id,
-            query.before.unwrap_or(i64::MAX),
-            query.include_archived,
-        )?)?)
-    })
-    .await
-}
-async fn read(
-    shared: Arc<Shared>,
-    f: impl FnOnce(&Store, &RemoteOptions) -> Result<Value> + Send + 'static,
-) -> Response {
-    match tokio::task::spawn_blocking(move || {
-        f(&Store::open(&shared.options.home)?, &shared.options)
-    })
-    .await
-    {
-        Ok(Ok(value)) => Json(value).into_response(),
-        Ok(Err(error)) => failure(error),
-        Err(_) => problem(StatusCode::INTERNAL_SERVER_ERROR, "Storage worker failed"),
-    }
-}
-fn scoped_session(
-    store: &Store,
-    options: &RemoteOptions,
-    id: &str,
-) -> Result<builder_core::store::Session> {
-    let session = store.session(id)?;
-    // A chat may live in any folder at or below the host root, so the boundary
-    // is a prefix check rather than an exact match (see `chat_sessions_within`).
-    ensure!(
-        session.workspace.starts_with(&options.workspace),
-        "Session is outside the exposed workspace"
-    );
-    Ok(session)
-}
-
-/// Path of a chat folder relative to the host root; empty for the root itself.
-fn folder_name(options: &RemoteOptions, workspace: &FilePath) -> String {
-    workspace
-        .strip_prefix(&options.workspace)
-        .map(|relative| relative.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
-/// Resolve a browser-supplied folder to an existing directory inside the root.
-/// Reuses the tool workspace boundary, so `..`, symlink escapes, and `.git`
-/// internals are rejected the same way file tools reject them.
-fn chat_folder(options: &RemoteOptions, folder: Option<&str>) -> Result<PathBuf> {
-    let folder = folder.unwrap_or("").trim();
-    ensure!(folder.len() <= 4096, "Folder path is too long");
-    let root = Workspace::new(&options.workspace)?;
-    let resolved = root.resolve(folder)?;
-    ensure!(
-        resolved.is_dir(),
-        "Chat folder must be an existing directory inside the workspace"
-    );
-    Ok(resolved)
-}
-
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FolderQuery {
-    #[serde(default)]
-    path: String,
-}
-/// Subdirectories the browser may pick as a chat folder.
-async fn folders(State(shared): State<Arc<Shared>>, Query(query): Query<FolderQuery>) -> Response {
-    read(shared, move |_store, options| {
-        let directory = chat_folder(options, Some(&query.path))?;
-        let path = folder_name(options, &directory);
-        let parent = (directory != options.workspace).then(|| {
-            directory
-                .parent()
-                .map(|parent| folder_name(options, parent))
-                .unwrap_or_default()
-        });
-        let mut names: Vec<String> = std::fs::read_dir(&directory)?
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-            .filter_map(|entry| entry.file_name().into_string().ok())
-            .filter(|name| {
-                !name.starts_with('.')
-                    && !matches!(name.as_str(), "node_modules" | "target" | "__pycache__")
-            })
-            .collect();
-        names.sort_unstable_by_key(|name| name.to_lowercase());
-        let limited = names.len() > 500;
-        names.truncate(500);
-        Ok(json!({"path":path,"parent":parent,"folders":names,"limited":limited}))
-    })
-    .await
-}
-
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum RunAction {
     Message { prompt: String },
     Retry,
     Compact,
+}
+
+fn operation_name(operation: &RunAction) -> &'static str {
+    match operation {
+        RunAction::Message { .. } => "message",
+        RunAction::Retry => "retry",
+        RunAction::Compact => "compact",
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -683,6 +252,7 @@ async fn start(State(shared): State<Arc<Shared>>, Json(request): Json<RunRequest
             }
         };
     let run_id = request.request_id.clone();
+    let operation = operation_name(&request.operation);
     let (cancel, receiver) = watch::channel(false);
     if shared.closing.load(Ordering::Acquire) {
         return problem(StatusCode::SERVICE_UNAVAILABLE, "Host is stopping");
@@ -691,6 +261,8 @@ async fn start(State(shared): State<Arc<Shared>>, Json(request): Json<RunRequest
         snapshot: Mutex::new(Snapshot {
             phase: Phase::Running,
             approval_mode: Some(approval_name(approval)),
+            operation: Some(operation),
+            compacting: false,
             run_id: Some(run_id.clone()),
             session: Some(session.clone()),
             cancel: Some(cancel),
@@ -863,16 +435,36 @@ async fn drive(
         }) => Some(result.context("Run exceeded its one-hour deadline; inspect before retrying").and_then(|r| r)),
     };
     store.interrupt_attempts(&session)?;
+    let task_outcome =
+        if matches!(result, Some(Ok(()))) && !matches!(request.operation, RunAction::Compact) {
+            Some(crate::completion::assess(
+                &store,
+                &session,
+                &agent.workspace,
+                &agent.profile.pipeline,
+            )?)
+        } else {
+            None
+        };
     {
         let mut state = run.snapshot.lock().unwrap();
+        state.task_outcome = task_outcome;
         state.approval = None;
         state.reply = None;
+        state.compacting = false;
         // A preview is never represented as a committed answer.
         state.preview.clear();
         state.preview_limited = false;
         state.thinking.clear();
         match &result {
             None => state.phase = Phase::Paused,
+            Some(Ok(())) if task_outcome.is_some_and(|outcome| outcome.requires_attention()) => {
+                state.phase = Phase::Failed;
+                state.error = Some(format!(
+                    "Task outcome: {:?}. Inspect the saved evidence before retrying.",
+                    task_outcome.unwrap()
+                ));
+            }
             Some(Ok(())) => state.phase = Phase::Complete,
             Some(Err(error)) => {
                 state.phase = Phase::Failed;
@@ -881,6 +473,7 @@ async fn drive(
         }
     }
     if matches!(result, Some(Ok(())))
+        && !task_outcome.is_some_and(|outcome| outcome.requires_attention())
         && let Some(memory) = &agent.memory
     {
         let extraction_provider = MemoryRuntime::extraction_provider(&agent.profile)?;
@@ -932,6 +525,11 @@ fn event_update(run: &Run, event: AgentEvent) {
             state.thinking.clear();
         }
         event => {
+            if matches!(&event, AgentEvent::Compacting { .. }) {
+                state.compacting = true;
+            } else if matches!(&event, AgentEvent::Compacted { .. }) {
+                state.compacting = false;
+            }
             let notice = match event {
                 AgentEvent::ToolStarted { name, .. } => {
                     state.preview.clear();
@@ -1090,80 +688,4 @@ fn find_run(shared: &Shared, id: &str) -> Option<Arc<Run>> {
         .values()
         .find(|run| run.snapshot.lock().unwrap().run_id.as_deref() == Some(id))
         .cloned()
-}
-
-async fn chat_info(State(shared): State<Arc<Shared>>, Path(id): Path<String>) -> Response {
-    read(shared, move |store, options| {
-        let session = scoped_session(store, options, &id)?;
-        let draft = store.composer_draft(&id)?;
-        let draft_too_large = draft.as_ref().is_some_and(|value| value.len()>65536);
-        let folder = folder_name(options, &session.workspace);
-        Ok(json!({"session":session,"folder":folder,"archived":store.chat_archived(&id)?,"pending":store.chat_pending(&id)?,"tip":store.chat_tip(&id)?,"draft":if draft_too_large {None}else{draft},"draft_too_large":draft_too_large}))
-    }).await
-}
-
-async fn profiles(State(shared): State<Arc<Shared>>) -> Response {
-    read(shared, move |_store, options| {
-        let config = Config::load(&options.config_home)?;
-        let profiles: Vec<_> = config.profiles.iter().filter(|(name,p)| p.supports_chat() && options.profile.as_ref().is_none_or(|fixed| fixed==*name))
-            .map(|(name,p)|json!({"name":name,"model":p.model})).collect();
-        Ok(json!({"profiles":profiles,"default_profile":options.profile.as_ref().unwrap_or(&config.default_profile)}))
-    }).await
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-enum ChatChange {
-    Rename { title: String },
-    Archive { archived: bool },
-    Cancel { expected_tip: i64 },
-    Rewind { expected_tip: i64 },
-}
-async fn manage_chat(
-    State(shared): State<Arc<Shared>>,
-    Path(id): Path<String>,
-    Json(change): Json<ChatChange>,
-) -> Response {
-    let current = shared.registry.lock().unwrap().runs.get(&id).cloned();
-    if current
-        .as_ref()
-        .is_some_and(|run| !run.done.load(Ordering::Acquire))
-    {
-        return problem(
-            StatusCode::CONFLICT,
-            "Pause this chat and wait for it to stop before changing it",
-        );
-    }
-    let result = tokio::task::spawn_blocking(move || -> Result<Value> {
-        let mut store = Store::open(&shared.options.home)?;
-        scoped_session(&store,&shared.options,&id)?;
-        let _guard = store.lock(&id)?;
-        let value = match change {
-            ChatChange::Rename { title } => { store.rename_chat(&id,&title)?; json!({"renamed":true}) },
-            ChatChange::Archive { archived } => { store.archive_chat(&id,archived)?; json!({"archived":archived}) },
-            ChatChange::Cancel { expected_tip } => {
-                ensure!(store.chat_tip(&id)?==expected_tip,"This chat changed; refresh before cancelling its saved turn");
-                let uncertain = store.interrupt_turn(&id,None)?;
-                json!({"cancelled":true,"uncertain":uncertain})
-            },
-            ChatChange::Rewind { expected_tip } => {
-                ensure!(store.chat_tip(&id)?==expected_tip,"This chat changed; refresh before rewinding");
-                let (draft,uncertain) = store.rewind(&id)?;
-                json!({"rewound":true,"draft":if draft.len()<=65536 {Some(draft)}else{None},"uncertain":uncertain})
-            },
-        };
-        // Remove stale terminal status after a transcript-management operation.
-        let mut registry = shared.registry.lock().unwrap();
-        registry.runs.remove(&id);
-        registry.order.retain(|entry| entry != &id);
-        Ok(value)
-    }).await;
-    match result {
-        Ok(Ok(value)) => Json(value).into_response(),
-        Ok(Err(error)) => failure(error),
-        Err(_) => problem(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Chat update failed; inspect saved history",
-        ),
-    }
 }

@@ -41,6 +41,9 @@ fn answer(text: &str) -> Value {
 fn write_call() -> Value {
     json!({"role":"assistant","tool_calls":[{"id":"write1","type":"function","function":{"name":"write_file","arguments":json!({"path":"result.txt","content":"approved"}).to_string()}}]})
 }
+fn shell_call(command: &str) -> Value {
+    json!({"role":"assistant","tool_calls":[{"id":"shell1","type":"function","function":{"name":"shell","arguments":json!({"command":command}).to_string()}}]})
+}
 impl Host {
     async fn new(responses: Vec<Value>, approval: ApprovalMode) -> Self {
         let home = tempfile::tempdir().unwrap();
@@ -290,9 +293,30 @@ async fn denial_and_read_only_mode_never_mutate_files() {
             let state = host.phase(&["awaiting_approval"]).await;
             assert_eq!(host.post("approval",json!({"run_id":run["run_id"],"approval_id":state["approval"]["id"],"allow":false})).await.status(),200);
         }
-        host.phase(&["complete"]).await;
+        let state = host.phase(&["failed"]).await;
+        assert_eq!(state["task_outcome"], "blocked");
         assert!(!host.workspace.path().join("result.txt").exists());
     }
+}
+
+#[tokio::test]
+async fn task_outcome_distinguishes_unverified_answers_and_failed_commands() {
+    let ordinary = Host::new(vec![answer("A plain answer")], ApprovalMode::Trust).await;
+    ordinary.start(None).await;
+    let state = ordinary.phase(&["complete"]).await;
+    assert_eq!(state["task_outcome"], "unverified");
+
+    let failed = Host::new(
+        vec![
+            shell_call("printf diagnostic >&2; exit 7"),
+            answer("Finished"),
+        ],
+        ApprovalMode::Trust,
+    )
+    .await;
+    failed.start(None).await;
+    let state = failed.phase(&["failed"]).await;
+    assert_eq!(state["task_outcome"], "failed");
 }
 
 #[tokio::test]

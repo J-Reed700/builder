@@ -31,6 +31,7 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("/help", "Keyboard shortcuts and commands"),
     ("/status", "Context usage and session details"),
     ("/settings", "Pipeline features and budgets"),
+    ("/schedule", "Persistent automations and execution history"),
     ("/memory", "Local memory settings and model setup"),
     ("/history", "Show the saved conversation"),
     ("/todo", "Show the agent's current todo list"),
@@ -49,12 +50,14 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
 pub enum Input {
     Submit(String),
     Exit,
+    Interrupt,
 }
 enum Outcome {
     Continue,
     Clipboard,
     Submit,
     Exit,
+    Interrupt,
 }
 
 #[derive(Default)]
@@ -107,13 +110,35 @@ impl Composer {
         Ok(Input::Submit(text))
     }
     pub fn read(&mut self, status: &str) -> io::Result<Input> {
+        self.read_with_status(status, || None)
+    }
+    /// Read a draft while allowing the caller to update the status line from
+    /// background work. This is used by long-running context compaction so a
+    /// user can keep composing the next message instead of waiting at a
+    /// blocked prompt.
+    pub fn read_with_status<F>(&mut self, status: &str, mut status_update: F) -> io::Result<Input>
+    where
+        F: FnMut() -> Option<String>,
+    {
         let mut screen = Screen::enter()?;
         self.note.clear();
         self.history_index = None;
         self.menu_dismissed = false;
         self.completion = 0;
-        screen.draw(&self.buffer, status, &self.hint(), &self.menu())?;
+        let mut current_status = status.to_owned();
+        screen.draw(&self.buffer, &current_status, &self.hint(), &self.menu())?;
         loop {
+            if let Some(updated) = status_update()
+                && updated != current_status
+            {
+                current_status = updated;
+                screen.draw(&self.buffer, &current_status, &self.hint(), &self.menu())?;
+            }
+            // Poll briefly so a background operation can refresh the status
+            // line even when the user has not pressed a key.
+            if !event::poll(Duration::from_millis(80))? {
+                continue;
+            }
             let event = event::read()?;
             let start = Instant::now();
             let mut outcome = self.handle(event, screen.content_width);
@@ -128,7 +153,7 @@ impl Composer {
             match outcome {
                 Outcome::Clipboard => {
                     self.note = "Reading clipboard directly…".into();
-                    screen.draw(&self.buffer, status, &self.hint(), &self.menu())?;
+                    screen.draw(&self.buffer, &current_status, &self.hint(), &self.menu())?;
                     match clipboard::read(buffer::MAX_INPUT_BYTES - self.buffer.draft.bytes) {
                         Ok(text) if text.is_empty() => {
                             self.note = "Clipboard is empty or contains no text".into();
@@ -138,7 +163,7 @@ impl Composer {
                         }
                         Err(error) => self.note = error.to_string(),
                     }
-                    screen.draw(&self.buffer, status, &self.hint(), &self.menu())?;
+                    screen.draw(&self.buffer, &current_status, &self.hint(), &self.menu())?;
                 }
                 Outcome::Submit => {
                     let text = self.buffer.content();
@@ -194,8 +219,12 @@ impl Composer {
                     screen.clear()?;
                     return Ok(Input::Exit);
                 }
+                Outcome::Interrupt => {
+                    screen.clear()?;
+                    return Ok(Input::Interrupt);
+                }
                 Outcome::Continue => {
-                    screen.draw(&self.buffer, status, &self.hint(), &self.menu())?;
+                    screen.draw(&self.buffer, &current_status, &self.hint(), &self.menu())?;
                 }
             }
         }
@@ -345,7 +374,7 @@ impl Composer {
                     KeyCode::Char('v') if ctrl => return Outcome::Clipboard,
                     KeyCode::Char('c') if ctrl => {
                         if self.buffer.is_empty() {
-                            return Outcome::Exit;
+                            return Outcome::Interrupt;
                         }
                         self.buffer.clear();
                         self.note =

@@ -1,5 +1,4 @@
 //! Provider boundary and OpenAI-compatible transport. No UI or filesystem tools.
-pub mod local_embedding;
 mod openai;
 mod sse;
 use anyhow::Result;
@@ -52,6 +51,12 @@ pub enum Event {
 
 /// A successful response is complete and validated, never a partial generation.
 pub trait Provider {
+    /// Advertised simultaneous inference requests, if the server exposes them.
+    /// Unknown capacity must never prevent normal generation.
+    fn parallel_capacity(&self) -> impl Future<Output = Option<usize>> {
+        async { None }
+    }
+
     fn complete_with_budget(
         &self,
         messages: &[Message],

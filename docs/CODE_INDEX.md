@@ -18,8 +18,9 @@ explicit `code_search` refreshes synchronously before ranking.
 
 Each scan walks the current checkout with ignore rules, hashes every accepted
 source file, chunks it at language-aware declaration boundaries, and computes a
-manifest hash. Publishing occurs in one transaction in the derived
-`builder-index.sqlite3` sidecar. Conversation and recovery records stay in the
+manifest hash. Publishing occurs in one transaction in the checkout's own
+derived database, `code-index/<sha256(checkout path)>.sqlite3`, so one
+repository's publication or vector build never contends with another's. Conversation and recovery records stay in the
 separate authoritative `builder.sqlite3` database, so a bulk index publication
 cannot block a user message, tool claim, or tool result. Sidecar initialization
 or integrity failure disables code enrichment for that Store with an explicit
@@ -28,14 +29,16 @@ the failure and leaves the last complete generation queryable. Removed files
 disappear when the next generation is published.
 
 One checkout-scoped advisory lock covers capture, publication, history refresh,
-and vector maintenance. Another Builder process encountering that lock does not
-wait or start duplicate work; it continues reading the last published generation.
+and vector maintenance, and every index write API requires holding it, so each
+index database has a single writer. Another Builder process encountering that
+lock does not wait or start duplicate work; it continues reading the last
+published generation. Automatic per-turn context never writes the index.
 If foreground work times out while stopping an idle maintainer, Builder keeps the
 old worker handle until the thread exits and will not start an overlapping worker.
 
 Every result is checked against a fresh hash of its source file after ranking. A
-result changed during the scan/search race is withheld and removed from the
-active index. This retrieval-time check is the final freshness boundary; neither
+result changed during the scan/search race is withheld; `code_search` also
+removes it from the active index when it holds the checkout lock. This retrieval-time check is the final freshness boundary; neither
 the watcher nor the periodic scan is treated as proof.
 
 Dense vectors are keyed by the chunk content hash and embedding fingerprint.

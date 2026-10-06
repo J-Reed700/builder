@@ -22,11 +22,14 @@ workspace = true
 
 [dependencies]
 builder-core = { path = "crates/builder-core" }
+builder-embedding = { path = "crates/builder-embedding" }
 builder-provider = { path = "crates/builder-provider" }
 builder-remote-protocol = { path = "crates/builder-remote-protocol" }
 builder-tools = { path = "crates/builder-tools" }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
+chrono = "0.4"
+shell-words = "1"
 console = "0.16"
 indicatif = "0.18"
 crossterm = "0.29"
@@ -48,6 +51,7 @@ url = "2"
 
 [dev-dependencies]
 tempfile = "3"
+rusqlite = { version = "0.37", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 [profile.release]
