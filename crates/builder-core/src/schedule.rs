@@ -5,38 +5,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, str::FromStr};
 
-pub(crate) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS schedules (
- id TEXT PRIMARY KEY, definition TEXT NOT NULL, state TEXT NOT NULL
- CHECK(state IN ('active','paused','completed','deleted')), next_due INTEGER NOT NULL,
- created_at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS schedules_due ON schedules(state,next_due);
-CREATE TABLE IF NOT EXISTS schedule_runs (
- id TEXT PRIMARY KEY, schedule_id TEXT NOT NULL REFERENCES schedules(id),
- occurrence INTEGER NOT NULL, manual INTEGER NOT NULL, status TEXT NOT NULL
- CHECK(status IN ('queued','running','succeeded','failed','interrupted','blocked','cancelled')),
- session_id TEXT REFERENCES sessions(id), started_at INTEGER, finished_at INTEGER, detail TEXT);
-CREATE UNIQUE INDEX IF NOT EXISTS schedule_occurrence ON schedule_runs(schedule_id,occurrence) WHERE manual=0;
-CREATE UNIQUE INDEX IF NOT EXISTS schedule_inflight ON schedule_runs(schedule_id) WHERE status IN ('queued','running');
-CREATE INDEX IF NOT EXISTS schedule_history ON schedule_runs(schedule_id,occurrence DESC);
-PRAGMA user_version=14;";
-
-// SQLite cannot alter a CHECK constraint. Rebuild only the run table inside
-// the journal migration transaction, retaining every occurrence and index.
-pub(crate) const OUTCOME_SCHEMA: &str = "
-CREATE TABLE schedule_runs_v15 (
- id TEXT PRIMARY KEY, schedule_id TEXT NOT NULL REFERENCES schedules(id),
- occurrence INTEGER NOT NULL, manual INTEGER NOT NULL, status TEXT NOT NULL
- CHECK(status IN ('queued','running','succeeded','unverified','failed','interrupted','blocked','cancelled')),
- session_id TEXT REFERENCES sessions(id), started_at INTEGER, finished_at INTEGER, detail TEXT);
-INSERT INTO schedule_runs_v15 SELECT * FROM schedule_runs;
-DROP TABLE schedule_runs;
-ALTER TABLE schedule_runs_v15 RENAME TO schedule_runs;
-CREATE UNIQUE INDEX schedule_occurrence ON schedule_runs(schedule_id,occurrence) WHERE manual=0;
-CREATE UNIQUE INDEX schedule_inflight ON schedule_runs(schedule_id) WHERE status IN ('queued','running');
-CREATE INDEX schedule_history ON schedule_runs(schedule_id,occurrence DESC);
-PRAGMA user_version=15;";
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Cadence {

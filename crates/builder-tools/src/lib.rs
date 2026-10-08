@@ -2,6 +2,7 @@
 
 mod action;
 mod display;
+mod memory;
 mod registry;
 mod workspace;
 
@@ -15,6 +16,7 @@ pub use action::{
     SUBAGENT_TOOL,
 };
 pub use display::{call_summary, result_note};
+pub use memory::definitions as memory_definitions;
 pub(crate) use registry::schema;
 pub use registry::{definitions, definitions_with_pipeline, definitions_with_pipeline_and_phase};
 pub use workspace::{ShellFailure, ShellFailureKind, Workspace};

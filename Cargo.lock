@@ -231,6 +231,7 @@ dependencies = [
  "sha2",
  "shell-words",
  "subtle",
+ "syn 2.0.119",
  "tempfile",
  "tokio",
  "tokio-tungstenite",

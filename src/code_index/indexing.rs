@@ -1,5 +1,5 @@
 use super::{clip, scope, watcher::CodeIndexWatch};
-use crate::memory::MemoryRuntime;
+use crate::embedding::EmbeddingRuntime;
 use anyhow::{Result, ensure};
 use builder_core::{
     code_index::{CodeChunk, CodeIndexStatus},
@@ -40,7 +40,7 @@ pub(super) fn refresh_locked(
 pub async fn maintain(
     store: &mut Store,
     workspace: &Workspace,
-    memory: Option<&MemoryRuntime>,
+    embeddings: Option<&EmbeddingRuntime>,
     settings: &PipelineSettings,
     mut watch: Option<&mut CodeIndexWatch>,
 ) -> Result<()> {
@@ -60,11 +60,11 @@ pub async fn maintain(
     if !settings.code_index_semantic {
         return Ok(());
     }
-    let Some(memory) = memory else {
+    let Some(embeddings) = embeddings else {
         return Ok(());
     };
-    memory.reset_embeddings();
-    let Some(fingerprint) = memory.embedding_fingerprint() else {
+    embeddings.reset();
+    let Some(fingerprint) = embeddings.fingerprint() else {
         return Ok(());
     };
     loop {
@@ -77,8 +77,8 @@ pub async fn maintain(
             break;
         }
         let inputs = pending.iter().map(embedding_text).collect::<Vec<_>>();
-        let Some(vectors) = memory
-            .embed_code_batch(&inputs, settings.code_index_embedding_timeout_secs)
+        let Some(vectors) = embeddings
+            .embed_batch(&inputs, settings.code_index_embedding_timeout_secs)
             .await
         else {
             break;
@@ -127,10 +127,10 @@ pub(super) async fn refresh_history_locked(
 pub fn coverage(
     store: &Store,
     workspace: &Workspace,
-    memory: Option<&MemoryRuntime>,
+    embeddings: Option<&EmbeddingRuntime>,
 ) -> Result<Option<(usize, usize)>> {
-    memory
-        .and_then(MemoryRuntime::embedding_fingerprint)
+    embeddings
+        .and_then(EmbeddingRuntime::fingerprint)
         .map(|fingerprint| store.code_index_vector_coverage(&scope(workspace), fingerprint))
         .transpose()
 }

@@ -1,0 +1,24 @@
+{
+  "name": "builder-tests",
+  "private": true,
+  "description": "Browser unit and end-to-end tests for Builder Remote",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "jest --coverage --runInBand",
+    "test:unit": "jest --runInBand",
+    "test:unit:watch": "jest --watch",
+    "test:browser": "playwright test",
+    "test:browser:ui": "playwright test --ui",
+    "test:rust": "cargo test --workspace --locked",
+    "test:all": "python3 scripts/test.py",
+    "test:coverage:rust": "python3 scripts/coverage.py",
+    "test:coverage:all": "python3 scripts/coverage.py --extended"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0",
+    "jest": "30.5.2",
+    "jest-environment-jsdom": "30.5.2"
+  }
+}

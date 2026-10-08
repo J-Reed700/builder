@@ -226,7 +226,7 @@ pub(super) fn start_memory_task(
                             let _ = builder::code_index::maintain(
                                 &mut code_store,
                                 &workspace,
-                                memory.as_ref(),
+                                memory.as_ref().map(|memory| memory.embeddings()),
                                 &profile.pipeline,
                                 code_watch.as_mut(),
                             )

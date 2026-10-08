@@ -1,10 +1,7 @@
 //! The agent's ordered working checklist. A list is never separate mutable
 //! state: it is the latest successful `todo_write` request in active original
 //! history, so rewind, compaction and restart agree with the journal.
-use crate::{
-    protocol::Message,
-    store::{Store, ToolOutcome},
-};
+use crate::{execution::ToolOutcome, protocol::Message};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -153,15 +150,6 @@ impl List {
                     && outcomes.get(&call.id) == Some(&ToolOutcome::Succeeded)
             })
             .find_map(|call| Self::decode(&call.function.arguments))
-    }
-}
-
-impl Store {
-    pub fn todos(&self, session: &str) -> Result<Option<List>> {
-        Ok(List::latest(
-            &self.history_messages(session)?,
-            &self.tool_outcomes(session)?,
-        ))
     }
 }
 

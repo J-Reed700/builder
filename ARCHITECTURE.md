@@ -27,19 +27,55 @@ builder (application + adapters)
 ├── main.rs                 composition root only
 ├── commands/               one-shot CLI command handlers
 ├── interactive/            session loop, compaction, maintenance, driver
-├── agent.rs + agent/       model-round orchestration, execution, guards, progress
+├── agent/                  public contract, rounds, request context, tools, compaction, delegation
+├── memory/                 evidence validation, retrieval, extraction, memory tool policy
+├── embedding.rs            shared embedding backend, fingerprints, deadlines, query cache
+├── research/               evidence freshness, workflow projections, operation policy
 ├── code_index/             query policy, index maintenance, filesystem watcher
-└── remote/                 host API, authentication, catalog, run execution
+├── remote/                 host API, authentication, catalog, run execution
+│   └── connection/         outbound gateway connection and private credential storage
+├── presentation.rs         plain activity descriptions shared by adapters
+└── ui/                     terminal prompts, help, renderer, panels, streams, theme
 
 builder-core                durable domain types and SQLite repositories
+├── protocol.rs, execution.rs, memory.rs, code_index.rs, research.rs, schedule.rs, todo.rs
+│                           domain values and pure interpretation; no SQL
+├── config/                 configuration parsing, validation, import, and persistence
+└── store/                  private SQLite connections, migrations, and repositories
+    ├── database.rs         journal/index connection lifecycle and index locks
+    ├── migrations.rs       transactional journal schema upgrades
+    ├── sessions.rs         session creation, lookup, and session locks
+    ├── messages.rs         active/original history and checkpoints
+    ├── execution.rs        attempts and atomic tool claims/results
+    ├── recovery.rs         cancellation, rewind, and composer recovery
+    └── ...                 memory, research, indexes, pages, schedules, todos, subagents
 builder-provider            chat/embedding transport contracts and OpenAI adapter
 builder-embedding           optional local embedding model runtime
 builder-tools               typed actions, schemas, display metadata, safe execution
 builder-remote-protocol     transport-neutral relay messages
-builder-gateway             relay API, security policy, credential persistence
+builder-gateway             router facade, pairing, host connection, request proxy,
+                            security policy, credential persistence
 ```
 
 Directory modules expose narrow facades and keep implementation modules private. For example, `code_index` re-exports query and maintenance operations without exposing ranking internals; `builder-tools` re-exports typed actions while keeping schema/display assembly internal; and the remote and gateway adapters keep authentication and credential persistence out of request orchestration.
+
+`Store` retains a concrete public API, but only its private implementation tree
+can access database connections and transaction creation. Domain modules contain
+values and pure interpretation, including typed execution outcomes. Existing
+`store::ToolOutcome` and related paths re-export those domain types.
+
+Code-index operations accept `Option<&EmbeddingRuntime>`. The embedding service
+owns backend choice, deadlines, fingerprints, the query cache, and failure state;
+it has no memory-record or session policy. Application composition obtains the
+shared service through `MemoryRuntime::embeddings()`. This preserves the current
+configuration behavior while allowing code retrieval to use embeddings without
+depending on the memory runtime. Memory schemas live with other schemas in
+`builder-tools`; the application still owns memory permissions and execution.
+
+Agent context assembly lives in `agent/request.rs`, separate from the round loop.
+Compaction, instruction memory, and child-agent execution live beneath the agent
+that owns them. The earlier `subagent` and `remote_connect` public module paths
+remain compatibility re-exports.
 
 The organization applies SOLID principles pragmatically:
 
@@ -49,6 +85,15 @@ The organization applies SOLID principles pragmatically:
 - **Liskov substitution:** every provider implementation must satisfy the same complete-message, retry, cancellation, and tool-call contract tests.
 
 Avoid cross-layer convenience imports that reverse this direction. New CLI commands belong in `commands/`; interactive lifecycle work belongs in `interactive/`; provider-specific serialization stays in `builder-provider`; durable facts and migrations stay in `builder-core`; and filesystem/process behavior stays in `builder-tools`.
+
+`tests/architecture.rs` checks internal crate dependency edges, domain/SQL
+separation, runtime/adapter separation, remote/terminal separation, and the
+code-index/embedding boundary. It parses Rust paths and imports, including
+grouped and renamed imports; it is a regression guard, not a proof about macro
+expansion or every possible re-export. All packages inherit their version,
+edition, license, and minimum Rust version from the workspace. File length alone
+is not a reason to add a module or trait: split at a responsibility or ownership
+boundary. The detailed audit is in [docs/RUST_ARCHITECTURE_AUDIT.md](docs/RUST_ARCHITECTURE_AUDIT.md).
 
 ## Turn state machine
 
@@ -119,6 +164,11 @@ This is not exactly-once execution. No local journal can atomically commit an ar
 The interactive input adapter is split into `input/buffer.rs` (editable atoms and shared paste blocks), `input/layout.rs` (cell-width-aware layout), `input/screen.rs` (RAII terminal ownership and bounded painting), and `input/mod.rs` (events, commands, and history). These modules have no dependency on HTTP or SQLite. The rendering adapter keeps theme and streaming escape filtering separate. The application coalesces model output on a 16 ms timer; persistence still commits complete messages at the same durability boundaries.
 
 The application owns the store, session lock, provider, and workspace. Manual interactive compaction uses a short-lived worker connection so the composer can accept one queued message while the checkpoint is being built; the message is committed only after the worker finishes. A generation owns its parser and partial response; dropping its future drops its HTTP stream. The CLI selects between an agent future and Ctrl-C. RAII releases the session lock and progress indicators.
+
+Each gateway proxy response also owns its pending-request registry slot through
+a drop guard. Normal completion, timeout, dispatch failure, and cancellation
+release capacity. Dropping a response future does not cancel or replay a host
+mutation; a late response is ignored after its registry entry is removed.
 
 Tools bound file sizes and returned output. On Unix, a shell tool owns a process-group guard that terminates non-detached descendants on cancellation, timeout, or completion. `kill_on_drop` protects the direct child as well. File operations are synchronous and bounded; large directory searches may delay cancellation. A worker pool is a possible later optimization, but cancellation must still leave mutations explicitly uncertain.
 

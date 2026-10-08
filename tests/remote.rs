@@ -18,6 +18,142 @@ use tempfile::TempDir;
 
 type ModelState = (Arc<Mutex<Vec<Value>>>, Arc<Mutex<VecDeque<Value>>>);
 
+#[tokio::test]
+async fn invalid_run_inputs_never_create_sessions_or_reach_the_model() {
+    let host = Host::new(vec![], ApprovalMode::Ask).await;
+    let valid = || {
+        json!({
+            "request_id": uuid::Uuid::new_v4().to_string(),
+            "operation": {"action":"message","prompt":"fixture"}
+        })
+    };
+    let mut cases = vec![];
+    for request_id in ["", "not-a-uuid", "../../session"] {
+        let mut body = valid();
+        body["request_id"] = json!(request_id);
+        cases.push((body, 400));
+    }
+    for prompt in [
+        "".into(),
+        " \n\t".into(),
+        "x".repeat(65537),
+        "🦀".repeat(16385),
+    ] {
+        let mut body = valid();
+        body["operation"]["prompt"] = json!(prompt);
+        cases.push((body, 400));
+    }
+    for action in ["retry", "compact"] {
+        let mut body = valid();
+        body["operation"] = json!({"action":action});
+        cases.push((body, 409));
+    }
+    for (field, value) in [
+        ("profile", "missing"),
+        ("approval", "superuser"),
+        ("workspace", "missing-directory"),
+    ] {
+        let mut body = valid();
+        body[field] = json!(value);
+        cases.push((body, 409));
+    }
+    let mut body = valid();
+    body["unrecognized"] = json!(true);
+    cases.push((body, 422));
+    let mut body = valid();
+    body["operation"]["execute"] = json!(true);
+    cases.push((body, 422));
+    let mut body = valid();
+    body["operation"]["action"] = json!("shell");
+    cases.push((body, 422));
+    for (index, (body, expected)) in cases.into_iter().enumerate() {
+        let response = host.post("run", body).await;
+        assert_eq!(response.status(), expected, "invalid case {index}");
+    }
+    assert!(host.requests.lock().unwrap().is_empty());
+    assert!(
+        host.get("sessions").await["sessions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        host.get("status").await["states"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn prompt_limit_is_in_utf8_bytes_and_accepts_the_exact_boundary() {
+    let host = Host::new(vec![answer("boundary accepted")], ApprovalMode::Ask).await;
+    // Keep the API byte boundary independent of the model context-budget limit.
+    let mut config = Config::load(host.home.path()).unwrap();
+    config
+        .profiles
+        .get_mut(&config.default_profile.clone())
+        .unwrap()
+        .context_tokens = 131_072;
+    config.save(host.home.path()).unwrap();
+    let prompt = "🦀".repeat(16384);
+    assert_eq!(prompt.len(), 65536);
+    let response = host
+        .post(
+            "run",
+            json!({
+                "request_id": uuid::Uuid::new_v4().to_string(),
+                "operation": {"action":"message","prompt":prompt}
+            }),
+        )
+        .await;
+    assert_eq!(response.status(), 202);
+    host.phase(&["complete"]).await;
+    let requests = host.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]["messages"].as_array().unwrap().last().unwrap()["content"],
+        prompt
+    );
+}
+
+#[tokio::test]
+async fn malformed_catalog_queries_fail_without_touching_history() {
+    let host = Host::new(vec![], ApprovalMode::Ask).await;
+    for query in [
+        "offset=-1",
+        "offset=4294967296",
+        "offset=abc",
+        "archived=maybe",
+        "unknown=true",
+    ] {
+        let response = host
+            .client
+            .get(format!("{}/api/sessions?{query}", host.url))
+            .header("x-builder-token", &host.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400, "{query}");
+    }
+    for origin in [
+        "null".to_string(),
+        format!("{}/", host.url),
+        "https://attacker.example".to_string(),
+    ] {
+        let response = host
+            .client
+            .get(format!("{}/api/status", host.url))
+            .header("x-builder-token", &host.token)
+            .header("origin", origin)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 403);
+    }
+    assert!(host.requests.lock().unwrap().is_empty());
+}
+
 struct Host {
     home: TempDir,
     workspace: TempDir,

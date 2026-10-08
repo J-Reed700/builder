@@ -403,7 +403,7 @@ impl<P: Provider> Agent<P> {
                     store,
                     &self.session,
                     &self.workspace,
-                    self.memory.as_ref(),
+                    self.memory.as_ref().map(|memory| memory.embeddings()),
                     &self.profile.pipeline,
                     query,
                     *limit,

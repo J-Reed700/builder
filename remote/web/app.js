@@ -254,7 +254,7 @@ async function connect(value, remember) {
   } catch (e) { if (version !== connection) return; if (gatewayMode) { showGatewaySetup(); } else { token = ''; if (remember && /token/i.test(e.message)) rememberToken(''); $('app').hidden = true; $('login').hidden = false; } error(e.message); }
 }
 $('connect').onsubmit = event => { event.preventDefault(); const value = $('token').value.trim(); $('token').value = ''; connect(value, $('remember').checked); };
-$('disconnect').onclick = () => { token = gatewayMode ? 'gateway' : ''; rememberToken(''); newFolder = ''; setDrawer(false); $('folder-dialog').close(); connection++; epoch++; listVersion++; selected = null; items = []; states = []; info = null; sessionItems = []; drafts.clear(); queued.clear(); posting.clear(); $('manage-dialog').close(); $('export-dialog').close(); $('app').hidden = true; if (gatewayMode) showGatewaySetup(); else $('login').hidden = false; $('messages').replaceChildren(); $('sessions').replaceChildren(); $('prompt').value = ''; $('error').hidden = true; };
+$('disconnect').onclick = () => { token = gatewayMode ? 'gateway' : ''; rememberToken(''); newFolder = ''; setDrawer(false); browseVersion++; $('folder-dialog').close(); connection++; epoch++; listVersion++; selected = null; items = []; states = []; info = null; sessionItems = []; drafts.clear(); queued.clear(); posting.clear(); $('manage-dialog').close(); $('export-dialog').close(); $('app').hidden = true; if (gatewayMode) showGatewaySetup(); else $('login').hidden = false; $('messages').replaceChildren(); $('sessions').replaceChildren(); $('prompt').value = ''; $('error').hidden = true; };
 $('create-invitation').onclick = async () => {
   $('create-invitation').disabled = true; $('error').hidden = true;
   try {
@@ -299,7 +299,7 @@ async function run(action) {
     error(e.message + ' · Check this chat before sending again.');
     // A lost acknowledgement is recovered only by its exact request ID. Never replay a write.
     try { const result = await api('status'); states = result.states; const found = states.find(s => s.run_id === request_id); if (found) { await sessions(); await refresh(); } /* Keep the draft until the user inspects durable history. */ } catch { /* Original error remains visible. */ }
-  } finally { posting.delete(key); controls(); }
+  } finally { if (version === connection) { posting.delete(key); controls(); } }
 }
 function maybeSendQueued() {
   const key = draftKey(), prompt = queued.get(key), s = state();
@@ -363,11 +363,12 @@ async function browse(path) {
     if (listing.limited) { const p = document.createElement('p'); p.textContent = 'Only the first 500 folders are shown.'; fragment.append(p); }
     $('folder-list').replaceChildren(fragment);
     if (!$('folder-dialog').open) $('folder-dialog').showModal();
-  } catch (e) { error(e.message); if (!$('folder-dialog').open) newFolder = ''; }
+  } catch (e) { if (version !== browseVersion) return; error(e.message); if (!$('folder-dialog').open) newFolder = ''; }
 }
 $('folder').onclick = () => browse(newFolder);
-$('folder-cancel').onclick = () => $('folder-dialog').close();
-$('folder-use').onclick = () => { newFolder = browsePath; $('folder-dialog').close(); controls(); $('prompt').focus(); };
+$('folder-cancel').onclick = () => { browseVersion++; $('folder-dialog').close(); };
+$('folder-dialog').oncancel = () => { browseVersion++; };
+$('folder-use').onclick = () => { browseVersion++; newFolder = browsePath; $('folder-dialog').close(); controls(); $('prompt').focus(); };
 $('export-dialog').onclose = () => { if (exportUrl) URL.revokeObjectURL(exportUrl); exportUrl = null; $('download-transcript').removeAttribute('href'); $('export-text').value = ''; };
 $('copy-transcript').onclick = async () => { try { await navigator.clipboard.writeText($('export-text').value); $('copy-transcript').textContent = 'Copied'; } catch { $('export-text').select(); error('Clipboard unavailable. Copy the selected transcript text manually.'); } };
 document.querySelectorAll('[data-prompt]').forEach(button => { button.onclick = () => { $('prompt').value = button.dataset.prompt; saveDraft(); $('prompt').focus(); }; });

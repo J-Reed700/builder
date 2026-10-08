@@ -567,7 +567,7 @@ fn event_update(run: &Run, event: AgentEvent) {
                     step,
                     repeated_reads,
                     planning,
-                } => crate::ui::nudge_line(calls, step, repeated_reads, planning),
+                } => crate::presentation::nudge_line(calls, step, repeated_reads, planning),
                 AgentEvent::RepetitionNotice { name, .. } => {
                     format!("Repeated {name} call; checking progress")
                 }

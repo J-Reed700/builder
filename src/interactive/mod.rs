@@ -280,8 +280,11 @@ pub(crate) async fn run(
             "/status" => {
                 let messages = store.messages(&agent.session)?;
                 let index_status = builder::code_index::status(store, &agent.workspace)?;
-                let coverage =
-                    builder::code_index::coverage(store, &agent.workspace, agent.memory.as_ref())?;
+                let coverage = builder::code_index::coverage(
+                    store,
+                    &agent.workspace,
+                    agent.memory.as_ref().map(|memory| memory.embeddings()),
+                )?;
                 let query_summary = builder::code_index::query_summary(store, &agent.workspace)?;
                 let update_mode = memory_task.as_ref().map_or_else(
                     || configured_index_update_mode(&agent.profile),

@@ -2,6 +2,7 @@
 
 mod auth;
 mod catalog;
+pub mod connection;
 mod execution;
 
 use self::auth::{authenticate, headers, load_token};

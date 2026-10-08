@@ -1,137 +1,16 @@
+//! Streaming model/tool rendering and RAII progress indicators.
+use super::{nudge_line, print_todos, safe, stream, theme};
 use crate::agent::{AgentEvent, SummaryStage};
 use builder_provider::{Activity, Event};
-use builder_tools::Action;
 use console::style;
-use std::io::{self, IsTerminal, Write};
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    io::{self, Write},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
-pub mod panel;
-pub mod stream;
-pub mod theme;
-pub mod todo;
-
-pub fn safe(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    stream::Sanitizer::default().push(text, &mut out);
-    out
-}
-
-/// The `/help` panel: commands grouped by what they do, then the editing keys.
-/// Command names are kept in step with the composer's `/` menu by a test.
-pub fn help(width: usize) -> String {
-    let rows = [
-        panel::section("Conversation"),
-        panel::field(
-            "/attach PATH",
-            "Send a workspace file into the conversation",
-        ),
-        panel::field(
-            "/history",
-            "Show the active conversation; /history archived shows rewound turns",
-        ),
-        panel::field("/todo", "Show the agent's current todo list"),
-        panel::field("/retry", "Continue an unfinished turn"),
-        panel::field("/cancel", "End pending work and keep the completed context"),
-        panel::field(
-            "/rewind",
-            "Archive the last turn and edit its message; workspace files stay changed",
-        ),
-        panel::field(
-            "/clear",
-            "Start a fresh conversation and archive the current one",
-        ),
-        panel::section("Context"),
-        panel::field("/status", "Session, context estimate, and recovery state"),
-        panel::field(
-            "/compact",
-            "Summarize context now and preserve the originals",
-        ),
-        panel::section("Configuration"),
-        panel::field(
-            "/settings",
-            "Pipeline features and budgets for this profile",
-        ),
-        panel::field(
-            "/schedule",
-            "Schedule tasks; list, pause, resume, and inspect runs",
-        ),
-        panel::field("/memory", "Local memory settings and model setup"),
-        panel::section("Session"),
-        panel::field("/help", "This list"),
-        panel::field("/exit", "Save and leave"),
-        panel::section("Editing"),
-        panel::field("enter", "Send the message"),
-        panel::field("alt+enter", "Insert a new line; ctrl+j does the same"),
-        panel::field("ctrl+v", "Paste directly from the clipboard (macOS)"),
-        panel::field("ctrl+z ctrl+y", "Undo and redo"),
-        panel::field(
-            "ctrl+w ctrl+u",
-            "Delete the previous word, or clear the draft",
-        ),
-        panel::section("Moving around"),
-        panel::field(
-            "up down",
-            "Move between draft lines; browse history from an empty draft",
-        ),
-        panel::field("ctrl+p ctrl+n", "Browse history from any draft"),
-        panel::field(
-            "/",
-            "Open the command menu; tab or enter completes, esc closes",
-        ),
-        panel::field(
-            "ctrl+c",
-            "Pause a streaming response; a follow-up redirects it",
-        ),
-        panel::section("Good to know"),
-        panel::note(
-            "Edits and commands require approval unless --auto or --approval trust is set.",
-        ),
-        panel::note("Large pastes fold into one block; the full text is sent on enter."),
-        panel::note(
-            "Every message is saved automatically, and rewound turns stay in /history archived.",
-        ),
-        panel::note(
-            "While context is compacting, enter the next message to queue it for sending when compaction finishes.",
-        ),
-    ];
-    panel::render(
-        concat!("builder ", env!("CARGO_PKG_VERSION")),
-        "commands and keys",
-        &rows,
-        width,
-    )
-}
-
-/// Shorten a path under the user's home so panels and the banner stay narrow.
-pub fn short_path(path: &std::path::Path) -> String {
-    std::env::var_os("HOME")
-        .and_then(|home| path.strip_prefix(home).ok())
-        .map_or_else(
-            || path.display().to_string(),
-            |relative| format!("~/{}", relative.display()),
-        )
-}
-
-pub fn banner(profile: &str, model: &str, workspace: &std::path::Path, session: &str, mode: &str) {
-    let width = (console::Term::stderr().size().1 as usize)
-        .saturating_sub(4)
-        .clamp(1, 76);
-    let fit = |text: &str| crate::input::layout::clip(&safe(text), width);
-    eprintln!(
-        "\n  {}  {}",
-        theme::accent("builder"),
-        theme::muted(env!("CARGO_PKG_VERSION"))
-    );
-    let profile = if profile.is_empty() { model } else { profile };
-    let session: String = session.chars().take(8).collect();
-    let workspace = short_path(workspace);
-    eprintln!("  {}", theme::title(&fit(&workspace)));
-    eprintln!("  {}", theme::muted(&fit(&format!("{profile} · {mode}"))));
-    eprintln!("  {}\n", theme::muted(&fit(&format!("session {session}"))));
-}
 pub struct Renderer {
     interactive: bool,
     started: bool,
@@ -825,30 +704,6 @@ fn token_count(tokens: usize) -> String {
     }
 }
 
-/// The user-facing record of a progress nudge. Shared with remote clients.
-pub fn nudge_line(
-    calls: usize,
-    step: Option<(usize, usize)>,
-    repeated_reads: usize,
-    planning: bool,
-) -> String {
-    let mut line = format!("{calls} actions without new evidence or a file change");
-    if repeated_reads > 0 {
-        line.push_str(&format!(
-            " · {repeated_reads} repeated read{}",
-            if repeated_reads == 1 { "" } else { "s" }
-        ));
-    }
-    match step {
-        Some((number, total)) => {
-            line.push_str(&format!(" · nudged back to todo step {number} of {total}"))
-        }
-        None if planning => line.push_str(" · no plan yet, nudged to write a todo list"),
-        None => line.push_str(" · nudged to act on what it found"),
-    }
-    line
-}
-
 fn compact_count(count: u64) -> String {
     if count < 1000 {
         count.to_string()
@@ -898,28 +753,6 @@ impl Drop for Renderer {
         self.clear_spinner();
     }
 }
-pub fn print_todos(list: &builder_core::todo::List) {
-    let width = (console::Term::stderr().size().1 as usize).clamp(20, 100);
-    eprintln!();
-    for line in todo::board(list, width) {
-        eprintln!("{line}");
-    }
-}
-pub fn approve(action: &Action) -> bool {
-    if !io::stdin().is_terminal() {
-        return false;
-    }
-    eprintln!(
-        "\n  {}\n{}",
-        style("◇ approval required").yellow().bold(),
-        safe(&action.description())
-    );
-    eprint!("  Allow this action? [y/N] ");
-    let _ = io::stderr().flush();
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "Y" | "yes")
-}
-
 #[cfg(test)]
 mod timing_tests {
     use super::*;
@@ -963,23 +796,5 @@ mod timing_tests {
             activity.label(std::time::Duration::from_secs(52)),
             "no data for 42s"
         );
-    }
-
-    #[test]
-    fn help_lists_every_composer_command_and_nothing_extra() {
-        let panel = console::strip_ansi_codes(&help(96)).into_owned();
-        let listed: std::collections::BTreeSet<&str> = panel
-            .lines()
-            .filter_map(|line| line.trim_start().strip_prefix('/'))
-            // The `/` row documents the command menu itself, not a command.
-            .filter(|rest| rest.starts_with(|c: char| c.is_ascii_alphabetic()))
-            .map(|line| line.split_whitespace().next().unwrap_or_default())
-            .collect();
-        let composer: std::collections::BTreeSet<&str> = crate::input::COMMANDS
-            .iter()
-            .map(|(command, _)| command.trim().trim_start_matches('/'))
-            .collect();
-        assert_eq!(listed, composer);
-        assert!(panel.contains("builder "), "{panel}");
     }
 }

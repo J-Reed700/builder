@@ -1,0 +1,10 @@
+{
+  "workspace": 76,
+  "src": 68,
+  "crates/builder-core": 90,
+  "crates/builder-embedding": 40,
+  "crates/builder-gateway": 72,
+  "crates/builder-provider": 90,
+  "crates/builder-remote-protocol": 100,
+  "crates/builder-tools": 87
+}

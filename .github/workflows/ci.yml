@@ -1,4 +1,4 @@
-name: Rust
+name: Tests
 on: [push, pull_request]
 permissions:
   contents: read
@@ -14,6 +14,18 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci
+      - name: Browser unit tests and coverage gates
+        run: npm test
+      - name: Coverage gate failure regressions
+        run: python tests/test_coverage_gate.py
       - name: Browser draft recovery regression
         run: node tests/remote_web.cjs
       - run: cargo fmt --all --check
@@ -34,6 +46,70 @@ jobs:
       - name: Real terminal compaction regression
         if: runner.os != 'Windows'
         run: python3 tests/terminal_compact.py
+      - name: Real terminal pipeline settings regression
+        if: runner.os != 'Windows'
+        run: python3 tests/terminal_pipeline.py
+      - name: Real terminal memory settings regression
+        if: runner.os != 'Windows'
+        run: python3 tests/terminal_memory.py
       - name: Docker remote-to-host regression
         if: runner.os == 'Linux'
         run: python3 tests/remote_container.py target/debug/builder
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: web-coverage-${{ matrix.os }}
+          path: coverage/web/
+          retention-days: 14
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium firefox webkit
+      - name: Real host browser journeys (desktop and phone layouts)
+        run: npm run test:browser
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-results
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      - name: Workspace, terminal and browser coverage with per-crate floors
+        run: python3 scripts/coverage.py --extended
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rust-coverage
+          path: coverage/rust/
+          retention-days: 14

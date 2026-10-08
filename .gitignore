@@ -31,6 +31,9 @@ venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+coverage/
+playwright-report/
+test-results/
 
 # Local evaluation and UI-capture output
 /docs/llm-eval-*.json

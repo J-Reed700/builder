@@ -74,6 +74,9 @@ for plain in (False, True):
                 path.write_text(path.read_text().replace('embedding_backend = "local"','embedding_backend = "lexical"'))
                 term.expect('Memory settings changed during setup', mark, timeout=60)
                 assert tomllib.loads(path.read_text())['memory']['embedding_backend'] == 'lexical'
+            mark = len(term.output)
+            term.send('/exit\r')
+            term.expect('Saved. Continue with', mark)
         finally:
             term.close()
         print('PASS:', 'plain' if plain else 'raw', 'memory menu; cached offline setup/conflicts' if assets else 'memory modes')

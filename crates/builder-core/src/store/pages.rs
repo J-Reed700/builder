@@ -1,5 +1,10 @@
 //! Bounded projections for external interfaces. Original transcript rows remain authoritative.
-use super::*;
+use super::{Session, Store};
+use crate::protocol::Message;
+use anyhow::{Context, Result, ensure};
+use rusqlite::{OptionalExtension, params};
+use serde::Serialize;
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize)]
 pub struct HistoryEntry {
