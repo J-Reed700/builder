@@ -2,7 +2,7 @@ use crate::{Activity, Event, OutputLimit, Provider, SseDecoder};
 use anyhow::{Context, Result, bail, ensure};
 use builder_core::protocol::Role;
 use builder_core::{
-    config::Profile,
+    config::{Profile, ReasoningHistory},
     protocol::{Function, Message, ToolCall},
 };
 use futures_util::StreamExt;
@@ -14,6 +14,9 @@ pub struct OpenAiCompatible {
     profile: Profile,
     headers: reqwest::header::HeaderMap,
     capacity: tokio::sync::OnceCell<Option<usize>>,
+    /// Derived requests (memory extraction) that must not spend their small
+    /// output budget on hidden reasoning.
+    suppress_thinking: bool,
 }
 
 #[derive(Debug)]
@@ -73,6 +76,14 @@ impl Failure {
 }
 
 impl OpenAiCompatible {
+    /// The same endpoint, with thinking switched off on servers that expose
+    /// the switch (llama.cpp's `chat_template_kwargs`, detected through `/props`
+    /// or an explicit `extra_body` entry). Used for memory extraction, whose
+    /// JSON budget hidden reasoning would otherwise consume.
+    pub fn without_thinking(mut self) -> Self {
+        self.suppress_thinking = true;
+        self
+    }
     pub fn new(profile: Profile) -> Result<Self> {
         profile.validate()?;
         let mut headers = reqwest::header::HeaderMap::new();
@@ -119,6 +130,7 @@ impl OpenAiCompatible {
             profile,
             headers,
             capacity: tokio::sync::OnceCell::new(),
+            suppress_thinking: false,
         })
     }
     fn request(&self, method: reqwest::Method, suffix: &str) -> reqwest::RequestBuilder {
@@ -436,11 +448,6 @@ impl OpenAiCompatible {
             .take_while(|m| m.role == Role::System)
             .count();
         let mut outbound = messages.to_vec();
-        // Reasoning is transcript-only: servers differ on whether they accept it
-        // back, and it would only inflate the prompt.
-        for message in &mut outbound {
-            message.reasoning = None;
-        }
         if leading > 1 {
             ensure!(
                 messages[..leading]
@@ -458,8 +465,38 @@ impl OpenAiCompatible {
             );
             outbound.splice(..leading, [system]);
         }
-        let prompt_bytes = serde_json::to_vec(&outbound)?.len();
-        let mut body = json!({"model": self.profile.model, "messages": outbound, "stream": self.profile.stream, "max_tokens": max_output_tokens});
+        // Earlier-turn reasoning normally stays transcript-only: servers differ
+        // on whether they accept it back, and it inflates the prompt. llama.cpp
+        // is the exception that matters: its templates keep `reasoning_content`
+        // in the rendered transcript and its prompt cache resumes only an
+        // append-only prefix, so stripping it rewrote the first assistant turn
+        // of every request and forced the whole conversation to be re-processed
+        // each round (20-40 s before the first token on a 30k-token chat).
+        let send_reasoning = match self.profile.reasoning_history {
+            ReasoningHistory::Send => true,
+            ReasoningHistory::Strip => false,
+            ReasoningHistory::Auto => self.parallel_capacity().await.is_some(),
+        };
+        let mut wire = Vec::with_capacity(outbound.len());
+        for message in &outbound {
+            let mut value = serde_json::to_value(message)?;
+            let object = value
+                .as_object_mut()
+                .expect("a message serializes as an object");
+            object.remove("reasoning");
+            if send_reasoning
+                && message.role == Role::Assistant
+                && let Some(text) = message
+                    .reasoning
+                    .as_deref()
+                    .filter(|t| !t.trim().is_empty())
+            {
+                object.insert("reasoning_content".into(), Value::String(text.to_owned()));
+            }
+            wire.push(value);
+        }
+        let prompt_bytes = serde_json::to_vec(&wire)?.len();
+        let mut body = json!({"model": self.profile.model, "messages": wire, "stream": self.profile.stream, "max_tokens": max_output_tokens});
         if self.profile.tools && !tools.is_empty() {
             body["tools"] = json!(tools);
         }
@@ -474,6 +511,17 @@ impl OpenAiCompatible {
         }
         for (key, value) in &self.profile.extra_body {
             body[key] = value.clone();
+        }
+        if self.suppress_thinking
+            && (self.profile.extra_body.contains_key("chat_template_kwargs")
+                || self.parallel_capacity().await.is_some())
+        {
+            // Only where the switch is understood: an explicit extra_body entry
+            // or a server that answered the llama.cpp probe.
+            if !body["chat_template_kwargs"].is_object() {
+                body["chat_template_kwargs"] = json!({});
+            }
+            body["chat_template_kwargs"]["enable_thinking"] = json!(false);
         }
         emit(Event::Prompt {
             bytes: prompt_bytes,

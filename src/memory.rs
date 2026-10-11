@@ -40,24 +40,15 @@ pub struct MemoryRuntime {
 }
 
 impl MemoryRuntime {
-    /// Extraction has a small JSON budget. For endpoints explicitly configured
-    /// with a thinking toggle, disable that toggle only on the derived request;
-    /// otherwise hidden reasoning can consume the entire findings budget.
+    /// Extraction has a small JSON budget, which hidden reasoning would consume
+    /// entirely. The derived provider switches thinking off wherever the switch
+    /// is understood (an explicit `chat_template_kwargs` entry, or a server that
+    /// answers llama.cpp's `/props` probe) — a profile no longer has to carry
+    /// the key for the switch to apply.
     pub fn extraction_provider(
         profile: &builder_core::config::Profile,
     ) -> Result<OpenAiCompatible> {
-        let mut profile = profile.clone();
-        if let Some(options) = profile
-            .extra_body
-            .get_mut("chat_template_kwargs")
-            .and_then(Value::as_object_mut)
-            && options
-                .get("enable_thinking")
-                .is_some_and(Value::is_boolean)
-        {
-            options.insert("enable_thinking".into(), json!(false));
-        }
-        OpenAiCompatible::new(profile)
+        Ok(OpenAiCompatible::new(profile.clone())?.without_thinking())
     }
     pub fn lexical() -> Self {
         Self {
