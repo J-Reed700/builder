@@ -233,8 +233,10 @@ async function refresh() {
     controls(); renderSessions();
     const allKey = states.map(s => s.run_id + ':' + s.phase).join('|');
     if (allKey !== runsKey) { runsKey = allKey; await sessions(); }
-    const s = state(), key = [s.run_id, s.phase, s.notices?.length, selected].join('|');
-    if (selected && (busy() || key !== historyKey)) { const version = epoch; await Promise.all([history(), metadata()]); if (version === epoch) historyKey = key; }
+    // The live preview comes from the status snapshot; the saved transcript is
+    // refetched only when the host says it moved, not on every poll while busy.
+    const s = state(), key = [s.run_id, s.phase, s.notices?.length, s.transcript_version, selected].join('|');
+    if (selected && key !== historyKey) { const version = epoch; await Promise.all([history(), metadata()]); if (version === epoch) historyKey = key; }
     maybeSendQueued();
   } catch (e) { if (token) error(e.message + ' · No action is automatically resubmitted.'); } finally { polling = false; }
 }

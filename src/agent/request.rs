@@ -148,29 +148,37 @@ impl<P: Provider> Agent<P> {
             output_budget,
             self.profile.context_tokens
         );
+        // The capacity notice depends only on the server and the settings,
+        // so it is identical every round and joins the stable system block.
         if let Some(notice) = parallel_notice {
             messages.insert(0, notice.clone());
         }
-        if let Some(notice) = budget_notice {
-            messages.insert(0, notice);
-        }
-        if let Some(packet) = todo_packet {
-            messages.insert(0, packet);
-        }
-        if let Some(packet) = research_packet {
-            messages.insert(0, packet);
-        }
-        if let Some(packet) = memory_packet {
-            messages.insert(0, packet);
+        // Everything else that is request-only trails the durable history.
+        // Each of these is regenerated per round (recall for the latest
+        // message, research status, todos, budget), so placing them first
+        // changed the prompt prefix on every request and defeated the
+        // server's prompt cache: on llama.cpp that was a full re-process of
+        // the transcript each round. The saved history is append-only, so
+        // it stays cached; policy comes first within the trailing block and
+        // the labelled continuation last, reinforcing the next action
+        // without touching durable history.
+        if let Some(guidance) = guidance {
+            messages.push(guidance);
         }
         if let Some(packet) = code_packet {
-            messages.insert(0, packet);
+            messages.push(packet);
         }
-        if let Some(guidance) = guidance {
-            // Request-only runtime policy, regenerated from durable evidence.
-            // Keep runtime policy before task data; the labelled continuation
-            // below reinforces the next action without changing durable history.
-            messages.insert(0, guidance);
+        if let Some(packet) = memory_packet {
+            messages.push(packet);
+        }
+        if let Some(packet) = research_packet {
+            messages.push(packet);
+        }
+        if let Some(packet) = todo_packet {
+            messages.push(packet);
+        }
+        if let Some(notice) = budget_notice {
+            messages.push(notice);
         }
         if let Some(continuation) = continuation {
             messages.push(continuation);

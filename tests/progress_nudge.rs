@@ -193,7 +193,17 @@ async fn halfway_reminder_suggests_a_plan_with_every_tool_still_available() {
     fixture.reads("a.txt", 3);
     fixture.reads("./b.txt", 2);
     let (requests, _) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
-    assert_eq!(requests[0].0.last().unwrap().role, Role::Tool);
+    // Below the halfway mark: request-only packets may trail the history, but
+    // no runtime note does.
+    assert!(!last_text(&requests[0]).starts_with("[Builder runtime note"));
+    assert!(requests[0].0.iter().all(|m| {
+        m.role != Role::User
+            || !m
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("[Builder runtime note")
+    }));
 
     let mut fixture = Fixture::new();
     fixture.reads("a.txt", 3);
@@ -569,4 +579,32 @@ async fn evidence_already_seen_stays_seen_after_continue() {
         text.contains("Progress check: 12 calls without new inspection evidence"),
         "{text}"
     );
+}
+
+/// The saved history is a prefix of every request. Request-only context
+/// (guidance, packets, budget notice, continuation) is regenerated per round,
+/// so it trails the history; placing it first would change the prompt prefix
+/// every round and defeat a server's prompt cache.
+#[tokio::test]
+async fn saved_history_is_the_prefix_of_every_request() {
+    let mut fixture = Fixture::new();
+    fixture.reads("a.txt", 3);
+    fixture.reads("./b.txt", 7);
+    let history = fixture.store.messages(&fixture.session).unwrap();
+    let (requests, _) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
+    let request = &requests[0].0;
+    assert!(request.len() > history.len(), "a runtime note was expected");
+    // Only stable, per-session system notices may precede the history (they
+    // merge into the system block); the history itself is contiguous and
+    // untouched; everything after it is request-only.
+    let start = request.iter().position(|m| m == &history[0]).unwrap();
+    assert!(request[..start].iter().all(|m| m.role == Role::System));
+    assert_eq!(&request[start..start + history.len()], &history[..]);
+    assert_eq!(history[0].content.as_deref(), Some(SYSTEM));
+    assert!(
+        request[start + history.len()..]
+            .iter()
+            .all(|m| m.tool_call_id.is_none())
+    );
+    assert!(last_text(&requests[0]).starts_with("[Builder runtime note"));
 }

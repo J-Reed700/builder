@@ -35,6 +35,9 @@ pub struct Profile {
     pub connect_timeout_secs: u64,
     pub idle_timeout_secs: u64,
     pub request_timeout_secs: u64,
+    /// Whether earlier-turn reasoning is sent back with the history. See
+    /// [`ReasoningHistory`].
+    pub reasoning_history: ReasoningHistory,
 }
 impl Default for Profile {
     fn default() -> Self {
@@ -58,8 +61,27 @@ impl Default for Profile {
             connect_timeout_secs: 10,
             idle_timeout_secs: 90,
             request_timeout_secs: 900,
+            reasoning_history: ReasoningHistory::Auto,
         }
     }
+}
+/// What happens to an assistant turn's reasoning when the history goes back
+/// to the server.
+///
+/// llama.cpp keeps `reasoning_content` in the rendered transcript (Qwen's
+/// `preserve_thinking`), and its prompt cache can only resume an append-only
+/// prefix: strip the reasoning and the first assistant turn of every request
+/// no longer matches what the server generated, so the whole conversation is
+/// re-processed each round. Other servers may reject the field, and it only
+/// inflates their prompt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningHistory {
+    /// Send it to servers that answer llama.cpp's `/props` probe; strip it elsewhere.
+    #[default]
+    Auto,
+    Send,
+    Strip,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

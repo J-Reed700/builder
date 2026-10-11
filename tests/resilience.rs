@@ -14,6 +14,20 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// The newest message of a role in a captured request. Request-only context
+/// (runtime guidance, research/memory packets, budget notes) trails the saved
+/// history so the prompt prefix stays cacheable, so `.last()` is no longer
+/// "the newest history message".
+fn last_of<'a>(request: &'a serde_json::Value, role: &str) -> &'a serde_json::Value {
+    request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|m| m["role"] == role)
+        .unwrap()
+}
+
 type Responses = VecDeque<(StatusCode, String)>;
 #[derive(Clone)]
 struct Mock {
@@ -214,14 +228,15 @@ async fn progress_check_preserves_large_context_and_clears_after_edit() {
         requests[0]["messages"][0]["content"]
             .as_str()
             .unwrap()
-            .ends_with("\n\nsystem")
+            .ends_with("system")
     );
-    assert!(
-        requests[0]["messages"][0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("Runtime progress check: the configured number")
-    );
+    assert!(requests[0]["messages"].as_array().unwrap().iter().any(|m| {
+        m["role"] == "system"
+            && m["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Runtime progress check: the configured number")
+    }));
     // The count and the read history change every round, so they travel in
     // the trailing continuation instead of the cached leading system block.
     let nudge = recovered.last().unwrap()["content"].as_str().unwrap();
@@ -1714,15 +1729,11 @@ async fn giant_read_returns_a_bounded_opening_then_a_targeted_read() {
         .unwrap();
     let requests = server.mock.requests.lock().unwrap();
     assert_eq!(requests.len(), 3);
-    let broad_result = requests[1]["messages"].as_array().unwrap().last().unwrap()["content"]
-        .as_str()
-        .unwrap();
+    let broad_result = last_of(&requests[1], "tool")["content"].as_str().unwrap();
     assert!(broad_result.contains("large file"));
     assert!(broad_result.contains("  200|source line 200"));
     assert!(!broad_result.contains("source line 201"));
-    let narrow_result = requests[2]["messages"].as_array().unwrap().last().unwrap()["content"]
-        .as_str()
-        .unwrap();
+    let narrow_result = last_of(&requests[2], "tool")["content"].as_str().unwrap();
     assert!(narrow_result.contains("  490|source line 490"));
     assert!(narrow_result.contains("  510|source line 510"));
     assert!(!narrow_result.contains("source line 511"));
@@ -2359,9 +2370,7 @@ async fn cli_auto_approves_mutations_while_default_denies_without_a_terminal() {
             );
         }
         let requests = server.mock.requests.lock().unwrap();
-        let result = requests[1]["messages"].as_array().unwrap().last().unwrap()["content"]
-            .as_str()
-            .unwrap();
+        let result = last_of(&requests[1], "tool")["content"].as_str().unwrap();
         assert_eq!(result.starts_with("DENIED:"), !auto);
     }
 }
@@ -2461,7 +2470,7 @@ async fn follow_up_after_interruption_cancels_queued_tools_and_uses_new_instruct
     assert_eq!(requests.len(), 1);
     let messages = requests[0]["messages"].as_array().unwrap();
     assert_eq!(
-        messages.last().unwrap()["content"],
+        last_of(&requests[0], "user")["content"],
         "Write a detailed handoff document instead"
     );
     let result = messages.iter().find(|m| m["role"] == "tool").unwrap();
@@ -2572,7 +2581,7 @@ async fn rewind_excludes_abandoned_turn_and_reserves_its_tool_ids() {
             .iter()
             .any(|m| m["content"] == "abandoned task" || m["role"] == "tool")
     );
-    assert_eq!(context.last().unwrap()["content"], "revised task");
+    assert_eq!(last_of(&requests[0], "user")["content"], "revised task");
     assert!(
         store
             .archived_messages(&session)
@@ -2657,7 +2666,7 @@ async fn auto_compaction_preserves_tool_evidence_originals_and_latest_instructio
         Some("instructions stay exact")
     );
     assert_eq!(
-        requests[1]["messages"].as_array().unwrap().last().unwrap()["content"],
+        last_of(&requests[1], "user")["content"],
         "Verify the tests now."
     );
     assert!(
@@ -3571,12 +3580,15 @@ async fn recovery_resolves_queued_batch_and_retains_denials_without_granting_per
     assert!(!home.path().join("result.txt").exists());
     let requests = server.mock.requests.lock().unwrap();
     assert!(requests[0]["messages"].to_string().contains("DENIED:"));
-    assert!(
-        requests[1]["messages"][0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("Runtime progress check")
-    );
+    // Runtime guidance is request-only and trails the saved history (it is
+    // regenerated every round; the prefix stays cacheable).
+    assert!(requests[1]["messages"].as_array().unwrap().iter().any(|m| {
+        m["role"] == "system"
+            && m["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Runtime progress check")
+    }));
     assert!(store.archived_messages(&session).unwrap().is_empty());
     assert!(!pending(&store.messages(&session).unwrap()));
 }

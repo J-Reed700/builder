@@ -487,6 +487,13 @@ async fn drive(
 
 fn event_update(run: &Run, event: AgentEvent) {
     let mut state = run.snapshot.lock().unwrap();
+    if !matches!(
+        event,
+        AgentEvent::Model(Event::Delta(_) | Event::Reasoning(_))
+            | AgentEvent::CompactionProgress { .. }
+    ) {
+        state.transcript_version += 1;
+    }
     match event {
         AgentEvent::Model(Event::Delta(text)) => {
             if state.preview.len() + text.len() <= 64 * 1024 {

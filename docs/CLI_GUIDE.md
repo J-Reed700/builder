@@ -146,7 +146,17 @@ max_attempts = 5
 connect_timeout_secs = 10
 idle_timeout_secs = 90
 request_timeout_secs = 900
+# "auto" (default) | "send" | "strip" — see below
+reasoning_history = "auto"
 ```
+
+`reasoning_history` decides whether an assistant turn's reasoning
+(`reasoning_content`) goes back to the server with the history. `auto` sends
+it to servers that answer llama.cpp's `/props` probe and strips it elsewhere.
+llama.cpp needs it: its templates keep the reasoning in the rendered transcript
+and its prompt cache resumes only an append-only prefix, so a stripped
+transcript re-processes the whole conversation on every round. Memory
+extraction requests always run with thinking switched off on such servers.
 
 ### Import Continue or OpenCode models
 
