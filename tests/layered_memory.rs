@@ -110,7 +110,7 @@ async fn repeated_updates_restart_retrieval_and_rewind_keep_sources_and_bound_co
         workspace: Workspace::new(temp.path())?,
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
-        max_rounds: 1,
+        max_rounds: Some(1),
     };
     let mut last_through = 0;
     for cycle in 0..4 {
@@ -203,7 +203,7 @@ async fn invalid_extraction_does_not_install_partial_memory_or_summary() -> Resu
         workspace: Workspace::new(temp.path())?,
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
-        max_rounds: 1,
+        max_rounds: Some(1),
     };
     assert!(agent.compact(&mut store, &mut |_| {}).await.is_err());
     assert_eq!(store.messages(&session)?, before);
@@ -252,7 +252,7 @@ async fn live_repeated_memory_correction_retrieval_and_abstention() -> Result<()
         workspace: Workspace::new(temp.path())?,
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
-        max_rounds: 12,
+        max_rounds: Some(12),
     };
     let started = std::time::Instant::now();
     let mut checkpoints = Vec::new();
@@ -377,7 +377,7 @@ async fn a_marker_in_the_verbatim_checkpoint_tail_is_not_internal_memory() -> Re
         workspace: Workspace::new(temp.path())?,
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
-        max_rounds: 1,
+        max_rounds: Some(1),
     };
     assert!(agent.compact(&mut store, &mut |_| {}).await?);
     assert!(
@@ -460,7 +460,7 @@ async fn live_history_tools_accept_parameterized_operations() -> Result<()> {
         workspace: Workspace::new(temp.path())?,
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
-        max_rounds: 8,
+        max_rounds: Some(8),
     };
     let result = agent.run(&mut store, &mut |_| {}, &mut |_| false).await;
     let history = store.history_messages(&session)?;

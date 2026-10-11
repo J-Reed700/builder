@@ -95,6 +95,38 @@ impl Fixture {
             .unwrap();
     }
 
+    fn say(&mut self, text: &str) {
+        self.store
+            .append(&self.session, &Message::text(Role::User, text))
+            .unwrap();
+    }
+
+    fn plan(&mut self, current: usize) {
+        let todos = (1..=3)
+            .map(|n| {
+                let status = match n.cmp(&current) {
+                    std::cmp::Ordering::Less => "completed",
+                    std::cmp::Ordering::Equal => "in_progress",
+                    std::cmp::Ordering::Greater => "pending",
+                };
+                json!({"content": format!("edit part {n}"), "status": status})
+            })
+            .collect::<Vec<_>>();
+        self.record(
+            "todo_write",
+            json!({ "todos": todos }),
+            ToolOutcome::Succeeded,
+        );
+    }
+
+    /// Reads of files never read before, so every one is new evidence.
+    fn fresh_reads(&mut self, count: usize) {
+        for _ in 0..count {
+            let path = format!("src/file{}.rs", self.calls);
+            self.record("read_file", json!({ "path": path }), ToolOutcome::Succeeded);
+        }
+    }
+
     fn reads(&mut self, path: &str, count: usize) {
         for _ in 0..count {
             self.record("read_file", json!({ "path": path }), ToolOutcome::Succeeded);
@@ -117,14 +149,17 @@ impl Fixture {
             session: self.session.clone(),
             approval,
             // Above the final-rounds budget notice, which varies per round.
-            max_rounds: 20,
+            max_rounds: Some(20),
         };
         let mut events = Vec::new();
         agent
             .run(
                 &mut self.store,
                 &mut |event| {
-                    if matches!(event, AgentEvent::ProgressNudge { .. }) {
+                    if matches!(
+                        event,
+                        AgentEvent::ProgressNudge { .. } | AgentEvent::EditFocus { .. }
+                    ) {
                         events.push(event);
                     }
                 },
@@ -338,4 +373,200 @@ async fn read_only_sessions_are_nudged_to_answer_instead_of_plan() {
             ..
         }]
     ));
+}
+
+#[tokio::test]
+async fn a_run_has_no_round_budget_unless_one_is_requested() {
+    let mut f = Fixture::new();
+    // Twenty more rounds than the retired default of 100, each with new
+    // evidence, so only a round budget could stop the run.
+    let rounds = 120;
+    let mut replies = Vec::new();
+    for n in 0..rounds {
+        let path = format!("part{n}.txt");
+        std::fs::write(f.root.path().join(&path), format!("part {n}\n")).unwrap();
+        replies.push(call(&format!("r{n}"), "read_file", json!({ "path": path })));
+    }
+    replies.push(done());
+    let agent = Agent {
+        provider: Replies {
+            replies: Mutex::new(replies),
+            requests: Mutex::new(Vec::new()),
+        },
+        memory: None,
+        profile: Profile {
+            context_tokens: 400_000,
+            auto_compact: false,
+            ..Profile::default()
+        },
+        workspace: Workspace::new(f.root.path()).unwrap(),
+        session: f.session.clone(),
+        approval: ApprovalMode::Trust,
+        max_rounds: None,
+    };
+    agent
+        .run(&mut f.store, &mut |_| {}, &mut |_| true)
+        .await
+        .unwrap();
+    assert_eq!(agent.provider.requests.lock().unwrap().len(), rounds + 1);
+    assert_eq!(
+        f.store
+            .messages(&f.session)
+            .unwrap()
+            .last()
+            .and_then(|message| message.content.as_deref()),
+        Some("done")
+    );
+}
+
+const EDITS: [&str; 4] = ["write_file", "edit_file", "multi_edit", "todo_write"];
+const CIRCLING: [&str; 4] = ["list_files", "search", "subagent", "shell"];
+
+fn assert_offers(request: &Request, offered: &[&str], withheld: &[&str]) {
+    let tools = tool_names(request);
+    for name in offered {
+        assert!(tools.contains(name), "{name} missing from {tools:?}");
+    }
+    for name in withheld {
+        assert!(!tools.contains(name), "{name} still offered in {tools:?}");
+    }
+}
+
+#[tokio::test]
+async fn new_reads_do_not_hide_a_step_that_never_reaches_an_edit() {
+    let mut fixture = Fixture::new();
+    fixture.plan(2);
+    fixture.fresh_reads(15);
+    let (requests, events) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
+    assert_offers(&requests[0], &CIRCLING, &[]);
+    assert!(events.is_empty(), "{events:?}");
+
+    let mut fixture = Fixture::new();
+    fixture.plan(2);
+    fixture.fresh_reads(16);
+    let (requests, events) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
+    assert_offers(&requests[0], &[&EDITS[..], &["read_file"]].concat(), &CIRCLING);
+    let text = last_text(&requests[0]);
+    assert!(
+        text.contains("Todo item 2 of 3 (edit part 2) has taken 16 tool calls without a file change"),
+        "{text}"
+    );
+    assert!(text.contains("Search, shell and subagents are paused"), "{text}");
+    assert!(
+        matches!(
+            events.as_slice(),
+            [AgentEvent::EditFocus {
+                calls: 16,
+                step: (2, 3),
+                reads: true,
+            }]
+        ),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn at_twice_the_focus_budget_only_edits_and_plan_updates_remain() {
+    let mut fixture = Fixture::new();
+    fixture.plan(1);
+    fixture.fresh_reads(32);
+    let (requests, events) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
+    assert_offers(&requests[0], &EDITS, &[&CIRCLING[..], &["read_file"]].concat());
+    let text = last_text(&requests[0]);
+    assert!(text.contains("Only edits and todo_write are available"), "{text}");
+    assert!(text.contains("tell the user the concrete blocker"), "{text}");
+    assert!(matches!(
+        events.as_slice(),
+        [AgentEvent::EditFocus { calls: 32, reads: false, .. }]
+    ));
+}
+
+#[tokio::test]
+async fn continue_does_not_reset_the_focus_budget() {
+    let mut fixture = Fixture::new();
+    fixture.plan(1);
+    fixture.fresh_reads(10);
+    fixture.say("continue");
+    fixture.fresh_reads(6);
+    let (requests, _) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
+    assert_offers(&requests[0], &EDITS, &CIRCLING);
+    assert!(last_text(&requests[0]).contains("has taken 16 tool calls"));
+}
+
+#[tokio::test]
+async fn an_edit_or_a_completed_step_restores_every_tool() {
+    let mut fixture = Fixture::new();
+    fixture.plan(1);
+    fixture.fresh_reads(40);
+    fixture.record(
+        "write_file",
+        json!({"path":"a.txt","content":"new\n"}),
+        ToolOutcome::Changed,
+    );
+    fixture.fresh_reads(3);
+    let (requests, events) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
+    assert_offers(&requests[0], &CIRCLING, &[]);
+    assert!(events.is_empty(), "{events:?}");
+
+    let mut fixture = Fixture::new();
+    fixture.plan(1);
+    fixture.fresh_reads(40);
+    fixture.plan(2);
+    fixture.fresh_reads(3);
+    let (requests, _) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
+    assert_offers(&requests[0], &CIRCLING, &[]);
+
+    // Rewriting the list without moving its current item is not progress.
+    let mut fixture = Fixture::new();
+    fixture.plan(1);
+    fixture.fresh_reads(10);
+    fixture.plan(1);
+    fixture.fresh_reads(5);
+    let (requests, _) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
+    assert!(last_text(&requests[0]).contains("has taken 16 tool calls"));
+}
+
+#[tokio::test]
+async fn a_failed_edit_brings_reads_back_so_it_can_be_rebuilt() {
+    let mut fixture = Fixture::new();
+    fixture.plan(1);
+    fixture.fresh_reads(32);
+    fixture.record(
+        "edit_file",
+        json!({"path":"a.txt","old":"gamma","new":"delta"}),
+        ToolOutcome::Failed,
+    );
+    let (requests, _) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
+    assert_offers(&requests[0], &[&EDITS[..], &["read_file"]].concat(), &CIRCLING);
+    assert!(last_text(&requests[0]).contains("your last edit failed"));
+}
+
+#[tokio::test]
+async fn read_only_sessions_and_sessions_without_a_plan_keep_their_tools() {
+    let mut fixture = Fixture::new();
+    fixture.plan(1);
+    fixture.fresh_reads(40);
+    let (requests, events) = fixture.run(ApprovalMode::ReadOnly, vec![done()]).await;
+    assert!(tool_names(&requests[0]).contains(&"read_file"));
+    assert!(events.is_empty(), "{events:?}");
+
+    let mut fixture = Fixture::new();
+    fixture.fresh_reads(40);
+    let (requests, events) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
+    assert_offers(&requests[0], &CIRCLING, &[]);
+    assert!(events.is_empty(), "{events:?}");
+}
+
+#[tokio::test]
+async fn evidence_already_seen_stays_seen_after_continue() {
+    let mut fixture = Fixture::new();
+    fixture.reads("a.txt", 3);
+    fixture.say("continue");
+    fixture.reads("a.txt", 12);
+    let (requests, _) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
+    let text = last_text(&requests[0]);
+    assert!(
+        text.contains("Progress check: 12 calls without new inspection evidence"),
+        "{text}"
+    );
 }

@@ -1,6 +1,7 @@
 //! Streaming model/tool rendering and RAII progress indicators.
 use super::{nudge_line, print_todos, safe, stream, theme};
-use crate::agent::{AgentEvent, SummaryStage};
+use crate::agent::{AgentEvent, SubagentActivity, SummaryStage};
+use crate::presentation::{edit_focus_line, subagent_activity, subagent_round};
 use builder_provider::{Activity, Event};
 use console::style;
 use std::{
@@ -36,7 +37,9 @@ pub struct Renderer {
 struct SubagentStatus {
     description: String,
     actions: usize,
-    activity: String,
+    round: usize,
+    reporting: bool,
+    activity: SubagentActivity,
 }
 
 const NO_MODEL_ACTIVITY: u64 = u64::MAX;
@@ -241,6 +244,14 @@ impl Renderer {
                     theme::warning(&nudge_line(calls, step, repeated_reads, planning))
                 );
             }
+            AgentEvent::EditFocus { calls, step, reads } => {
+                self.finish_stream();
+                self.clear_spinner();
+                eprintln!(
+                    "\n  {}",
+                    theme::warning(&edit_focus_line(calls, step, reads))
+                );
+            }
             AgentEvent::OutputRecovery { budget } => {
                 self.finish_stream();
                 self.clear_spinner();
@@ -281,8 +292,7 @@ impl Renderer {
                         self.tool_started_at = Some(std::time::Instant::now());
                     }
                     self.running.push((name, detail));
-                    let message = self.running_message();
-                    self.start_spinner(message, false);
+                    self.start_running_spinner();
                 }
             }
             AgentEvent::ToolFinished {
@@ -309,22 +319,35 @@ impl Renderer {
                     if failed || name != builder_core::todo::TOOL {
                         self.print_tool_result(&name, &detail, note.as_deref(), failed, elapsed);
                     }
+                    // The rest of a parallel group, often slow subagents, keeps
+                    // a live status line.
+                    if !self.running.is_empty() {
+                        self.start_running_spinner();
+                    }
                 }
             }
             AgentEvent::SubagentProgress {
                 call_id,
                 description,
                 actions,
+                round,
+                reporting,
                 activity,
             } => {
+                let live = activity.is_live();
                 self.subagents.insert(
                     call_id,
                     SubagentStatus {
                         description,
                         actions,
+                        round,
+                        reporting,
                         activity,
                     },
                 );
+                if live {
+                    self.record_model_activity();
+                }
                 let message = self.running_message();
                 if let Some(spinner) = &self.spinner {
                     spinner.set_message(self.fit(&message, 14));
@@ -337,6 +360,23 @@ impl Renderer {
                     print_todos(&list);
                 }
             }
+        }
+    }
+    /// The status line for running tools. A redraw keeps the group's elapsed
+    /// time, and while a subagent runs it says whether its model is sending.
+    fn start_running_spinner(&mut self) {
+        self.clear_spinner();
+        let message = self.running_message();
+        let subagent = self
+            .running
+            .iter()
+            .any(|(name, _)| name == builder_tools::SUBAGENT_TOOL);
+        self.start_spinner(message, subagent);
+        if let Some(started) = self.tool_started_at {
+            self.spinner = self
+                .spinner
+                .take()
+                .map(|spinner| spinner.with_elapsed(started.elapsed()));
         }
     }
     /// One spinner line for whatever is running: a single tool, a parallel
@@ -357,15 +397,18 @@ impl Renderer {
                 }
             }
             ([_], Some(status)) => format!(
-                "Subagent  {} · {} actions · {} · ctrl+c cancel",
-                status.description, status.actions, status.activity
+                "Subagent  {} · {} · {} actions · {} · ctrl+c cancel",
+                status.description,
+                subagent_round(status.round, status.reporting),
+                status.actions,
+                subagent_activity(&status.activity)
             ),
             (running, Some(status)) => format!(
                 "{} running ({subagents} subagents, {} actions) · {}: {} · ctrl+c cancel",
                 running.len(),
                 self.subagents.values().map(|s| s.actions).sum::<usize>(),
                 status.description,
-                status.activity
+                subagent_activity(&status.activity)
             ),
             (running, None) => format!(
                 "Running {} actions in parallel · ctrl+c cancel",

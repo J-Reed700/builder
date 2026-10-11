@@ -161,12 +161,6 @@ const FIELDS: &[Field] = &[
         "Agent",
     ),
     (
-        "max_rounds",
-        "Agent rounds per run",
-        "1–1000 model rounds per run or /retry; default 100. Loop guards remain active. Saving replaces any command-line round override in this session.",
-        "Agent",
-    ),
-    (
         "parallel_tools",
         "Parallel read-only tools",
         "1–32 consecutive reads, searches and subagents run at once; 1 runs every tool in order.",
@@ -179,12 +173,6 @@ const FIELDS: &[Field] = &[
         "Agent",
     ),
     (
-        "subagent_rounds",
-        "Subagent rounds",
-        "1–200 model rounds per subagent before it must report what it found.",
-        "Agent",
-    ),
-    (
         "progress_check_calls",
         "Progress check after calls",
         "1–1000 completed tools without new inspection evidence or a file change before the progress nudge. A lighter planning reminder starts at half this.",
@@ -194,6 +182,12 @@ const FIELDS: &[Field] = &[
         "progress_recovery_rounds",
         "Progress recovery rounds",
         "1–1000 guided model rounds before a tool-free conclusion. The call ceiling is this plus Progress check after calls.",
+        "Loop guards",
+    ),
+    (
+        "edit_focus_calls",
+        "Edit focus after calls",
+        "1–1000 tools on one todo item without a file change before search and shell pause; reads pause at twice this. Plan progress resets it, a new message does not.",
         "Loop guards",
     ),
     (
@@ -945,7 +939,8 @@ mod tests {
         menu.key(key(KeyCode::Char('/')));
         typed(&mut menu, "subagent");
         let visible = menu.visible();
-        assert_eq!(visible.len(), 3 + ACTIONS.len(), "{visible:?}");
+        // Subagents and Concurrent subagents.
+        assert_eq!(visible.len(), 2 + ACTIONS.len(), "{visible:?}");
         assert!(visible.contains(&SAVE) && visible.contains(&CANCEL));
         assert!(menu.visible().contains(&menu.selected));
         // Stepping wraps through the matches and the actions, never a hidden row.

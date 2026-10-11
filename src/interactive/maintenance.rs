@@ -367,7 +367,7 @@ mod tests {
             workspace,
             session,
             approval: ApprovalMode::ReadOnly,
-            max_rounds: 2,
+            max_rounds: Some(2),
         };
         let mut task = start_memory_task(&agent, home.path(), &config);
         assert_eq!(

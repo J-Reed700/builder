@@ -1,14 +1,17 @@
 //! Model-round orchestration. Persist only complete, validated responses.
 use super::guard::{
     ToolGuardViolation, blocked_outcome_name, failed_tool_streak, invalid_tool_call_id,
-    no_progress_streak, structurally_valid_tool_call, tool_guard_state, tool_guard_violation,
-    tool_phase,
+    no_progress_streak, step_focus, structurally_valid_tool_call, tool_guard_state,
+    tool_guard_violation, tool_phase,
 };
 use super::progress::{
-    Nudge, ReadLog, planning_reminder, progress_guidance, progress_nudge, todo_continuation,
-    todo_packet,
+    Focus, FocusStage, Nudge, ReadLog, edit_focus, planning_reminder, progress_guidance,
+    progress_nudge, todo_continuation, todo_packet,
 };
-use super::{Agent, AgentEvent, ApprovalMode, pending, request::RequestContext, subagent_slots};
+use super::{
+    Agent, AgentEvent, ApprovalMode, estimate_tokens, pending, request::RequestContext,
+    subagent_slots,
+};
 use anyhow::{Result, bail, ensure};
 use builder_core::{
     protocol::{Message, Role},
@@ -17,12 +20,36 @@ use builder_core::{
 use builder_provider::{Event, OutputLimit, Provider};
 use builder_tools::Action;
 
+/// How a run ends at an explicit round cap or, for a reporting run, a full
+/// context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BudgetEnd {
+    /// Stop with the last requested calls saved for `/retry`.
+    Pause,
+    /// Run the last round's calls and return, leaving the caller to ask for
+    /// the answer. A run whose only product is that answer, such as a
+    /// subagent's report, returns where it would otherwise compact:
+    /// summarizing costs a slow local model many minutes and drops the detail
+    /// the answer needs. Its profile should disable automatic compaction.
+    Report,
+}
+
 impl<P: Provider> Agent<P> {
     pub async fn run(
         &self,
         store: &mut Store,
         emit: &mut dyn FnMut(AgentEvent),
         approve: &mut dyn FnMut(&Action) -> bool,
+    ) -> Result<()> {
+        self.run_until(store, emit, approve, BudgetEnd::Pause).await
+    }
+
+    pub(super) async fn run_until(
+        &self,
+        store: &mut Store,
+        emit: &mut dyn FnMut(AgentEvent),
+        approve: &mut dyn FnMut(&Action) -> bool,
+        budget_end: BudgetEnd,
     ) -> Result<()> {
         if !pending(&store.messages(&self.session)?) {
             return Ok(());
@@ -52,13 +79,25 @@ impl<P: Provider> Agent<P> {
         let mut failure_recoveries = 0;
         let mut conclusion_rejections = 0;
         let mut nudged = 0;
-        for round in 0..self.max_rounds {
+        let mut focused = None;
+        for round in 0.. {
+            if self.max_rounds.is_some_and(|cap| round >= cap) {
+                break;
+            }
             self.recover_tools(store, emit, approve).await?;
             if !pending(&store.messages(&self.session)?) {
                 return Ok(());
             }
             let messages = store.messages(&self.session)?;
             if !pending(&messages) {
+                return Ok(());
+            }
+            // Room for the answer and its one larger retry.
+            if budget_end == BudgetEnd::Report
+                && estimate_tokens(&messages) + 2 * output_budget
+                    >= self.profile.context_tokens * usize::from(self.profile.compact_at_percent)
+                        / 100
+            {
                 return Ok(());
             }
             // Use original, unrewound history: compaction and process restarts
@@ -84,6 +123,40 @@ impl<P: Provider> Agent<P> {
                 .filter(|list| !list.is_finished());
             let reads = ReadLog::new(&history, &outcomes, &messages);
             let can_edit = self.approval != ApprovalMode::ReadOnly;
+            // A text nudge does not stop a model that keeps reading, so an
+            // unfinished step that has gone long without an edit loses the
+            // tools it is circling with, in two stages.
+            let step = step_focus(&history, &outcomes);
+            let edit_focus_calls = self.profile.pipeline.edit_focus_calls;
+            let focus = todos
+                .as_ref()
+                .filter(|_| can_edit && step.calls >= edit_focus_calls)
+                .and_then(|list| {
+                    let (number, item) = list.current()?;
+                    let stage = if step.calls >= edit_focus_calls.saturating_mul(2) {
+                        FocusStage::Edit
+                    } else {
+                        FocusStage::Read
+                    };
+                    Some(Focus {
+                        stage,
+                        calls: step.calls,
+                        step: (number, list.items.len()),
+                        item: item.content.trim(),
+                        edit_failed: step.edit_failed,
+                        reads: &reads,
+                    })
+                });
+            if focus.as_ref().map(|focus| focus.stage) > focused {
+                if let Some(focus) = &focus {
+                    emit(AgentEvent::EditFocus {
+                        calls: focus.calls,
+                        step: focus.step,
+                        reads: focus.stage == FocusStage::Read,
+                    });
+                }
+            }
+            focused = focus.as_ref().map(|focus| focus.stage);
             let mut force_conclusion = false;
             let mut guidance = if no_progress_calls >= max_no_progress_calls {
                 force_conclusion = true;
@@ -114,7 +187,7 @@ impl<P: Provider> Agent<P> {
                 // Tell the user once per multiple of the check, including
                 // after /retry, so a stalling run stays visible.
                 let bucket = no_progress_calls / progress_check_calls;
-                if bucket > nudged {
+                if bucket > nudged && focus.is_none() {
                     nudged = bucket;
                     emit(AgentEvent::ProgressNudge {
                         calls: no_progress_calls,
@@ -162,6 +235,7 @@ impl<P: Provider> Agent<P> {
                     None => Message::text(Role::System, warning),
                 });
             }
+            let remaining = self.max_rounds.map(|cap| cap - round);
             // The liveness boundary must be mechanical. A text instruction to
             // stop using tools is not enough for a model that keeps calling
             // them, and pausing first makes /retry repeat the same failure.
@@ -180,7 +254,14 @@ impl<P: Provider> Agent<P> {
                 if self.memory.is_some() {
                     tools.extend(crate::memory::definitions());
                 }
-                if restrict_discovery {
+                if let Some(focus) = &focus {
+                    let reads = focus.stage == FocusStage::Read || focus.edit_failed;
+                    tools.retain(|definition| {
+                        definition["function"]["name"].as_str().is_some_and(|name| {
+                            focus.stage.offers(name) || (reads && name == "read_file")
+                        })
+                    });
+                } else if restrict_discovery {
                     tools.retain(|definition| {
                         !matches!(
                             definition["function"]["name"].as_str(),
@@ -195,7 +276,9 @@ impl<P: Provider> Agent<P> {
             let planning = self.profile.tools && self.profile.pipeline.todos && can_edit;
             // Everything that changes from round to round goes last, so an
             // endpoint's prompt cache survives a long recovery.
-            let continuation = if guidance.is_some() {
+            let continuation = if let Some(focus) = focus.as_ref().filter(|_| !force_conclusion) {
+                Some(Message::text(Role::User, edit_focus(focus)))
+            } else if guidance.is_some() {
                 let mut text = if force_conclusion {
                     "[Builder runtime continuation, not a new user request] Conclude the original task now using only the recorded evidence. Tools are unavailable in this request. Honor the user's requested final-answer format, including JSON-only when requested: do not output tool-call tags, function syntax, XML control markup, or a proposed tool request. State honestly what was completed, what remains unresolved, and any concrete blocker.".to_owned()
                 } else if restrict_discovery {
@@ -230,7 +313,6 @@ impl<P: Provider> Agent<P> {
             let todo_packet = todos
                 .as_ref()
                 .map(|list| todo_packet(list, force_conclusion));
-            let remaining = self.max_rounds - round;
             let (messages, estimate) = self
                 .prepare_request(
                     store,
@@ -252,12 +334,14 @@ impl<P: Provider> Agent<P> {
             // The final recovery response is buffered until validation. Otherwise
             // a model that prints tool-control syntax as text can leak it into the
             // terminal even though the response is subsequently rejected.
+            // Reasoning is never printed, and it is the only sign of life while
+            // a slow model works on its conclusion.
             let result = self
                 .provider
                 .complete_with_budget(&messages, &definitions, output_budget, &mut |event| {
                     if force_conclusion {
                         match event {
-                            Event::Delta(_) | Event::Reasoning(_) | Event::ToolProgress { .. } => {}
+                            Event::Delta(_) | Event::ToolProgress { .. } => {}
                             event => emit(AgentEvent::Model(event)),
                         }
                     } else {
@@ -280,12 +364,16 @@ impl<P: Provider> Agent<P> {
                             "Enforced conclusion returned tool-control syntax",
                         )?;
                         conclusion_rejections += 1;
-                        if conclusion_rejections == 1 && remaining > 1 {
+                        if conclusion_rejections == 1 && remaining.is_none_or(|left| left > 1) {
                             emit(AgentEvent::MemoryNotice(
                                 "The model returned a tool request during the tool-free conclusion; it was not shown or executed. Retrying once for plain prose."
                                     .into(),
                             ));
                             continue;
+                        }
+                        // A reporting run's caller asks for the answer itself.
+                        if budget_end == BudgetEnd::Report {
+                            bail!("The model requested tools in a tool-free conclusion round");
                         }
                         let fallback = Message::text(
                             Role::Assistant,
@@ -464,9 +552,13 @@ impl<P: Provider> Agent<P> {
                 }
             }
         }
+        if budget_end == BudgetEnd::Report {
+            self.recover_tools(store, emit, approve).await?;
+            return Ok(());
+        }
         bail!(
-            "Reached the configured budget of {} model rounds for this run. Work remains pending and saved. Adjust Agent rounds per run in /settings, then /retry to continue.",
-            self.max_rounds
+            "Stopped at the requested limit of {} model rounds. Work remains pending and saved; /retry continues it.",
+            self.max_rounds.unwrap_or_default()
         )
     }
 }

@@ -100,7 +100,7 @@ pub struct Definition {
     pub profile: String,
     pub cadence: Cadence,
     pub access: Access,
-    pub max_rounds: usize,
+    /// The wall-clock bound of an unattended run. There is no round budget.
     pub timeout_seconds: u64,
 }
 impl Definition {
@@ -117,10 +117,6 @@ impl Definition {
         ensure!(
             self.workspace.is_absolute() && self.workspace.is_dir(),
             "Workspace must be an existing absolute directory"
-        );
-        ensure!(
-            (1..=1000).contains(&self.max_rounds),
-            "Round budget must be 1–1000"
         );
         ensure!(
             (1..=86400).contains(&self.timeout_seconds),

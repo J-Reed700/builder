@@ -5,7 +5,7 @@ use super::{
     catalog::{chat_folder, scoped_session},
 };
 use crate::{
-    agent::{Agent, AgentEvent, ApprovalMode, SYSTEM},
+    agent::{Agent, AgentEvent, ApprovalMode, SYSTEM, SubagentActivity},
     memory::MemoryRuntime,
 };
 use anyhow::{Context, Result, ensure};
@@ -406,10 +406,7 @@ async fn drive(
     let agent = Agent {
         memory: MemoryRuntime::from_config(&config)?,
         provider: OpenAiCompatible::new(profile.clone())?,
-        max_rounds: shared
-            .options
-            .max_rounds
-            .unwrap_or(profile.pipeline.max_rounds),
+        max_rounds: shared.options.max_rounds,
         profile,
         workspace: Workspace::new(&workspace)?,
         session: session.clone(),
@@ -568,15 +565,24 @@ fn event_update(run: &Run, event: AgentEvent) {
                     repeated_reads,
                     planning,
                 } => crate::presentation::nudge_line(calls, step, repeated_reads, planning),
+                AgentEvent::EditFocus { calls, step, reads } => {
+                    crate::presentation::edit_focus_line(calls, step, reads)
+                }
                 AgentEvent::RepetitionNotice { name, .. } => {
                     format!("Repeated {name} call; checking progress")
                 }
+                // Finished calls only: streamed phases would push every other
+                // notice out of the bounded list.
                 AgentEvent::SubagentProgress {
                     description,
                     actions,
-                    activity,
+                    activity: activity @ SubagentActivity::Tool { .. },
                     ..
-                } => format!("Subagent {description} · {actions} actions · {activity}"),
+                } => format!(
+                    "Subagent {description} · {actions} actions · {}",
+                    crate::presentation::subagent_activity(&activity)
+                ),
+                AgentEvent::SubagentProgress { .. } => return,
                 AgentEvent::TodosUpdated(list) => {
                     state.todos = Some(list);
                     return;

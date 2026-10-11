@@ -69,15 +69,62 @@ pub enum AgentEvent {
         note: Option<String>,
         failed: bool,
     },
+    /// The current todo item went too long without a file change, so Builder
+    /// narrowed the tools to finishing it. Emitted once per stage per run.
+    EditFocus {
+        calls: usize,
+        /// Item number and list length.
+        step: (usize, usize),
+        /// `read_file` is still offered.
+        reads: bool,
+    },
     /// A todo list was recorded. Emitted after its `ToolFinished`.
     TodosUpdated(builder_core::todo::List),
-    /// A running subagent completed one of its own tool calls.
+    /// What a running subagent is doing now. Streamed model data is reported
+    /// at most about once a second; finished tool calls always are.
     SubagentProgress {
         call_id: String,
         description: String,
         actions: usize,
-        activity: String,
+        /// Model rounds started.
+        round: usize,
+        /// Its tools are done and the model is writing its report.
+        reporting: bool,
+        activity: SubagentActivity,
     },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SubagentActivity {
+    /// One of its tool calls finished.
+    Tool {
+        name: String,
+        detail: String,
+    },
+    /// A model request is sent and nothing has come back yet.
+    Waiting,
+    /// The server is processing the request's prompt.
+    Reading {
+        processed: u64,
+        total: u64,
+    },
+    Thinking,
+    /// The model is writing tool calls.
+    Preparing,
+    /// The model is writing prose, usually its report.
+    Writing,
+    /// Summarizing its own context, 0.0 to 1.0.
+    Compacting {
+        fraction: f64,
+    },
+}
+
+impl SubagentActivity {
+    /// Whether this update means data just arrived, as opposed to a request
+    /// that is still waiting for its first byte.
+    pub fn is_live(&self) -> bool {
+        !matches!(self, Self::Waiting)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

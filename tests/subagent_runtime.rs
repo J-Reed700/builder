@@ -20,8 +20,13 @@ struct Router {
     parent: Mutex<Vec<Message>>,
     children: Mutex<HashMap<String, Vec<Message>>>,
     requests: Mutex<Recorded>,
+    /// Output allowance of each request, in order.
+    budgets: Mutex<Vec<usize>>,
     overlap: Option<tokio::sync::Barrier>,
 }
+
+/// A scripted reply with this content fails as a truncated response.
+const OUTPUT_LIMIT: &str = "<output limit>";
 
 impl Router {
     fn new(parent: Vec<Message>, children: Vec<(&str, Vec<Message>)>) -> Self {
@@ -34,6 +39,7 @@ impl Router {
                     .collect(),
             ),
             requests: Mutex::new(vec![]),
+            budgets: Mutex::new(vec![]),
             overlap: None,
         }
     }
@@ -60,6 +66,17 @@ impl Router {
 impl Provider for Router {
     async fn parallel_capacity(&self) -> Option<usize> {
         Some(4)
+    }
+
+    async fn complete_with_budget(
+        &self,
+        messages: &[Message],
+        tools: &[Value],
+        max_output_tokens: usize,
+        emit: &mut dyn FnMut(Event),
+    ) -> anyhow::Result<Message> {
+        self.budgets.lock().unwrap().push(max_output_tokens);
+        self.complete(messages, tools, emit).await
     }
 
     async fn complete(
@@ -105,6 +122,9 @@ impl Provider for Router {
             anyhow::ensure!(!parent.is_empty(), "unexpected parent request");
             parent.remove(0)
         };
+        if reply.content.as_deref() == Some(OUTPUT_LIMIT) {
+            return Err(builder_provider::OutputLimit.into());
+        }
         Ok(reply)
     }
 }
@@ -175,7 +195,7 @@ impl Fixture {
             workspace: Workspace::new(self.root.path()).unwrap(),
             session: self.session.clone(),
             approval: ApprovalMode::Trust,
-            max_rounds: 6,
+            max_rounds: Some(6),
         }
     }
 
@@ -404,41 +424,182 @@ async fn a_subagent_cannot_change_the_workspace_even_when_it_asks() {
 }
 
 #[tokio::test]
-async fn a_subagent_that_runs_out_of_rounds_still_reports() {
+async fn a_subagent_has_no_round_budget() {
+    let mut f = Fixture::new();
+    // Ten more rounds than the retired default of 30, each with new evidence.
+    let reads = 40;
+    let mut script = Vec::new();
+    for n in 0..reads {
+        let name = format!("part{n}.txt");
+        std::fs::write(f.root.path().join(&name), format!("part {n}\n")).unwrap();
+        script.push(calls(&[(
+            &format!("r{n}"),
+            "read_file",
+            json!({ "path": name }),
+        )]));
+    }
+    script.push(Message::text(Role::Assistant, "All 40 parts read."));
+    let task = delegate("sub", "read every part", "Read every part.");
+    let router = Router::new(
+        vec![
+            calls(&[(&task.0, task.1, task.2)]),
+            Message::text(Role::Assistant, "Done."),
+        ],
+        vec![("Read every part.", script)],
+    );
+    let agent = f.agent(Profile::default(), router);
+    f.run(&agent).await.0.unwrap();
+    let report = f.store.tool_result(&f.session, "sub").unwrap().unwrap();
+    assert!(
+        report.starts_with("Subagent report · read every part · 40 tool calls"),
+        "{report}"
+    );
+    assert!(report.contains("All 40 parts read."), "{report}");
+    let children = agent.provider.child_requests();
+    assert_eq!(children.len(), reads + 1);
+    assert!(children.iter().all(|(_, tools)| !tools.is_empty()));
+}
+
+/// A 24k-token context that two 10 KiB reads fill to the point where a
+/// subagent must report.
+fn crowded(f: &Fixture) -> Profile {
+    let line = format!("{}\n", "evidence ".repeat(8));
+    for name in ["a.txt", "b.txt"] {
+        std::fs::write(f.root.path().join(name), line.repeat(150)).unwrap();
+    }
+    Profile {
+        context_tokens: 24576,
+        ..Profile::default()
+    }
+}
+
+#[tokio::test]
+async fn a_full_subagent_reports_instead_of_compacting() {
+    let mut f = Fixture::new();
+    let profile = crowded(&f);
+    let task = delegate("sub", "read big files", "Read the big files.");
+    let router = Router::new(
+        vec![
+            calls(&[(&task.0, task.1, task.2)]),
+            Message::text(Role::Assistant, "Used the report."),
+        ],
+        vec![(
+            "Read the big files.",
+            vec![
+                calls(&[
+                    ("a", "read_file", json!({"path":"a.txt"})),
+                    ("b", "read_file", json!({"path":"b.txt"})),
+                ]),
+                Message::text(Role::Assistant, "Both files repeat one evidence line."),
+            ],
+        )],
+    );
+    let agent = f.agent(profile, router);
+    f.run(&agent).await.0.unwrap();
+    let report = f.store.tool_result(&f.session, "sub").unwrap().unwrap();
+    assert!(
+        report.contains("Both files repeat one evidence line."),
+        "{report}"
+    );
+    // No summarization request: the report follows the round that filled it.
+    let children = agent.provider.child_requests();
+    assert_eq!(children.len(), 2);
+    assert!(children[1].1.is_empty());
+    assert!(
+        serde_json::to_string(&children[1].0)
+            .unwrap()
+            .contains("Stop investigating")
+    );
+}
+
+#[tokio::test]
+async fn a_truncated_report_is_retried_with_more_room() {
     let mut f = Fixture::new();
     let task = delegate("sub", "dig deep", "Keep reading.");
     let router = Router::new(
         vec![
             calls(&[(&task.0, task.1, task.2)]),
-            Message::text(Role::Assistant, "Used the partial report."),
+            Message::text(Role::Assistant, "Used the report."),
         ],
         vec![(
             "Keep reading.",
             vec![
-                calls(&[("r1", "read_file", json!({"path":"notes.txt"}))]),
-                Message::text(Role::Assistant, "Partial: notes.txt has one line."),
+                calls(&[
+                    ("a", "read_file", json!({"path":"a.txt"})),
+                    ("b", "read_file", json!({"path":"b.txt"})),
+                ]),
+                Message::text(Role::Assistant, OUTPUT_LIMIT),
+                Message::text(Role::Assistant, "Report written with more room."),
             ],
         )],
     );
-    let mut profile = Profile::default();
-    profile.pipeline.subagent_rounds = 1;
+    let profile = crowded(&f);
+    let default = profile.max_output_tokens;
     let agent = f.agent(profile, router);
-    let (result, _) = f.run(&agent).await;
-    result.unwrap();
+    f.run(&agent).await.0.unwrap();
     let report = f.store.tool_result(&f.session, "sub").unwrap().unwrap();
+    assert!(report.starts_with("Subagent report"), "{report}");
     assert!(
-        report.contains("Partial: notes.txt has one line."),
+        report.contains("Report written with more room."),
         "{report}"
     );
-    let children = agent.provider.child_requests();
-    let (conclusion, tools) = children.last().unwrap();
-    assert!(tools.is_empty(), "the fallback report request is tool-free");
-    assert!(
-        conclusion
-            .last()
-            .and_then(|message| message.content.as_deref())
-            .is_some_and(|text| text.contains("Stop investigating"))
+    // Parent, tool round, truncated report, larger report, parent.
+    let budgets = agent.provider.budgets.lock().unwrap().clone();
+    assert_eq!(budgets[2..4], [default, default * 2]);
+}
+
+#[tokio::test]
+async fn a_subagent_that_cannot_write_a_report_returns_its_evidence() {
+    let mut f = Fixture::new();
+    let task = delegate("sub", "dig deep", "Keep reading.");
+    let router = Router::new(
+        vec![
+            calls(&[(&task.0, task.1, task.2)]),
+            Message::text(Role::Assistant, "Used the evidence."),
+        ],
+        vec![(
+            "Keep reading.",
+            vec![
+                calls(&[
+                    ("a", "read_file", json!({"path":"a.txt"})),
+                    ("b", "read_file", json!({"path":"b.txt"})),
+                    ("s1", "search", json!({"query":"RAW", "glob":"*.txt"})),
+                ]),
+                Message::text(Role::Assistant, OUTPUT_LIMIT),
+                Message::text(Role::Assistant, OUTPUT_LIMIT),
+            ],
+        )],
     );
+    let profile = crowded(&f);
+    let agent = f.agent(profile, router);
+    let (result, events) = f.run(&agent).await;
+    result.unwrap();
+    assert!(
+        events.contains(
+            &"finish subagent failed=false 3 tool calls · no written report, evidence returned"
+                .to_owned()
+        ),
+        "{events:?}"
+    );
+    let evidence = f.store.tool_result(&f.session, "sub").unwrap().unwrap();
+    assert!(
+        evidence.starts_with("Subagent evidence · dig deep · 3 tool calls · session "),
+        "{evidence}"
+    );
+    assert!(evidence.contains("output limit"), "{evidence}");
+    // Reads are listed by path; what searches found is quoted.
+    assert!(evidence.contains("Read (2): a.txt, b.txt"), "{evidence}");
+    assert!(
+        evidence.contains("1. search RAW in *.txt → 1 line\n   notes.txt:1: RAW-FILE-CONTENT"),
+        "{evidence}"
+    );
+    assert_eq!(
+        f.store.tool_outcomes(&f.session).unwrap()["sub"],
+        ToolOutcome::Succeeded
+    );
+    // The parent continued with the evidence instead of an error.
+    let context = serde_json::to_string(&agent.provider.parent_requests()[1].0).unwrap();
+    assert!(context.contains("Subagent evidence"));
 }
 
 #[tokio::test]

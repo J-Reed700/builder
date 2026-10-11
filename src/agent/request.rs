@@ -13,7 +13,8 @@ pub(super) struct RequestContext<'a> {
     pub messages: Vec<Message>,
     pub definitions: &'a [Value],
     pub parallel_notice: Option<&'a Message>,
-    pub remaining: usize,
+    /// Rounds left under an explicit cap.
+    pub remaining: Option<usize>,
     pub phase: &'a Phase,
     pub guidance: Option<Message>,
     pub continuation: Option<Message>,
@@ -85,7 +86,7 @@ impl<P: Provider> Agent<P> {
         } else {
             None
         };
-        let budget_notice = (remaining <= 5).then(|| Message::text(Role::System, format!(
+        let budget_notice = remaining.filter(|left| *left <= 5).map(|remaining| Message::text(Role::System, format!(
                 "Run budget: {remaining} model rounds remain, including this one. Prioritize the next necessary action and verification. Do not claim completion without evidence or reduce the requested scope to meet this budget. Unfinished work remains saved for continuation."
             )));
         let capacity_tokens =

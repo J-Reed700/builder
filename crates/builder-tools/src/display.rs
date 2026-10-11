@@ -1,4 +1,4 @@
-use crate::SUBAGENT_TOOL;
+use crate::{SUBAGENT_EVIDENCE, SUBAGENT_TOOL};
 use serde_json::Value;
 
 /// One bounded, single-line description of a requested call, for status display.
@@ -96,12 +96,17 @@ pub fn result_note(name: &str, result: &str) -> Option<String> {
                     .unwrap_or(status)
             ),
         },
-        SUBAGENT_TOOL => result
-            .lines()
-            .next()?
-            .split(" · ")
-            .find(|part| part.ends_with(" tool calls"))?
-            .to_owned(),
+        SUBAGENT_TOOL => {
+            let header = result.lines().next()?;
+            let calls = header
+                .split(" · ")
+                .find(|part| part.ends_with(" tool calls"))?;
+            if header.starts_with(SUBAGENT_EVIDENCE) {
+                format!("{calls} · no written report, evidence returned")
+            } else {
+                calls.to_owned()
+            }
+        }
         "read_file" | "search" | "list_files" | "code_search" => {
             let lines = result.lines().filter(|line| !line.is_empty()).count();
             format!("{lines} lines")

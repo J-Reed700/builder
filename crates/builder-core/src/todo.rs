@@ -127,6 +127,13 @@ impl List {
         format!("{head}\n{}", self.checklist())
     }
 
+    /// The list a `todo_write` call records, if its arguments are valid.
+    pub fn from_call(call: &crate::protocol::ToolCall) -> Option<Self> {
+        (call.function.name == TOOL)
+            .then(|| Self::decode(&call.function.arguments))
+            .flatten()
+    }
+
     fn decode(arguments: &str) -> Option<Self> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]

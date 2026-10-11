@@ -68,8 +68,6 @@ pub struct Add {
     pub allow_writes: bool,
     #[arg(long, default_value_t=1800, value_parser=clap::value_parser!(u64).range(1..=86400))]
     pub timeout: u64,
-    #[arg(long, default_value_t=50, value_parser=clap::value_parser!(u16).range(1..=1000))]
-    pub rounds: u16,
 }
 #[derive(Parser)]
 #[command(name = "/schedule", disable_version_flag = true)]
@@ -192,7 +190,6 @@ pub fn handle(
                     } else {
                         Access::ReadOnly
                     },
-                    max_rounds: add.rounds.into(),
                     timeout_seconds: add.timeout,
                 },
                 now,
@@ -322,13 +319,7 @@ fn schedule_rows(schedule: &Schedule, detail: bool) -> Vec<panel::Row> {
                 ui::safe(&definition.workspace.display().to_string()),
             ),
             panel::field("Profile", ui::safe(&definition.profile)),
-            panel::field(
-                "Budget",
-                format!(
-                    "{} rounds · {}s",
-                    definition.max_rounds, definition.timeout_seconds
-                ),
-            ),
+            panel::field("Timeout", format!("{}s", definition.timeout_seconds)),
             panel::field("Instruction", ui::safe(&definition.prompt)),
         ]);
     }

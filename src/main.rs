@@ -192,10 +192,7 @@ async fn app(cli: Cli) -> Result<()> {
             "Interactive mode requires a terminal. Use builder run - for piped input."
         );
     }
-    let max_rounds = cli
-        .max_rounds
-        .map(usize::from)
-        .unwrap_or(profile.pipeline.max_rounds);
+    let max_rounds = cli.max_rounds.map(usize::from);
     let mut agent = Agent {
         memory: builder::memory::MemoryRuntime::from_config(&config)?,
         provider,

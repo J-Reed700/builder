@@ -12,8 +12,8 @@ pub mod research;
 pub mod semantic;
 
 pub use action::{
-    Action, MAX_EDITS, Replacement, Risk, SUBAGENT_DESCRIPTION_BYTES, SUBAGENT_PROMPT_BYTES,
-    SUBAGENT_TOOL,
+    Action, MAX_EDITS, Replacement, Risk, SUBAGENT_DESCRIPTION_BYTES, SUBAGENT_EVIDENCE,
+    SUBAGENT_PROMPT_BYTES, SUBAGENT_TOOL,
 };
 pub use display::{call_summary, result_note};
 pub use memory::definitions as memory_definitions;

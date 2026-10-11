@@ -101,7 +101,7 @@ impl Fixture {
             workspace,
             session,
             approval: ApprovalMode::Trust,
-            max_rounds: 10,
+            max_rounds: Some(10),
         };
         Self { home, store, agent }
     }

@@ -31,7 +31,8 @@ pub struct Cli {
     /// Use a simple line prompt for terminals without cursor/paste support.
     #[arg(long, global = true)]
     pub plain: bool,
-    /// Override the round budget from /settings for this invocation.
+    /// Stop after this many model rounds. By default a run continues until
+    /// its work is done; loop guards still stop a run that stalls.
     #[arg(long, global=true, value_parser=clap::value_parser!(u16).range(1..=1000))]
     pub max_rounds: Option<u16>,
     #[command(subcommand)]

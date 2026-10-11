@@ -218,3 +218,48 @@ pub(super) fn planning_reminder(calls: usize, check: usize, reads: &ReadLog) -> 
         reads.summary()
     )
 }
+
+/// How far Builder has narrowed the tools to finish the current todo item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum FocusStage {
+    /// Search, shell and subagents pause; reads and edits remain.
+    Read,
+    /// Only edits and plan updates remain.
+    Edit,
+}
+
+impl FocusStage {
+    pub(super) fn offers(self, tool: &str) -> bool {
+        matches!(
+            tool,
+            "write_file" | "edit_file" | "multi_edit" | builder_core::todo::TOOL
+        ) || (self == Self::Read && tool == "read_file")
+    }
+}
+
+pub(super) struct Focus<'a> {
+    pub(super) stage: FocusStage,
+    pub(super) calls: usize,
+    pub(super) step: (usize, usize),
+    pub(super) item: &'a str,
+    /// Reads returned only so a failed edit can be rebuilt.
+    pub(super) edit_failed: bool,
+    pub(super) reads: &'a ReadLog,
+}
+
+/// The trailing request while the tools are narrowed to the current item.
+/// The choices stay honest: make a real change, move the plan, or report.
+pub(super) fn edit_focus(focus: &Focus<'_>) -> String {
+    let (number, total) = focus.step;
+    let mut text = format!(
+        "[Builder runtime continuation, not a new user request] Todo item {number} of {total} ({}) has taken {} tool calls without a file change.{} You have already read enough to start it; do not re-confirm signatures, call graphs or conventions you have seen.",
+        focus.item, focus.calls, focus.reads.summary()
+    );
+    text.push_str(match (focus.stage, focus.edit_failed) {
+        (FocusStage::Edit, true) => " Only edits and todo_write are available until a file changes, except that your last edit failed: read_file is back for this response so you can get the exact current text. Read only the range that edit needs, then retry it.",
+        (FocusStage::Edit, false) => " Only edits and todo_write are available until a file changes. Make the next real change for this item now from the text already in context; when it lands, every tool returns, including verification.",
+        (FocusStage::Read, _) => " Search, shell and subagents are paused until a file changes. Make the next real change for this item now with edit_file, multi_edit or write_file. read_file remains only for the exact current text an edit needs: read the smallest range, then edit.",
+    });
+    text.push_str(" Never make a placeholder or unrelated edit to get tools back. If this item needs no file change, mark it completed with todo_write and start the next one. If the plan is wrong or the user changed direction, rewrite it with todo_write. If you are blocked, answer without a tool call and tell the user the concrete blocker.");
+    text
+}

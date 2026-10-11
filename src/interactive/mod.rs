@@ -266,7 +266,6 @@ pub(crate) async fn run(
                 );
                 match changed {
                     Ok(Some(settings)) => {
-                        agent.max_rounds = settings.max_rounds;
                         agent.profile.pipeline = settings;
                         println!(
                             "Pipeline settings saved for {} and applied to this session.",
@@ -359,7 +358,12 @@ pub(crate) async fn run(
                             ApprovalMode::Trust => "auto · all tools approved",
                         },
                     ),
-                    ui::panel::field("Rounds per run", agent.max_rounds.to_string()),
+                    ui::panel::field(
+                        "Rounds per run",
+                        agent
+                            .max_rounds
+                            .map_or("until done".to_owned(), |rounds| rounds.to_string()),
+                    ),
                     ui::panel::field("Workspace", ui::short_path(agent.workspace.root())),
                     ui::panel::field("Storage", ui::short_path(&home)),
                     ui::panel::section("Code index"),

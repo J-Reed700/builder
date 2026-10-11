@@ -31,16 +31,17 @@ pub struct PipelineSettings {
     pub code_history: bool,
     pub todos: bool,
     pub subagents: bool,
-    pub max_rounds: usize,
     pub progress_check_calls: usize,
     pub progress_recovery_rounds: usize,
+    /// Tool calls on one todo item without a file change before Builder
+    /// pauses search and shell; at twice this, reads pause too.
+    pub edit_focus_calls: usize,
     pub failure_check_calls: usize,
     pub failure_recovery_rounds: usize,
     pub identical_shell_calls: usize,
     pub tool_calls_per_response: usize,
     pub parallel_tools: usize,
     pub subagent_parallel: usize,
-    pub subagent_rounds: usize,
     pub candidate_attempts: usize,
     pub completion_retries: usize,
     pub analysis_artifacts: usize,
@@ -80,6 +81,15 @@ pub struct PipelineSettings {
     pub code_history_timeout_secs: u64,
     pub memory_min_similarity_percent: usize,
     pub memory_min_margin_percent: usize,
+    /// Retired round budgets. Saved configurations still load, the values
+    /// are ignored and never written back: a run continues until its work is
+    /// done, and the loop guards stop one that stalls.
+    #[doc(hidden)]
+    #[serde(rename = "max_rounds", skip_serializing)]
+    pub retired_max_rounds: Option<u64>,
+    #[doc(hidden)]
+    #[serde(rename = "subagent_rounds", skip_serializing)]
+    pub retired_subagent_rounds: Option<u64>,
 }
 impl Default for PipelineSettings {
     fn default() -> Self {
@@ -109,16 +119,15 @@ impl Default for PipelineSettings {
             code_history: true,
             todos: true,
             subagents: true,
-            max_rounds: 100,
             progress_check_calls: 12,
             progress_recovery_rounds: 88,
+            edit_focus_calls: 16,
             failure_check_calls: 3,
             failure_recovery_rounds: 3,
             identical_shell_calls: 3,
             tool_calls_per_response: 128,
             parallel_tools: 8,
             subagent_parallel: 0,
-            subagent_rounds: 30,
             candidate_attempts: 3,
             completion_retries: 2,
             analysis_artifacts: 4,
@@ -158,13 +167,17 @@ impl Default for PipelineSettings {
             code_history_timeout_secs: 5,
             memory_min_similarity_percent: 25,
             memory_min_margin_percent: 3,
+            retired_max_rounds: None,
+            retired_subagent_rounds: None,
         }
     }
 }
+/// Settings that no longer exist but may remain in saved configurations.
+const RETIRED: [&str; 2] = ["max_rounds", "subagent_rounds"];
+
 impl PipelineSettings {
     pub fn validate(&self) -> Result<()> {
         for (name, value, min, max) in [
-            ("max_rounds", self.max_rounds, 1, 1000),
             ("progress_check_calls", self.progress_check_calls, 1, 1000),
             (
                 "progress_recovery_rounds",
@@ -172,6 +185,7 @@ impl PipelineSettings {
                 1,
                 1000,
             ),
+            ("edit_focus_calls", self.edit_focus_calls, 1, 1000),
             ("failure_check_calls", self.failure_check_calls, 1, 100),
             (
                 "failure_recovery_rounds",
@@ -188,7 +202,6 @@ impl PipelineSettings {
             ),
             ("parallel_tools", self.parallel_tools, 1, 32),
             ("subagent_parallel", self.subagent_parallel, 0, 8),
-            ("subagent_rounds", self.subagent_rounds, 1, 200),
             ("candidate_attempts", self.candidate_attempts, 1, 20),
             ("completion_retries", self.completion_retries, 0, 8),
             ("analysis_artifacts", self.analysis_artifacts, 1, 4),
@@ -359,6 +372,10 @@ impl PipelineSettings {
                 .split_once('=')
                 .ok_or_else(|| anyhow::anyhow!("Expected pipeline KEY=VALUE"))?;
             let key = key.replace('-', "_");
+            ensure!(
+                !RETIRED.contains(&key.as_str()),
+                "pipeline.{key} was removed: runs continue until their work is done, and the loop guards stop a run that stalls"
+            );
             let slot = value.get_mut(&key).ok_or_else(|| {
                 anyhow::anyhow!(
                     "Unknown pipeline setting '{key}'; use config pipeline show to list settings"

@@ -327,7 +327,7 @@ stalling run and its repeated-read count.
 
 A tool batch is processed as consecutive groups. Admission, claiming and committing stay sequential and durable; only execution is concurrent. A group is either one call, or a run of side-effect-free calls (list, read, search, subagent) up to `parallel_tools`. The first call of a group keeps the original stop-and-explain checks. A later call that would cross the no-progress limit, or any call that is not side-effect free, ends the group and waits to lead the next one. Inspections run on blocking threads with a cloned `Workspace`. Results are committed and reported in call order, so the journal is identical to sequential execution. Such calls are claimed with `side_effect_free=1` (schema v13). An interrupted side-effect-free claim closes as a retryable failure, both when the agent resumes and inside `interrupt_turn`/`rewind`, instead of pausing for inspection. Legacy and mutating claims keep the uncertain path.
 
-`subagent` runs a complete `Agent` in a child session, created atomically with a `subagent_sessions` link to the parent session and call ID; one call starts at most one child. The child uses its own `Store` connection to the same journal. It gets the parent's profile with the research workflow, todos and subagents disabled, a later focus guard, `subagent_rounds`, no memory runtime, and `ApprovalMode::ReadOnly`. Its provider is `subagent::Delegated`, a view over the parent's model through the object-safe `builder_provider::DynProvider`. That view exposes only inspection tool schemas, and every nested agent has the same concrete type, so the recursive run is boxed once instead of instantiating an unbounded generic tower. Read-only approval independently denies anything a model requests outside that view. A semaphore bounds concurrent subagents. Children forward `SubagentProgress` events through a `RefCell` borrowed only for synchronous callbacks. The parent journal receives only the bounded report. If the child stops early (round budget, focus limit), its pending calls are closed and one tool-free request asks for a report; failures surface as ordinary tool errors. Child sessions are excluded from session and chat listings, but `resolve` finds them for export.
+`subagent` runs a complete `Agent` in a child session, created atomically with a `subagent_sessions` link to the parent session and call ID; one call starts at most one child. The child uses its own `Store` connection to the same journal. It gets the parent's profile with the research workflow, todos, subagents and automatic compaction disabled, a later focus guard, no round budget, no memory runtime, and `ApprovalMode::ReadOnly`. Its provider is `subagent::Delegated`, a view over the parent's model through the object-safe `builder_provider::DynProvider`. That view exposes only inspection tool schemas, and every nested agent has the same concrete type, so the recursive run is boxed once instead of instantiating an unbounded generic tower. Read-only approval independently denies anything a model requests outside that view. A semaphore bounds concurrent subagents. Children forward `SubagentProgress` events through a `RefCell` borrowed only for synchronous callbacks. The parent journal receives only the bounded report. It runs with `BudgetEnd::Report`: when its context reaches the compaction point (less room for the report and one larger retry), the run returns instead of compacting. When the child has not answered on its own, because its context filled or its run failed, its pending calls are closed and one tool-free request asks for a report. That request is retried once with a larger output allowance. If it still fails, the parent receives the child's evidence instead of an error: the paths it read, and each search or listing with what it found. Child sessions are excluded from session and chat listings, but `resolve` finds them for export.
 
 Compaction emits `CompactionProgress` with an estimated fraction of the older transcript: completed fragments plus the current fragment's progress. Within a fragment, reported prompt processing counts for 60%, and output is measured against the handoff byte ceiling. The estimate never reaches 100% before the checkpoint is validated. The OpenAI-compatible transport turns llama.cpp `prompt_progress` stream chunks into `Event::PromptProgress`; other servers never send them. Each streamed tool-call delta also emits `Event::ToolProgress` (latest call name, call count, cumulative argument bytes), so the terminal can restore a live status after streamed prose cleared it; the enforced conclusion suppresses it with the other streamed output.
 
@@ -490,14 +490,15 @@ parallel tool-call probes through the provider interface. Results are stored by 
 non-secret endpoint/model/settings fingerprint. They establish wire-protocol
 conformance for those calls, not model intelligence or task completion.
 
-The per-run generation budget defaults to 100 rounds and is configurable from
-`/settings` (1–1000). The profile persists this limit independently of the research
-master switch. An explicit `--max-rounds` overrides it at startup; saving the menu
-applies its value immediately, including for `/retry`. The last five rounds carry
-an ephemeral, token-accounted budget notice. Exhaustion pauses with durable work
-pending, without synthesizing a completion or dispatching the last generation's
-unclaimed calls. Explicit continuation recovers those calls under normal claim
-and approval rules. Investigation and failure guards still apply independently.
+A run has no generation budget by default: it ends when the work is done, the
+user stops it, or an investigation or failure guard ends a run that has stalled.
+An explicit `--max-rounds`, or a remote request's `max_rounds`, caps one
+invocation. Under a cap, the last five rounds carry an ephemeral, token-accounted
+budget notice, and exhaustion pauses with durable work pending, without
+synthesizing a completion or dispatching the last generation's unclaimed calls.
+Explicit continuation recovers those calls under normal claim and approval rules.
+Saved profiles may still contain the retired `max_rounds` and `subagent_rounds`
+settings; they load, are ignored, and are not written back.
 
 ## Remote browser adapter
 
@@ -567,7 +568,7 @@ and tool journal. `scheduler::commands` is the shared shell/slash adapter;
 `scheduler::service` only renders OS service definitions.
 
 A schedule contains a workspace, named profile, prompt, cadence, explicit access
-mode, deadline, and round budget. Calendar schedules carry an IANA timezone;
+mode, and deadline. Calendar schedules carry an IANA timezone;
 intervals retain phase and do not round to cron expressions. Each execution gets a
 fresh conversation. No model is needed to parse a schedule or determine its next
 occurrence. Profile settings reload for each execution.
