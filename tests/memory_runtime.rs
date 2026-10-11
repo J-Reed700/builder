@@ -1096,7 +1096,8 @@ async fn indexed_navigation_is_supplied_to_the_agent_without_memory_or_discovery
             .history_messages(&session)
             .unwrap()
             .iter()
-            .any(|m| m == packet),
+            .filter_map(|m| m.content.as_deref())
+            .any(|s| s.contains("Builder code-index reference")),
         "derived context must not pollute durable history"
     );
 }
