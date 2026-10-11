@@ -162,23 +162,31 @@ impl<P: Provider> Agent<P> {
         // it stays cached; policy comes first within the trailing block and
         // the labelled continuation last, reinforcing the next action
         // without touching durable history.
-        if let Some(guidance) = guidance {
-            messages.push(guidance);
-        }
-        if let Some(packet) = code_packet {
-            messages.push(packet);
-        }
-        if let Some(packet) = memory_packet {
-            messages.push(packet);
-        }
-        if let Some(packet) = research_packet {
-            messages.push(packet);
-        }
-        if let Some(packet) = todo_packet {
-            messages.push(packet);
-        }
-        if let Some(notice) = budget_notice {
-            messages.push(notice);
+        // Chat templates (Qwen's included) accept a system message only at the
+        // start, so the trailing block travels as ONE labelled user message —
+        // the convention the runtime continuation already uses.
+        let runtime_context: Vec<String> = [
+            guidance,
+            code_packet,
+            memory_packet,
+            research_packet,
+            todo_packet,
+            budget_notice,
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|message| message.content)
+        .filter(|text| !text.trim().is_empty())
+        .collect();
+        if !runtime_context.is_empty() {
+            messages.push(Message::text(
+                Role::User,
+                format!(
+                    "{}\n\n{}",
+                    super::RUNTIME_CONTEXT_HEADER,
+                    runtime_context.join("\n\n")
+                ),
+            ));
         }
         if let Some(continuation) = continuation {
             messages.push(continuation);

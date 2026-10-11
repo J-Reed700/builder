@@ -455,13 +455,22 @@ async fn new_reads_do_not_hide_a_step_that_never_reaches_an_edit() {
     fixture.plan(2);
     fixture.fresh_reads(16);
     let (requests, events) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
-    assert_offers(&requests[0], &[&EDITS[..], &["read_file"]].concat(), &CIRCLING);
+    assert_offers(
+        &requests[0],
+        &[&EDITS[..], &["read_file"]].concat(),
+        &CIRCLING,
+    );
     let text = last_text(&requests[0]);
     assert!(
-        text.contains("Todo item 2 of 3 (edit part 2) has taken 16 tool calls without a file change"),
+        text.contains(
+            "Todo item 2 of 3 (edit part 2) has taken 16 tool calls without a file change"
+        ),
         "{text}"
     );
-    assert!(text.contains("Search, shell and subagents are paused"), "{text}");
+    assert!(
+        text.contains("Search, shell and subagents are paused"),
+        "{text}"
+    );
     assert!(
         matches!(
             events.as_slice(),
@@ -481,13 +490,27 @@ async fn at_twice_the_focus_budget_only_edits_and_plan_updates_remain() {
     fixture.plan(1);
     fixture.fresh_reads(32);
     let (requests, events) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
-    assert_offers(&requests[0], &EDITS, &[&CIRCLING[..], &["read_file"]].concat());
+    assert_offers(
+        &requests[0],
+        &EDITS,
+        &[&CIRCLING[..], &["read_file"]].concat(),
+    );
     let text = last_text(&requests[0]);
-    assert!(text.contains("Only edits and todo_write are available"), "{text}");
-    assert!(text.contains("tell the user the concrete blocker"), "{text}");
+    assert!(
+        text.contains("Only edits and todo_write are available"),
+        "{text}"
+    );
+    assert!(
+        text.contains("tell the user the concrete blocker"),
+        "{text}"
+    );
     assert!(matches!(
         events.as_slice(),
-        [AgentEvent::EditFocus { calls: 32, reads: false, .. }]
+        [AgentEvent::EditFocus {
+            calls: 32,
+            reads: false,
+            ..
+        }]
     ));
 }
 
@@ -547,7 +570,11 @@ async fn a_failed_edit_brings_reads_back_so_it_can_be_rebuilt() {
         ToolOutcome::Failed,
     );
     let (requests, _) = fixture.run(ApprovalMode::Trust, vec![done()]).await;
-    assert_offers(&requests[0], &[&EDITS[..], &["read_file"]].concat(), &CIRCLING);
+    assert_offers(
+        &requests[0],
+        &[&EDITS[..], &["read_file"]].concat(),
+        &CIRCLING,
+    );
     assert!(last_text(&requests[0]).contains("your last edit failed"));
 }
 

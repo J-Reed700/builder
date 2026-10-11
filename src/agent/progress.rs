@@ -253,7 +253,9 @@ pub(super) fn edit_focus(focus: &Focus<'_>) -> String {
     let (number, total) = focus.step;
     let mut text = format!(
         "[Builder runtime continuation, not a new user request] Todo item {number} of {total} ({}) has taken {} tool calls without a file change.{} You have already read enough to start it; do not re-confirm signatures, call graphs or conventions you have seen.",
-        focus.item, focus.calls, focus.reads.summary()
+        focus.item,
+        focus.calls,
+        focus.reads.summary()
     );
     text.push_str(match (focus.stage, focus.edit_failed) {
         (FocusStage::Edit, true) => " Only edits and todo_write are available until a file changes, except that your last edit failed: read_file is back for this response so you can get the exact current text. Read only the range that edit needs, then retry it.",

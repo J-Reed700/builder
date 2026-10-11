@@ -121,7 +121,13 @@ async fn prompt_limit_is_in_utf8_bytes_and_accepts_the_exact_boundary() {
         .as_array()
         .unwrap()
         .iter()
-        .rfind(|message| message["role"] == "user")
+        .rfind(|message| {
+            message["role"] == "user"
+                && !message["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("[Builder runtime")
+        })
         .unwrap();
     assert_eq!(user["content"], prompt);
 }
