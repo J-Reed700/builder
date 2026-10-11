@@ -226,7 +226,7 @@ pub(super) fn start_memory_task(
                             let _ = builder::code_index::maintain(
                                 &mut code_store,
                                 &workspace,
-                                memory.as_ref(),
+                                memory.as_ref().map(|memory| memory.embeddings()),
                                 &profile.pipeline,
                                 code_watch.as_mut(),
                             )
@@ -367,7 +367,7 @@ mod tests {
             workspace,
             session,
             approval: ApprovalMode::ReadOnly,
-            max_rounds: 2,
+            max_rounds: Some(2),
         };
         let mut task = start_memory_task(&agent, home.path(), &config);
         assert_eq!(

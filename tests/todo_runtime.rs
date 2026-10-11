@@ -108,7 +108,7 @@ impl Fixture {
             workspace: Workspace::new(self.root.path()).unwrap(),
             session: self.session.clone(),
             approval: ApprovalMode::Trust,
-            max_rounds: 8,
+            max_rounds: Some(8),
         }
     }
 }

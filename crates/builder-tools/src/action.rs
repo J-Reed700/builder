@@ -87,6 +87,9 @@ pub struct Replacement {
 
 pub const MAX_EDITS: usize = 50;
 pub const SUBAGENT_TOOL: &str = "subagent";
+/// First header field of a subagent result that carries its gathered
+/// evidence because the model did not write a report.
+pub const SUBAGENT_EVIDENCE: &str = "Subagent evidence";
 pub const SUBAGENT_DESCRIPTION_BYTES: usize = 80;
 pub const SUBAGENT_PROMPT_BYTES: usize = 16 * 1024;
 

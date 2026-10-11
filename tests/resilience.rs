@@ -178,7 +178,7 @@ async fn progress_check_preserves_large_context_and_clears_after_edit() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 4,
+        max_rounds: Some(4),
     };
     let mut notices = 0;
     agent
@@ -299,7 +299,7 @@ async fn twelve_distinct_successful_reads_keep_discovery_tools_available() {
         workspace: Workspace::new(home.path()).unwrap(),
         session,
         approval: ApprovalMode::Trust,
-        max_rounds: 2,
+        max_rounds: Some(2),
     };
     agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -371,7 +371,7 @@ async fn unique_shell_commands_consume_durable_liveness_budget_after_restart() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     let mut recoveries = 0;
     agent
@@ -439,7 +439,7 @@ async fn saved_unique_shell_batch_stops_at_durable_no_progress_execution_limit()
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -534,7 +534,7 @@ async fn ignored_progress_check_forces_a_tool_free_conclusion() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
-        max_rounds: 20,
+        max_rounds: Some(20),
     };
     agent
         .run(&mut store, &mut |_| {}, &mut |_| true)
@@ -601,7 +601,7 @@ async fn tool_markup_at_progress_boundary_is_hidden_and_repaired_without_executi
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 4,
+        max_rounds: Some(4),
     };
     let mut visible = String::new();
     agent
@@ -673,7 +673,7 @@ async fn repeated_shell_loop_is_rejected_before_fourth_execution_after_restart()
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     agent.submit(&mut store, "Answer without looping").unwrap();
     assert!(
@@ -682,13 +682,13 @@ async fn repeated_shell_loop_is_rejected_before_fourth_execution_after_restart()
             .await
             .unwrap_err()
             .to_string()
-            .contains("configured budget of 3")
+            .contains("requested limit of 3 model rounds")
     );
     assert_eq!(store.tool_outcomes(&session).unwrap().len(), 2);
 
     drop(store);
     let mut store = Store::open(home.path()).unwrap();
-    agent.max_rounds = 5;
+    agent.max_rounds = Some(5);
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
         .await
@@ -750,7 +750,7 @@ async fn repeated_calls_inside_one_batch_are_rejected_before_any_dispatch() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 2,
+        max_rounds: Some(2),
     };
     agent.submit(&mut store, "Do bounded work").unwrap();
     let error = agent
@@ -803,7 +803,7 @@ async fn oversized_tool_batch_is_rejected_as_a_whole_before_dispatch() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 2,
+        max_rounds: Some(2),
     };
     agent.submit(&mut store, "Do bounded work").unwrap();
     let error = agent
@@ -863,7 +863,7 @@ async fn saved_repeated_shell_is_rejected_before_resume_dispatch() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -926,7 +926,7 @@ async fn saved_oversized_batch_is_rejected_before_resume_dispatch() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -978,7 +978,7 @@ async fn saved_duplicate_call_ids_are_rejected_before_resume_dispatch() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1026,7 +1026,7 @@ async fn saved_empty_call_id_is_rejected_before_resume_dispatch() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1074,7 +1074,7 @@ async fn saved_non_function_call_is_rejected_before_resume_dispatch() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1120,7 +1120,7 @@ async fn interrupted_claim_takes_precedence_over_saved_structure_validation() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1186,7 +1186,7 @@ async fn saved_call_cannot_reuse_an_earlier_generation_id_or_result() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1229,7 +1229,7 @@ async fn fresh_duplicate_call_ids_are_rejected_as_a_whole() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     agent.submit(&mut store, "Run bounded work").unwrap();
     let error = agent
@@ -1294,7 +1294,7 @@ async fn finished_tool_missing_from_legacy_projection_is_restored_without_reexec
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     let mut tool_starts = 0;
     agent
@@ -1373,7 +1373,7 @@ async fn uncertain_finished_projection_is_restored_then_pauses_without_dispatch(
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1452,7 +1452,7 @@ async fn completed_legacy_oversized_batch_can_resume_to_final_without_reexecutio
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     let mut tool_starts = 0;
     agent
@@ -1516,7 +1516,7 @@ async fn interrupted_claim_takes_precedence_over_saved_repetition_guard() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1581,7 +1581,7 @@ async fn uncertain_shell_cannot_be_replayed_with_a_new_id_or_timeout_on_retry() 
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     let first_error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1644,7 +1644,7 @@ async fn denied_shell_cannot_be_replayed_under_a_new_call_id() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     agent.submit(&mut store, "Run the command").unwrap();
     let error = agent
@@ -1716,7 +1716,7 @@ async fn giant_read_returns_a_bounded_opening_then_a_targeted_read() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 4,
+        max_rounds: Some(4),
     };
     agent
         .submit(&mut store, "Inspect the relevant function")
@@ -1759,7 +1759,7 @@ async fn read_inventory_survives_repeated_compaction_and_restart_even_if_model_f
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 4,
+        max_rounds: Some(4),
     };
     agent.submit(&mut store, "Implement the change").unwrap();
     for (id, path, result) in [
@@ -2007,7 +2007,7 @@ async fn interrupted_tool_is_not_reexecuted_on_resume() {
         workspace: Workspace::new(workspace.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 5,
+        max_rounds: Some(5),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| true)
@@ -2057,7 +2057,7 @@ async fn completed_tool_is_not_repeated_when_next_generation_fails() {
         approval: ApprovalMode::Trust,
         // Stay outside the last-five-round notice: a new run refreshes that
         // ephemeral budget, while the conversation and retry body stay intact.
-        max_rounds: 10,
+        max_rounds: Some(10),
     };
     agent.submit(&mut store, "write the file").unwrap();
     assert!(
@@ -2107,7 +2107,7 @@ async fn context_overflow_preserves_every_message_without_contacting_endpoint() 
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
-        max_rounds: 2,
+        max_rounds: Some(2),
     };
     agent.submit(&mut store, &"x".repeat(10_000)).unwrap();
     assert!(
@@ -2149,7 +2149,7 @@ async fn read_only_denies_model_mutations_and_records_denial() {
         workspace: Workspace::new(workspace.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     agent.submit(&mut store, "write").unwrap();
     agent
@@ -2193,7 +2193,7 @@ async fn cancelled_generation_leaves_durable_pending_turn() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     agent.submit(&mut store, "keep this request").unwrap();
     assert!(
@@ -2451,7 +2451,7 @@ async fn follow_up_after_interruption_cancels_queued_tools_and_uses_new_instruct
         workspace: Workspace::new(workspace.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 5,
+        max_rounds: Some(5),
     };
     agent.submit(&mut store, "Implement the change").unwrap();
     store.append(&session, &tool_message()).unwrap();
@@ -2498,7 +2498,7 @@ async fn steering_persists_new_prompt_but_halts_for_uncertain_execution_even_in_
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 5,
+        max_rounds: Some(5),
     };
     agent.submit(&mut store, "write").unwrap();
     store.append(&session, &tool_message()).unwrap();
@@ -2558,7 +2558,7 @@ async fn rewind_excludes_abandoned_turn_and_reserves_its_tool_ids() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 5,
+        max_rounds: Some(5),
     };
     agent.submit(&mut store, "abandoned task").unwrap();
     store.append(&session, &tool_message()).unwrap();
@@ -2617,7 +2617,7 @@ async fn auto_compaction_preserves_tool_evidence_originals_and_latest_instructio
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 5,
+        max_rounds: Some(5),
     };
     agent
         .submit(&mut store, "Implement only Arena changes; do not commit.")
@@ -2715,7 +2715,7 @@ async fn compaction_preserves_exact_user_contract_and_corrections_despite_bad_su
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     let request =
         r#"Set chance to 0.00625. Preserve current damage. Return only JSON: {"damage":number}."#;
@@ -2790,7 +2790,7 @@ async fn failed_compaction_never_changes_context_or_dispatches_summary_tools() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 5,
+        max_rounds: Some(5),
     };
     agent.submit(&mut store, "old goal").unwrap();
     store
@@ -2853,7 +2853,7 @@ async fn oversized_history_is_summarized_in_bounded_fragments_without_losing_byt
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     agent.submit(&mut store, "original goal").unwrap();
     let evidence = Message::text(Role::Assistant, "source 🦀\n".repeat(9000));
@@ -2924,7 +2924,7 @@ async fn output_limit_recovery_is_bounded_and_never_executes_partial_tool_calls(
             workspace: Workspace::new(home.path()).unwrap(),
             session: session.clone(),
             approval: ApprovalMode::Trust,
-            max_rounds: 8,
+            max_rounds: Some(8),
         };
         agent.submit(&mut store, "write").unwrap();
         let result = agent
@@ -2973,7 +2973,7 @@ async fn cancelled_compaction_keeps_active_context_unchanged() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 5,
+        max_rounds: Some(5),
     };
     agent.submit(&mut store, "task").unwrap();
     store
@@ -3013,7 +3013,7 @@ async fn compaction_retains_denied_actions_verbatim_even_if_summary_omits_them()
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 5,
+        max_rounds: Some(5),
     };
     agent.submit(&mut store, "task").unwrap();
     store.append(&session, &tool_message()).unwrap();
@@ -3082,7 +3082,7 @@ async fn compaction_output_limit_retries_once_then_continues_or_preserves_origin
             workspace: Workspace::new(home.path()).unwrap(),
             session: session.clone(),
             approval: ApprovalMode::Trust,
-            max_rounds: 5,
+            max_rounds: Some(5),
         };
         agent.submit(&mut store, "Inspect source").unwrap();
         store
@@ -3178,7 +3178,7 @@ async fn compaction_sizes_only_the_handoff_that_will_be_kept() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 5,
+        max_rounds: Some(5),
     };
     agent.submit(&mut store, "Old request").unwrap();
     store
@@ -3233,7 +3233,7 @@ async fn larger_compaction_generation_budget_does_not_allow_an_oversized_handoff
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 5,
+        max_rounds: Some(5),
     };
     agent.submit(&mut store, "Old request").unwrap();
     store
@@ -3282,7 +3282,7 @@ async fn compaction_shortens_from_original_evidence_and_can_recover_output_limit
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 5,
+        max_rounds: Some(5),
     };
     agent.submit(&mut store, "Original goal").unwrap();
     store
@@ -3379,7 +3379,7 @@ async fn missing_response_retries_identical_input_and_commits_only_completed_ans
                 workspace: Workspace::new(home.path()).unwrap(),
                 session: session.clone(),
                 approval: ApprovalMode::Trust,
-                max_rounds: 4,
+                max_rounds: Some(4),
             };
             agent.submit(&mut store, "answer this").unwrap();
             let before = store.messages(&session).unwrap().len();
@@ -3449,7 +3449,7 @@ async fn empty_and_reasoning_only_responses_preserve_pending_turn_after_configur
                 workspace: Workspace::new(home.path()).unwrap(),
                 session: session.clone(),
                 approval: ApprovalMode::Trust,
-                max_rounds: 4,
+                max_rounds: Some(4),
             };
             agent.submit(&mut store, "make a change").unwrap();
             let before = serde_json::to_value(store.messages(&session).unwrap()).unwrap();
@@ -3511,7 +3511,7 @@ async fn failed_model_request_during_progress_recovery_preserves_full_context() 
             workspace: Workspace::new(home.path()).unwrap(),
             session: session.clone(),
             approval: ApprovalMode::Trust,
-            max_rounds: 4,
+            max_rounds: Some(4),
         };
         assert!(
             agent
@@ -3557,7 +3557,7 @@ async fn recovery_resolves_queued_batch_and_retains_denials_without_granting_per
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
-        max_rounds: 5,
+        max_rounds: Some(5),
     };
     agent
         .run(&mut store, &mut |_| {}, &mut |_| panic!("read-only policy"))
@@ -3648,7 +3648,7 @@ async fn recovery_restricts_broad_discovery_and_rejects_unknown_batches() {
             workspace: Workspace::new(home.path()).unwrap(),
             session: session.clone(),
             approval: ApprovalMode::Trust,
-            max_rounds: 16,
+            max_rounds: Some(16),
         };
         let result = agent.run(&mut store, &mut |_| {}, &mut |_| true).await;
         let requests = server.mock.requests.lock().unwrap();
@@ -3765,7 +3765,7 @@ async fn invalid_research_loop_recovers_after_restart_and_has_a_hard_bound() {
             workspace: Workspace::new(home.path()).unwrap(),
             session: session.clone(),
             approval: ApprovalMode::ReadOnly,
-            max_rounds: 12,
+            max_rounds: Some(12),
         };
         let result = agent
             .run(&mut store, &mut |_| {}, &mut |_| {
@@ -3818,7 +3818,7 @@ async fn research_results_expose_the_durable_id_for_followup_evidence() {
         workspace,
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     agent.submit(&mut store, "Inspect the contract").unwrap();
     agent
@@ -3937,7 +3937,7 @@ async fn successful_memory_loop_recovers_or_concludes_with_originals_retained() 
             workspace: Workspace::new(home.path()).unwrap(),
             session: session.clone(),
             approval: ApprovalMode::ReadOnly,
-            max_rounds: 20,
+            max_rounds: Some(20),
         };
         agent
             .run(&mut store, &mut |_| {}, &mut |_| {
@@ -4025,7 +4025,7 @@ async fn recorded_outcomes_distinguish_real_edits_noops_and_execution_errors() {
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 4,
+        max_rounds: Some(4),
     };
     agent.submit(&mut store, "Write the file").unwrap();
     agent
@@ -4064,7 +4064,7 @@ async fn productive_work_passes_twenty_rounds_and_budget_pause_resumes_pending_c
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 21,
+        max_rounds: Some(21),
     };
     agent
         .submit(&mut store, "Perform the requested writes and verify.")
@@ -4073,7 +4073,11 @@ async fn productive_work_passes_twenty_rounds_and_budget_pause_resumes_pending_c
         .run(&mut store, &mut |_| {}, &mut |_| false)
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("configured budget of 21"));
+    assert!(
+        error
+            .to_string()
+            .contains("requested limit of 21 model rounds")
+    );
     assert_eq!(server.mock.requests.lock().unwrap().len(), 21);
     assert_eq!(
         std::fs::read_to_string(home.path().join("progress.txt")).unwrap(),
@@ -4207,7 +4211,7 @@ async fn reported_prompt_processing_becomes_progress_and_drives_the_summary_bar(
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
         approval: ApprovalMode::Trust,
-        max_rounds: 1,
+        max_rounds: Some(1),
     };
     let mut fractions = Vec::new();
     let mut compacted = false;

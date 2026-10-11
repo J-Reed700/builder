@@ -543,7 +543,7 @@ async fn live_behavior_suite() -> Result<()> {
                 workspace,
                 session: session.clone(),
                 approval: ApprovalMode::Ask,
-                max_rounds: 20,
+                max_rounds: Some(20),
             };
             let started = Instant::now();
             let mut prompts = 0;

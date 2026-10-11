@@ -474,15 +474,21 @@ async fn local_model_indexes_code_and_serves_hybrid_results_offline() {
         code_index_min_similarity_percent: 0,
         ..Default::default()
     };
-    maintain(&mut store, &workspace, Some(&memory), &settings, None)
-        .await
-        .unwrap();
+    maintain(
+        &mut store,
+        &workspace,
+        Some(memory.embeddings()),
+        &settings,
+        None,
+    )
+    .await
+    .unwrap();
     let result: Value = serde_json::from_str(
         &search(
             &mut store,
             "session",
             &workspace,
-            Some(&memory),
+            Some(memory.embeddings()),
             &settings,
             "reduce defensive powerups in competitive play",
             None,

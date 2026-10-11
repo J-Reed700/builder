@@ -162,6 +162,7 @@ and memory content is sent to the model endpoint you configure.
 | [Code index](docs/CODE_INDEX.md) | Index lifecycle, ranking, freshness, and settings |
 | [Research runtime](docs/RESEARCH_RUNTIME.md) | Evidence, candidate experiments, verification, and feature switches |
 | [Releases](docs/RELEASING.md) | Release gates, tagged GitHub releases, and manual build artifacts |
+| [Testing](docs/TESTING.md) | Unit, integration, browser and terminal scenarios, coverage gates, and failure reports |
 | [Architecture](ARCHITECTURE.md) | Crate boundaries, persistence invariants, and failure semantics |
 
 ## Contributing

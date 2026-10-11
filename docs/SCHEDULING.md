@@ -45,7 +45,7 @@ builder schedule history ID --json
 IDs accept an unambiguous prefix. `--profile` selects the saved model profile.
 Profile settings are loaded at execution time, so endpoint or model changes take
 effect on the next run. Each job retains its own workspace, prompt, permission
-mode, round budget, and deadline.
+mode, and deadline.
 
 Creating a schedule does **not** start a background process. Every list/create/show
 view reports whether a runner is connected to the same Builder home. Start it in
@@ -96,7 +96,7 @@ ordinary agent tools, including edits and shell commands, create a job explicitl
 
 ```sh
 builder -C /path/to/dedicated-checkout schedule add --every 2h \
-  --allow-writes --rounds 30 --timeout 900 \
+  --allow-writes --timeout 900 \
   'Run the test suite and investigate failures within this checkout'
 ```
 
@@ -105,7 +105,7 @@ the saved checkout directly. Use a dedicated checkout if interactive work could
 conflict with scheduled edits. Scheduled jobs are serialized with each other,
 but do not lock other terminal or browser conversations out of the checkout.
 
-The default budget is 50 model rounds and 30 minutes. An unauthorized tool request
+A scheduled run has no round budget; its deadline defaults to 30 minutes. An unauthorized tool request
 marks the run **blocked** and pauses its schedule. Failures, deadlines, and
 interruptions also pause it. Inspect the saved conversation before using
 `schedule resume ID` to resume future recurring occurrences or `schedule run ID`

@@ -1,18 +1,24 @@
 [package]
 name = "builder"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "A terminal coding agent for OpenAI-compatible model servers."
-license = "MIT"
+license.workspace = true
 repository = "https://github.com/J-Reed700/builder"
 readme = "README.md"
-rust-version = "1.95"
+rust-version.workspace = true
 keywords = ["agent", "cli", "coding", "llm"]
 categories = ["command-line-utilities", "development-tools"]
 
 [workspace]
 members = ["crates/*"]
 resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.95"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -50,6 +56,7 @@ tower = { version = "0.5", features = ["util"] }
 url = "2"
 
 [dev-dependencies]
+syn = { version = "2", features = ["full", "visit"] }
 tempfile = "3"
 rusqlite = { version = "0.37", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }

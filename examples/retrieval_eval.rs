@@ -83,7 +83,13 @@ async fn main() -> Result<()> {
             if semantic {
                 tokio::time::timeout(
                     std::time::Duration::from_secs(1800),
-                    code_index::maintain(&mut store, &workspace, memory.as_ref(), &settings, None),
+                    code_index::maintain(
+                        &mut store,
+                        &workspace,
+                        memory.as_ref().map(MemoryRuntime::embeddings),
+                        &settings,
+                        None,
+                    ),
                 )
                 .await??;
             }
@@ -93,7 +99,11 @@ async fn main() -> Result<()> {
                 &mut store,
                 "evaluation",
                 &workspace,
-                if semantic { memory.as_ref() } else { None },
+                if semantic {
+                    memory.as_ref().map(MemoryRuntime::embeddings)
+                } else {
+                    None
+                },
                 &settings,
                 &case.query,
                 Some(10),

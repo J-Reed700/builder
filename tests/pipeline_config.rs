@@ -240,7 +240,7 @@ async fn disabled_research_and_verification_cannot_execute_queued_calls_in_trust
             workspace,
             session: session.clone(),
             approval: ApprovalMode::Trust,
-            max_rounds: 2,
+            max_rounds: Some(2),
             memory: None,
         };
         agent
@@ -356,7 +356,7 @@ async fn completion_gate_and_review_can_be_disabled_without_bypassing_freshness(
         workspace,
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
-        max_rounds: 1,
+        max_rounds: Some(1),
         memory: None,
     };
     agent
@@ -818,9 +818,22 @@ fn research_schemas_reject_cross_operation_fields_and_require_decoder_inputs() {
 }
 
 #[test]
+fn retired_round_budgets_still_load_but_are_no_longer_settings() {
+    // Saved before round budgets were removed.
+    let saved: builder_core::config::PipelineSettings =
+        toml::from_str("max_rounds = 100\nsubagent_rounds = 30\nparallel_tools = 4").unwrap();
+    assert_eq!(saved.parallel_tools, 4);
+    let written = toml::to_string(&saved).unwrap();
+    assert!(!written.contains("max_rounds") && !written.contains("subagent_rounds"));
+    for key in ["max_rounds", "max-rounds", "subagent_rounds"] {
+        let error = saved.updated(&[format!("{key}=50")]).unwrap_err();
+        assert!(error.to_string().contains("was removed"), "{error}");
+    }
+}
+
+#[test]
 fn runtime_budgets_default_migrate_validate_and_persist() {
     let settings: builder_core::config::PipelineSettings = serde_json::from_str("{}").unwrap();
-    assert_eq!(settings.max_rounds, 100);
     assert_eq!(settings.progress_check_calls, 12);
     assert_eq!(settings.progress_recovery_rounds, 88);
     assert_eq!(settings.max_no_progress_calls(), 100);
@@ -829,8 +842,6 @@ fn runtime_budgets_default_migrate_validate_and_persist() {
     assert_eq!(settings.identical_shell_calls, 3);
     assert_eq!(settings.tool_calls_per_response, 128);
     for assignment in [
-        "max_rounds=0",
-        "max_rounds=1001",
         "progress_check_calls=0",
         "progress_recovery_rounds=1001",
         "failure_check_calls=101",
@@ -849,7 +860,6 @@ fn runtime_budgets_default_migrate_validate_and_persist() {
                 "config",
                 "pipeline",
                 "set",
-                "max_rounds=250",
                 "progress_check_calls=40",
                 "progress_recovery_rounds=210",
                 "failure_check_calls=5",
@@ -863,7 +873,6 @@ fn runtime_budgets_default_migrate_validate_and_persist() {
     );
     let loaded = Config::load(home.path()).unwrap();
     let pipeline = &loaded.profiles["local"].pipeline;
-    assert_eq!(pipeline.max_rounds, 250);
     assert_eq!(pipeline.progress_check_calls, 40);
     assert_eq!(pipeline.progress_recovery_rounds, 210);
     assert_eq!(pipeline.max_no_progress_calls(), 250);

@@ -78,7 +78,7 @@ fn agent(
         workspace: Workspace::new(root).unwrap(),
         session: session.into(),
         approval: ApprovalMode::Trust,
-        max_rounds: 4,
+        max_rounds: Some(4),
     }
 }
 

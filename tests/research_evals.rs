@@ -181,7 +181,7 @@ async fn same_model_baseline_memory_and_research_ablation() -> Result<()> {
                     workspace,
                     session: session.clone(),
                     approval: ApprovalMode::Ask,
-                    max_rounds: 30,
+                    max_rounds: Some(30),
                     memory: if mode == "baseline" {
                         None
                     } else {

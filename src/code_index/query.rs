@@ -3,7 +3,7 @@ use super::{
     indexing::{refresh_history_locked, refresh_locked},
     scope,
 };
-use crate::memory::MemoryRuntime;
+use crate::embedding::EmbeddingRuntime;
 use anyhow::{Result, ensure};
 use builder_core::{
     code_index::{CodeChunk, CodeQuerySource, CodeQueryTelemetry},
@@ -20,7 +20,7 @@ pub async fn search(
     store: &mut Store,
     session: &str,
     workspace: &Workspace,
-    memory: Option<&MemoryRuntime>,
+    embeddings: Option<&EmbeddingRuntime>,
     settings: &PipelineSettings,
     query: &str,
     requested_limit: Option<usize>,
@@ -29,7 +29,7 @@ pub async fn search(
         store,
         session,
         workspace,
-        memory,
+        embeddings,
         settings,
         query,
         requested_limit,
@@ -43,7 +43,7 @@ pub async fn search_with_trace(
     store: &mut Store,
     session: &str,
     workspace: &Workspace,
-    memory: Option<&MemoryRuntime>,
+    embeddings: Option<&EmbeddingRuntime>,
     settings: &PipelineSettings,
     query: &str,
     requested_limit: Option<usize>,
@@ -149,16 +149,16 @@ pub async fn search_with_trace(
         entry.history_rank = Some(rank);
     }
 
-    let semantic_fingerprint = memory.and_then(MemoryRuntime::embedding_fingerprint);
+    let semantic_fingerprint = embeddings.and_then(EmbeddingRuntime::fingerprint);
     let semantic_coverage = semantic_fingerprint
         .map(|fingerprint| store.code_index_vector_coverage(&scope, fingerprint))
         .transpose()?;
     let mut semantic_available = false;
     let mut dense_seed = Vec::new();
     if settings.code_index_semantic
-        && let Some(memory) = memory
-        && let Some(fingerprint) = memory.embedding_fingerprint()
-        && let Some(query_vector) = memory.embed_for_code_index(query, true).await
+        && let Some(embeddings) = embeddings
+        && let Some(fingerprint) = embeddings.fingerprint()
+        && let Some(query_vector) = embeddings.embed(query, true).await
     {
         semantic_available = true;
         let minimum = settings.code_index_min_similarity_percent as f64 / 100.0;
@@ -379,7 +379,7 @@ pub async fn search_with_trace(
             "semantic":semantic_available,
             "semantic_model":semantic_fingerprint,
             "semantic_coverage":semantic_coverage.map(|(indexed,total)|json!({"indexed":indexed,"total":total})),
-            "embedding_error":memory.and_then(MemoryRuntime::current_embedding_error),
+            "embedding_error":embeddings.and_then(EmbeddingRuntime::error),
             "fusion":"reciprocal_rank_fusion",
             "chunks_per_file":settings.code_index_chunks_per_file,
         },

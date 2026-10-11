@@ -154,7 +154,7 @@ async fn a_real_timeout_blocks_identical_side_effects_under_a_new_call_id() {
         workspace,
         session: session.clone(),
         approval: builder::agent::ApprovalMode::Trust,
-        max_rounds: 3,
+        max_rounds: Some(3),
     };
     agent.submit(&mut store, "run the check").unwrap();
     let error = agent

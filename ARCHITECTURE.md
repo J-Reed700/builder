@@ -27,19 +27,55 @@ builder (application + adapters)
 ├── main.rs                 composition root only
 ├── commands/               one-shot CLI command handlers
 ├── interactive/            session loop, compaction, maintenance, driver
-├── agent.rs + agent/       model-round orchestration, execution, guards, progress
+├── agent/                  public contract, rounds, request context, tools, compaction, delegation
+├── memory/                 evidence validation, retrieval, extraction, memory tool policy
+├── embedding.rs            shared embedding backend, fingerprints, deadlines, query cache
+├── research/               evidence freshness, workflow projections, operation policy
 ├── code_index/             query policy, index maintenance, filesystem watcher
-└── remote/                 host API, authentication, catalog, run execution
+├── remote/                 host API, authentication, catalog, run execution
+│   └── connection/         outbound gateway connection and private credential storage
+├── presentation.rs         plain activity descriptions shared by adapters
+└── ui/                     terminal prompts, help, renderer, panels, streams, theme
 
 builder-core                durable domain types and SQLite repositories
+├── protocol.rs, execution.rs, memory.rs, code_index.rs, research.rs, schedule.rs, todo.rs
+│                           domain values and pure interpretation; no SQL
+├── config/                 configuration parsing, validation, import, and persistence
+└── store/                  private SQLite connections, migrations, and repositories
+    ├── database.rs         journal/index connection lifecycle and index locks
+    ├── migrations.rs       transactional journal schema upgrades
+    ├── sessions.rs         session creation, lookup, and session locks
+    ├── messages.rs         active/original history and checkpoints
+    ├── execution.rs        attempts and atomic tool claims/results
+    ├── recovery.rs         cancellation, rewind, and composer recovery
+    └── ...                 memory, research, indexes, pages, schedules, todos, subagents
 builder-provider            chat/embedding transport contracts and OpenAI adapter
 builder-embedding           optional local embedding model runtime
 builder-tools               typed actions, schemas, display metadata, safe execution
 builder-remote-protocol     transport-neutral relay messages
-builder-gateway             relay API, security policy, credential persistence
+builder-gateway             router facade, pairing, host connection, request proxy,
+                            security policy, credential persistence
 ```
 
 Directory modules expose narrow facades and keep implementation modules private. For example, `code_index` re-exports query and maintenance operations without exposing ranking internals; `builder-tools` re-exports typed actions while keeping schema/display assembly internal; and the remote and gateway adapters keep authentication and credential persistence out of request orchestration.
+
+`Store` retains a concrete public API, but only its private implementation tree
+can access database connections and transaction creation. Domain modules contain
+values and pure interpretation, including typed execution outcomes. Existing
+`store::ToolOutcome` and related paths re-export those domain types.
+
+Code-index operations accept `Option<&EmbeddingRuntime>`. The embedding service
+owns backend choice, deadlines, fingerprints, the query cache, and failure state;
+it has no memory-record or session policy. Application composition obtains the
+shared service through `MemoryRuntime::embeddings()`. This preserves the current
+configuration behavior while allowing code retrieval to use embeddings without
+depending on the memory runtime. Memory schemas live with other schemas in
+`builder-tools`; the application still owns memory permissions and execution.
+
+Agent context assembly lives in `agent/request.rs`, separate from the round loop.
+Compaction, instruction memory, and child-agent execution live beneath the agent
+that owns them. The earlier `subagent` and `remote_connect` public module paths
+remain compatibility re-exports.
 
 The organization applies SOLID principles pragmatically:
 
@@ -49,6 +85,15 @@ The organization applies SOLID principles pragmatically:
 - **Liskov substitution:** every provider implementation must satisfy the same complete-message, retry, cancellation, and tool-call contract tests.
 
 Avoid cross-layer convenience imports that reverse this direction. New CLI commands belong in `commands/`; interactive lifecycle work belongs in `interactive/`; provider-specific serialization stays in `builder-provider`; durable facts and migrations stay in `builder-core`; and filesystem/process behavior stays in `builder-tools`.
+
+`tests/architecture.rs` checks internal crate dependency edges, domain/SQL
+separation, runtime/adapter separation, remote/terminal separation, and the
+code-index/embedding boundary. It parses Rust paths and imports, including
+grouped and renamed imports; it is a regression guard, not a proof about macro
+expansion or every possible re-export. All packages inherit their version,
+edition, license, and minimum Rust version from the workspace. File length alone
+is not a reason to add a module or trait: split at a responsibility or ownership
+boundary. The detailed audit is in [docs/RUST_ARCHITECTURE_AUDIT.md](docs/RUST_ARCHITECTURE_AUDIT.md).
 
 ## Turn state machine
 
@@ -119,6 +164,11 @@ This is not exactly-once execution. No local journal can atomically commit an ar
 The interactive input adapter is split into `input/buffer.rs` (editable atoms and shared paste blocks), `input/layout.rs` (cell-width-aware layout), `input/screen.rs` (RAII terminal ownership and bounded painting), and `input/mod.rs` (events, commands, and history). These modules have no dependency on HTTP or SQLite. The rendering adapter keeps theme and streaming escape filtering separate. The application coalesces model output on a 16 ms timer; persistence still commits complete messages at the same durability boundaries.
 
 The application owns the store, session lock, provider, and workspace. Manual interactive compaction uses a short-lived worker connection so the composer can accept one queued message while the checkpoint is being built; the message is committed only after the worker finishes. A generation owns its parser and partial response; dropping its future drops its HTTP stream. The CLI selects between an agent future and Ctrl-C. RAII releases the session lock and progress indicators.
+
+Each gateway proxy response also owns its pending-request registry slot through
+a drop guard. Normal completion, timeout, dispatch failure, and cancellation
+release capacity. Dropping a response future does not cancel or replay a host
+mutation; a late response is ignored after its registry entry is removed.
 
 Tools bound file sizes and returned output. On Unix, a shell tool owns a process-group guard that terminates non-detached descendants on cancellation, timeout, or completion. `kill_on_drop` protects the direct child as well. File operations are synchronous and bounded; large directory searches may delay cancellation. A worker pool is a possible later optimization, but cancellation must still leave mutations explicitly uncertain.
 
@@ -270,6 +320,20 @@ path, with whether the latest result is still in the projection), then ranked ch
 Writing the list is recommended; a named, targeted read or an answer are the alternatives.
 With a list active, the choices center on its current item. Read-only sessions are asked for
 an answer instead. Tool availability is the same as ordinary progress recovery.
+
+Executing an unfinished plan is enforced. A distinct read is new evidence, so a model can page
+through new ranges forever without tripping the no-progress streak while its current item never
+reaches an edit. A separate step-focus count, also from original history, counts tool calls since
+the plan last moved: a `Changed` outcome, a todo write that completes an item, or one that changes
+the current item. Reads do not reset it and neither do user messages, because "continue" asks for
+the same work and a new direction shows up as a rewritten plan. At `edit_focus_calls` with a list
+active in an editable session, the request offers only `read_file`, the edit tools and
+`todo_write`; at twice that, `read_file` goes too, except for the round after a failed edit. The
+trailing continuation names the item and offers the honest exits: make a real change, complete or
+rewrite the plan, or answer with the blocker. The first file change restores every tool.
+
+Inspection evidence already seen stays seen across user messages until a file changes, so re-reading
+a file after "continue" consumes the no-progress budget instead of resetting it.
 `ProgressNudge` is emitted at each multiple of the check within a run, so the user sees a
 stalling run and its repeated-read count.
 
@@ -277,7 +341,7 @@ stalling run and its repeated-read count.
 
 A tool batch is processed as consecutive groups. Admission, claiming and committing stay sequential and durable; only execution is concurrent. A group is either one call, or a run of side-effect-free calls (list, read, search, subagent) up to `parallel_tools`. The first call of a group keeps the original stop-and-explain checks. A later call that would cross the no-progress limit, or any call that is not side-effect free, ends the group and waits to lead the next one. Inspections run on blocking threads with a cloned `Workspace`. Results are committed and reported in call order, so the journal is identical to sequential execution. Such calls are claimed with `side_effect_free=1` (schema v13). An interrupted side-effect-free claim closes as a retryable failure, both when the agent resumes and inside `interrupt_turn`/`rewind`, instead of pausing for inspection. Legacy and mutating claims keep the uncertain path.
 
-`subagent` runs a complete `Agent` in a child session, created atomically with a `subagent_sessions` link to the parent session and call ID; one call starts at most one child. The child uses its own `Store` connection to the same journal. It gets the parent's profile with the research workflow, todos and subagents disabled, a later focus guard, `subagent_rounds`, no memory runtime, and `ApprovalMode::ReadOnly`. Its provider is `subagent::Delegated`, a view over the parent's model through the object-safe `builder_provider::DynProvider`. That view exposes only inspection tool schemas, and every nested agent has the same concrete type, so the recursive run is boxed once instead of instantiating an unbounded generic tower. Read-only approval independently denies anything a model requests outside that view. A semaphore bounds concurrent subagents. Children forward `SubagentProgress` events through a `RefCell` borrowed only for synchronous callbacks. The parent journal receives only the bounded report. If the child stops early (round budget, focus limit), its pending calls are closed and one tool-free request asks for a report; failures surface as ordinary tool errors. Child sessions are excluded from session and chat listings, but `resolve` finds them for export.
+`subagent` runs a complete `Agent` in a child session, created atomically with a `subagent_sessions` link to the parent session and call ID; one call starts at most one child. The child uses its own `Store` connection to the same journal. It gets the parent's profile with the research workflow, todos, subagents and automatic compaction disabled, a later focus guard, no round budget, no memory runtime, and `ApprovalMode::ReadOnly`. Its provider is `subagent::Delegated`, a view over the parent's model through the object-safe `builder_provider::DynProvider`. That view exposes only inspection tool schemas, and every nested agent has the same concrete type, so the recursive run is boxed once instead of instantiating an unbounded generic tower. Read-only approval independently denies anything a model requests outside that view. A semaphore bounds concurrent subagents. Children forward `SubagentProgress` events through a `RefCell` borrowed only for synchronous callbacks. The parent journal receives only the bounded report. It runs with `BudgetEnd::Report`: when its context reaches the compaction point (less room for the report and one larger retry), the run returns instead of compacting. When the child has not answered on its own, because its context filled or its run failed, its pending calls are closed and one tool-free request asks for a report. That request is retried once with a larger output allowance. If it still fails, the parent receives the child's evidence instead of an error: the paths it read, and each search or listing with what it found. Child sessions are excluded from session and chat listings, but `resolve` finds them for export.
 
 Compaction emits `CompactionProgress` with an estimated fraction of the older transcript: completed fragments plus the current fragment's progress. Within a fragment, reported prompt processing counts for 60%, and output is measured against the handoff byte ceiling. The estimate never reaches 100% before the checkpoint is validated. The OpenAI-compatible transport turns llama.cpp `prompt_progress` stream chunks into `Event::PromptProgress`; other servers never send them. Each streamed tool-call delta also emits `Event::ToolProgress` (latest call name, call count, cumulative argument bytes), so the terminal can restore a live status after streamed prose cleared it; the enforced conclusion suppresses it with the other streamed output.
 
@@ -440,14 +504,15 @@ parallel tool-call probes through the provider interface. Results are stored by 
 non-secret endpoint/model/settings fingerprint. They establish wire-protocol
 conformance for those calls, not model intelligence or task completion.
 
-The per-run generation budget defaults to 100 rounds and is configurable from
-`/settings` (1–1000). The profile persists this limit independently of the research
-master switch. An explicit `--max-rounds` overrides it at startup; saving the menu
-applies its value immediately, including for `/retry`. The last five rounds carry
-an ephemeral, token-accounted budget notice. Exhaustion pauses with durable work
-pending, without synthesizing a completion or dispatching the last generation's
-unclaimed calls. Explicit continuation recovers those calls under normal claim
-and approval rules. Investigation and failure guards still apply independently.
+A run has no generation budget by default: it ends when the work is done, the
+user stops it, or an investigation or failure guard ends a run that has stalled.
+An explicit `--max-rounds`, or a remote request's `max_rounds`, caps one
+invocation. Under a cap, the last five rounds carry an ephemeral, token-accounted
+budget notice, and exhaustion pauses with durable work pending, without
+synthesizing a completion or dispatching the last generation's unclaimed calls.
+Explicit continuation recovers those calls under normal claim and approval rules.
+Saved profiles may still contain the retired `max_rounds` and `subagent_rounds`
+settings; they load, are ignored, and are not written back.
 
 ## Remote browser adapter
 
@@ -517,7 +582,7 @@ and tool journal. `scheduler::commands` is the shared shell/slash adapter;
 `scheduler::service` only renders OS service definitions.
 
 A schedule contains a workspace, named profile, prompt, cadence, explicit access
-mode, deadline, and round budget. Calendar schedules carry an IANA timezone;
+mode, and deadline. Calendar schedules carry an IANA timezone;
 intervals retain phase and do not round to cron expressions. Each execution gets a
 fresh conversation. No model is needed to parse a schedule or determine its next
 occurrence. Profile settings reload for each execution.

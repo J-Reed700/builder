@@ -18,7 +18,6 @@ fn definition(home: &std::path::Path) -> Definition {
         profile: "local".into(),
         cadence: Cadence::Every { seconds: 60 },
         access: Access::ReadOnly,
-        max_rounds: 5,
         timeout_seconds: 30,
     }
 }

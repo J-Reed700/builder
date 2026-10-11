@@ -45,10 +45,11 @@ pub(super) fn no_progress_streak(
     let mut seen_evidence = std::collections::HashSet::new();
     let mut count = 0;
     for message in history {
+        // A new message restarts the budget, but evidence already seen stays
+        // seen: re-reading a file after "continue" is not a new finding.
         if message.role == Role::User {
             count = 0;
             calls.clear();
-            seen_evidence.clear();
         }
         for call in &message.tool_calls {
             calls.insert(call.id.as_str(), call);
@@ -81,6 +82,69 @@ pub(super) fn no_progress_streak(
         }
     }
     count
+}
+
+/// Calls spent on the current todo item since the plan last moved: a file
+/// change, a completed item, or a new current item. Reads never reset it, so
+/// paging through new ranges cannot look like progress, and neither does a
+/// user message: "continue" asks for the same work, and a new direction shows
+/// up as a rewritten plan.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct StepFocus {
+    pub(super) calls: usize,
+    /// The latest result was a failed file mutation; retrying it needs the
+    /// file's current text.
+    pub(super) edit_failed: bool,
+}
+
+pub(super) fn step_focus(
+    history: &[Message],
+    outcomes: &std::collections::HashMap<String, ToolOutcome>,
+) -> StepFocus {
+    use builder_core::todo::List;
+    let current = |list: &List| {
+        list.current()
+            .map(|(_, item)| item.content.trim().to_owned())
+    };
+    let mut calls = std::collections::HashMap::new();
+    let mut plan: Option<List> = None;
+    let mut focus = StepFocus::default();
+    for message in history {
+        for call in &message.tool_calls {
+            calls.insert(call.id.as_str(), call);
+        }
+        let Some(id) = message.tool_call_id.as_deref() else {
+            continue;
+        };
+        let Some(call) = calls.remove(id) else {
+            continue;
+        };
+        let outcome = outcomes.get(id);
+        focus.edit_failed = false;
+        if outcome == Some(&ToolOutcome::Changed) {
+            focus.calls = 0;
+            continue;
+        }
+        if outcome == Some(&ToolOutcome::Succeeded)
+            && let Some(list) = List::from_call(call)
+        {
+            let moved = plan.as_ref().is_none_or(|old| {
+                list.completed() > old.completed() || current(&list) != current(old)
+            });
+            plan = Some(list);
+            if moved {
+                focus.calls = 0;
+                continue;
+            }
+        }
+        focus.edit_failed = outcome == Some(&ToolOutcome::Failed)
+            && matches!(
+                Action::from_call(call),
+                Ok(Action::WriteFile { .. } | Action::EditFile { .. } | Action::MultiEdit { .. })
+            );
+        focus.calls += 1;
+    }
+    focus
 }
 
 type InspectionEvidence = (String, String);

@@ -129,7 +129,7 @@ async fn execute(
             Access::ReadOnly => ApprovalMode::ReadOnly,
             Access::Trust => ApprovalMode::Trust,
         },
-        max_rounds: definition.max_rounds,
+        max_rounds: None,
     };
     agent.submit(store, &definition.prompt)?;
     agent.run(store, &mut |_| {}, &mut |_| false).await?;

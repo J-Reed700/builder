@@ -618,6 +618,24 @@ fn call_summary_is_a_bounded_single_line() {
 }
 
 #[test]
+fn result_note_distinguishes_a_subagent_report_from_returned_evidence() {
+    assert_eq!(
+        builder_tools::result_note(
+            "subagent",
+            "Subagent report · map callers · 12 tool calls · session 1b0dd083\n\nFound it."
+        ),
+        Some("12 tool calls".into())
+    );
+    assert_eq!(
+        builder_tools::result_note(
+            "subagent",
+            "Subagent evidence · map callers · 105 tool calls · session 1b0dd083\n\n1. search x"
+        ),
+        Some("105 tool calls · no written report, evidence returned".into())
+    );
+}
+
+#[test]
 fn result_note_reports_failure_and_nonzero_exit() {
     // A shell command that ran fine but failed is a successful tool call with a
     // failing result; the exit status must be visible either way.

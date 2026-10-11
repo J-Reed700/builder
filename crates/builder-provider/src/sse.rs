@@ -23,10 +23,15 @@ impl SseDecoder {
                 }
                 self.event_bytes = 0;
             } else if let Some(value) = line.strip_prefix("data:") {
-                self.event_bytes += value.len();
+                let value = value.strip_prefix(' ').unwrap_or(value);
+                // Joining data lines adds a newline even when a line is empty.
+                // Account for it so empty data fields cannot bypass the bound.
+                self.event_bytes = self
+                    .event_bytes
+                    .saturating_add(value.len())
+                    .saturating_add(usize::from(!self.data.is_empty()));
                 anyhow::ensure!(self.event_bytes <= LIMIT, "SSE event exceeds 4 MiB");
-                self.data
-                    .push(value.strip_prefix(' ').unwrap_or(value).into());
+                self.data.push(value.into());
             }
         }
         Ok(events)

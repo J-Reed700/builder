@@ -109,6 +109,14 @@ class Terminal:
             self.drain(0)
 
     def close(self):
+        # A successful /exit prints its message before process cleanup finishes.
+        # Let it exit naturally so destructors and LLVM coverage profiles flush.
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            if os.waitpid(self.pid, os.WNOHANG)[0]:
+                os.close(self.fd)
+                return
+            self.drain(0.01)
         try:
             os.kill(self.pid, signal.SIGTERM)
         except ProcessLookupError:
