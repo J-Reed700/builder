@@ -58,9 +58,8 @@ fn plan(first: &str, second: &str) -> Value {
 fn todo_packet(messages: &[Message]) -> Option<&str> {
     messages
         .iter()
-        .filter(|message| message.role == Role::System)
         .filter_map(|message| message.content.as_deref())
-        .find(|text| text.starts_with("Builder todo list"))
+        .find_map(|text| text.find("Builder todo list").map(|i| &text[i..]))
 }
 
 struct Fixture {

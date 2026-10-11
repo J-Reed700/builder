@@ -26,7 +26,7 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         # Request-only packets trail the saved history, so the newest
         # conversation message is the last non-system one.
-        conversation = [m for m in messages if m["role"] != "system"]
+        conversation = [m for m in messages if m["role"] != "system" and not (m.get("content") or "").startswith("[Builder runtime")]
         newest = conversation[-1]
         if len(conversation) == 1 and newest["content"] == "implement change":
             change = {"tool_calls": [{"index": 0, "id": "read_original", "type": "function",
@@ -82,7 +82,7 @@ max_output_tokens = 1024
             terminal.expect("Ask Builder", mark)
             assert len(Endpoint.requests) == 3
             context = Endpoint.requests[-1]["messages"]
-            assert [m for m in context if m["role"] != "system"][-1]["content"] == "write a document instead"
+            assert [m for m in context if m["role"] != "system" and not (m.get("content") or "").startswith("[Builder runtime")][-1]["content"] == "write a document instead"
             assert any(m["role"] == "tool" and "original source evidence" in m["content"] for m in context)
             assert not any("unfinished visible only" in (m.get("content") or "") for m in context)
 
@@ -97,7 +97,7 @@ max_output_tokens = 1024
             terminal.expect("Handoff completed.", mark)
             terminal.expect("Ask Builder", mark)
             context = Endpoint.requests[-1]["messages"]
-            assert [m for m in context if m["role"] != "system"][-1]["content"] == "revised handoff"
+            assert [m for m in context if m["role"] != "system" and not (m.get("content") or "").startswith("[Builder runtime")][-1]["content"] == "revised handoff"
             assert not any(m.get("content") == "write a document instead" for m in context)
             assert any(m["role"] == "tool" for m in context)
 
@@ -147,7 +147,7 @@ max_output_tokens = 1024
             terminal.send(b"\x15fresh direction\r")
             terminal.expect("Handoff completed.", mark)
             terminal.expect("Ask Builder", mark)
-            assert [m for m in Endpoint.requests[-1]["messages"] if m["role"] != "system"][-1]["content"] == "fresh direction"
+            assert [m for m in Endpoint.requests[-1]["messages"] if m["role"] != "system" and not (m.get("content") or "").startswith("[Builder runtime")][-1]["content"] == "fresh direction"
             assert not any(m.get("content") == "cancel this" for m in Endpoint.requests[-1]["messages"])
             mark = len(terminal.output)
             terminal.send("/history archived\r")

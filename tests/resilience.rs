@@ -24,7 +24,13 @@ fn last_of<'a>(request: &'a serde_json::Value, role: &str) -> &'a serde_json::Va
         .unwrap()
         .iter()
         .rev()
-        .find(|m| m["role"] == role)
+        .find(|m| {
+            m["role"] == role
+                && !m["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("[Builder runtime")
+        })
         .unwrap()
 }
 
@@ -231,11 +237,10 @@ async fn progress_check_preserves_large_context_and_clears_after_edit() {
             .ends_with("system")
     );
     assert!(requests[0]["messages"].as_array().unwrap().iter().any(|m| {
-        m["role"] == "system"
-            && m["content"]
-                .as_str()
-                .unwrap_or("")
-                .contains("Runtime progress check: the configured number")
+        m["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Runtime progress check: the configured number")
     }));
     // The count and the read history change every round, so they travel in
     // the trailing continuation instead of the cached leading system block.
@@ -3583,11 +3588,10 @@ async fn recovery_resolves_queued_batch_and_retains_denials_without_granting_per
     // Runtime guidance is request-only and trails the saved history (it is
     // regenerated every round; the prefix stays cacheable).
     assert!(requests[1]["messages"].as_array().unwrap().iter().any(|m| {
-        m["role"] == "system"
-            && m["content"]
-                .as_str()
-                .unwrap_or("")
-                .contains("Runtime progress check")
+        m["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Runtime progress check")
     }));
     assert!(store.archived_messages(&session).unwrap().is_empty());
     assert!(!pending(&store.messages(&session).unwrap()));
