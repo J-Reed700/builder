@@ -320,6 +320,20 @@ path, with whether the latest result is still in the projection), then ranked ch
 Writing the list is recommended; a named, targeted read or an answer are the alternatives.
 With a list active, the choices center on its current item. Read-only sessions are asked for
 an answer instead. Tool availability is the same as ordinary progress recovery.
+
+Executing an unfinished plan is enforced. A distinct read is new evidence, so a model can page
+through new ranges forever without tripping the no-progress streak while its current item never
+reaches an edit. A separate step-focus count, also from original history, counts tool calls since
+the plan last moved: a `Changed` outcome, a todo write that completes an item, or one that changes
+the current item. Reads do not reset it and neither do user messages, because "continue" asks for
+the same work and a new direction shows up as a rewritten plan. At `edit_focus_calls` with a list
+active in an editable session, the request offers only `read_file`, the edit tools and
+`todo_write`; at twice that, `read_file` goes too, except for the round after a failed edit. The
+trailing continuation names the item and offers the honest exits: make a real change, complete or
+rewrite the plan, or answer with the blocker. The first file change restores every tool.
+
+Inspection evidence already seen stays seen across user messages until a file changes, so re-reading
+a file after "continue" consumes the no-progress budget instead of resetting it.
 `ProgressNudge` is emitted at each multiple of the check within a run, so the user sees a
 stalling run and its repeated-read count.
 

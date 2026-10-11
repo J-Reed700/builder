@@ -147,14 +147,14 @@ impl<P: Provider> Agent<P> {
                         reads: &reads,
                     })
                 });
-            if focus.as_ref().map(|focus| focus.stage) > focused {
-                if let Some(focus) = &focus {
-                    emit(AgentEvent::EditFocus {
-                        calls: focus.calls,
-                        step: focus.step,
-                        reads: focus.stage == FocusStage::Read,
-                    });
-                }
+            if let Some(focus) = &focus
+                && Some(focus.stage) > focused
+            {
+                emit(AgentEvent::EditFocus {
+                    calls: focus.calls,
+                    step: focus.step,
+                    reads: focus.stage == FocusStage::Read,
+                });
             }
             focused = focus.as_ref().map(|focus| focus.stage);
             let mut force_conclusion = false;
