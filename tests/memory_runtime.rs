@@ -1079,15 +1079,13 @@ async fn indexed_navigation_is_supplied_to_the_agent_without_memory_or_discovery
         .await
         .unwrap();
     let requests = agent.provider.requests.lock().unwrap();
-    let packet = requests[0]
+    // The reference rides inside the labelled runtime block that trails the
+    // saved history, so look for it within message content.
+    let text = requests[0]
         .iter()
-        .find(|m| {
-            m.content
-                .as_deref()
-                .is_some_and(|s| s.starts_with("Builder code-index reference"))
-        })
+        .filter_map(|m| m.content.as_deref())
+        .find_map(|s| s.find("Builder code-index reference").map(|i| &s[i..]))
         .expect("automatic indexed context");
-    let text = packet.content.as_ref().unwrap();
     assert!(
         text.contains("shield.rs")
             && text.contains("shield_drop_rate")
