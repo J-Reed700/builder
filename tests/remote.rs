@@ -1,4 +1,8 @@
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{
+    Json, Router,
+    extract::State,
+    routing::{get, post},
+};
 use builder::{
     agent::ApprovalMode,
     remote::{RemoteControl, RemoteOptions},
@@ -74,6 +78,9 @@ impl Host {
                     },
                 ),
             )
+            // The fake model is llama.cpp-shaped: it answers the capacity
+            // probe, so earlier-turn reasoning goes back to it.
+            .route("/props", get(|| async { Json(json!({"total_slots": 4})) }))
             .with_state((requests.clone(), replies));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut profile = Profile {
@@ -1031,7 +1038,7 @@ async fn chats_open_in_folders_under_the_root_and_never_outside() {
 }
 
 #[tokio::test]
-async fn reasoning_and_explanations_reach_the_browser_but_never_the_model() {
+async fn reasoning_and_explanations_reach_the_browser_and_return_to_a_caching_server() {
     // A thinking model explains itself, calls a tool, then answers. The browser
     // gets the explanation and the reasoning; the next model request gets neither.
     let mut call = write_call();
@@ -1064,7 +1071,13 @@ async fn reasoning_and_explanations_reach_the_browser_but_never_the_model() {
         .find(|m| m["role"] == "assistant")
         .expect("assistant turn is replayed to the model");
     assert_eq!(echoed["content"], "I will write the result file first.");
-    assert!(echoed.get("reasoning").is_none() && echoed.get("reasoning_content").is_none());
+    // llama.cpp renders prior reasoning into the transcript; sending it back
+    // keeps the prompt prefix append-only so the server's cache survives.
+    assert_eq!(
+        echoed["reasoning_content"],
+        "The user wants the file; write it before answering."
+    );
+    assert!(echoed.get("reasoning").is_none());
 }
 
 #[tokio::test]

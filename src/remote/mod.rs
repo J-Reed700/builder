@@ -72,6 +72,10 @@ struct Snapshot {
     preview_limited: bool,
     /// Reasoning streamed for the response in progress, shown beside the preview.
     thinking: String,
+    /// Moves whenever something other than streamed text may have changed the
+    /// saved transcript. The browser refetches history only when it moves,
+    /// not on every poll while a run is busy.
+    transcript_version: u64,
     notices: VecDeque<String>,
     /// The session's current todo list, refreshed whenever the agent records one.
     todos: Option<builder_core::todo::List>,

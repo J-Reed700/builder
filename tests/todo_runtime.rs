@@ -53,10 +53,12 @@ fn plan(first: &str, second: &str) -> Value {
     ]})
 }
 
+/// The request-only todo packet trails the saved history (it changes every
+/// round; the prefix stays cacheable), so look at every system message.
 fn todo_packet(messages: &[Message]) -> Option<&str> {
     messages
         .iter()
-        .take_while(|message| message.role == Role::System)
+        .filter(|message| message.role == Role::System)
         .filter_map(|message| message.content.as_deref())
         .find(|text| text.starts_with("Builder todo list"))
 }
