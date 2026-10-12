@@ -1,5 +1,5 @@
 //! Build a bounded request without changing original conversation messages.
-use super::{Agent, AgentEvent, estimate_tokens};
+use super::{Agent, AgentEvent, estimate_history_tokens, estimate_tokens};
 use anyhow::{Result, ensure};
 use builder_core::{
     protocol::{Message, Role},
@@ -114,13 +114,13 @@ impl<P: Provider> Agent<P> {
             + guidance
                 .as_ref()
                 .map_or(0, |m| estimate_tokens(std::slice::from_ref(m)));
+        // The history as it will be sent, reasoning included when it is.
+        let history = |messages: &[Message]| estimate_history_tokens(messages, &self.profile);
         let threshold =
             self.profile.context_tokens * usize::from(self.profile.compact_at_percent) / 100;
-        if self.profile.auto_compact
-            && estimate_tokens(&messages) + schemas + output_budget >= threshold
-        {
+        if self.profile.auto_compact && history(&messages) + schemas + output_budget >= threshold {
             emit(AgentEvent::AutoCompact {
-                messages: estimate_tokens(&messages),
+                messages: history(&messages),
                 overhead: schemas,
                 reserved: output_budget,
                 threshold,
@@ -129,19 +129,19 @@ impl<P: Provider> Agent<P> {
             self.compact(store, emit).await?;
             messages = store.messages(&self.session)?;
         }
-        if estimate_tokens(&messages) + schemas + output_budget > self.profile.context_tokens
+        if history(&messages) + schemas + output_budget > self.profile.context_tokens
             && let Some(packet) = code_packet.take()
         {
             schemas -= estimate_tokens(std::slice::from_ref(&packet));
             emit(AgentEvent::MemoryNotice("Automatic code-index reference omitted for this request to fit the configured context budget; the index and code_search tool remain available".into()));
         }
-        if estimate_tokens(&messages) + schemas + output_budget > self.profile.context_tokens
+        if history(&messages) + schemas + output_budget > self.profile.context_tokens
             && let Some(packet) = memory_packet.take()
         {
             schemas -= estimate_tokens(std::slice::from_ref(&packet));
             emit(AgentEvent::MemoryNotice("Memory reference omitted for this request to fit the context budget; stored notes retained".into()));
         }
-        let estimate = estimate_tokens(&messages) + schemas;
+        let estimate = history(&messages) + schemas;
         ensure!(
             estimate + output_budget <= self.profile.context_tokens,
             "Context budget reached (estimated {estimate} input + {} output / {}). History is intact. Use /compact, reduce the latest prompt, or verify context_tokens against the server's actual capacity.",
