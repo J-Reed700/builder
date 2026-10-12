@@ -157,18 +157,28 @@ async fn a_real_timeout_blocks_identical_side_effects_under_a_new_call_id() {
         max_rounds: Some(3),
     };
     agent.submit(&mut store, "run the check").unwrap();
+    // The guard answers the retry instead of ending the run, so the run goes
+    // on to its round cap; the retry never runs, whatever its timeout.
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| true)
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("uncertain"), "{error:#}");
+    assert!(
+        error.to_string().contains("limit of 3 model rounds"),
+        "{error:#}"
+    );
     assert_eq!(
         std::fs::read_to_string(dir.path().join("marker")).unwrap(),
         "x"
     );
     let outcomes = store.tool_outcomes(&session).unwrap();
-    assert_eq!(outcomes.len(), 1);
     assert_eq!(outcomes["attempt_0"], ToolOutcome::Uncertain);
+    assert_eq!(outcomes["attempt_1"], ToolOutcome::Failed);
+    let refused = store.tool_result(&session, "attempt_1").unwrap().unwrap();
+    assert!(
+        refused.starts_with("NOT RUN") && refused.contains("uncertain"),
+        "{refused}"
+    );
 }
 
 #[tokio::test]

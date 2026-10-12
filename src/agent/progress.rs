@@ -229,10 +229,12 @@ pub(super) enum FocusStage {
 }
 
 impl FocusStage {
+    /// Shell stays at both stages: a build or test run must never wait on an
+    /// edit, however long the step has gone.
     pub(super) fn offers(self, tool: &str) -> bool {
         matches!(
             tool,
-            "write_file" | "edit_file" | "multi_edit" | builder_core::todo::TOOL
+            "write_file" | "edit_file" | "multi_edit" | "shell" | builder_core::todo::TOOL
         ) || (self == Self::Read && tool == "read_file")
     }
 }
@@ -258,9 +260,9 @@ pub(super) fn edit_focus(focus: &Focus<'_>) -> String {
         focus.reads.summary()
     );
     text.push_str(match (focus.stage, focus.edit_failed) {
-        (FocusStage::Edit, true) => " Only edits and todo_write are available until a file changes, except that your last edit failed: read_file is back for this response so you can get the exact current text. Read only the range that edit needs, then retry it.",
-        (FocusStage::Edit, false) => " Only edits and todo_write are available until a file changes. Make the next real change for this item now from the text already in context; when it lands, every tool returns, including verification.",
-        (FocusStage::Read, _) => " Search, shell and subagents are paused until a file changes. Make the next real change for this item now with edit_file, multi_edit or write_file. read_file remains only for the exact current text an edit needs: read the smallest range, then edit.",
+        (FocusStage::Edit, true) => " Only edits, todo_write and shell are available until a file changes, except that your last edit failed: read_file is back for this response so you can get the exact current text. Read only the range that edit needs, then retry it. Shell is for builds and tests, not for reading or searching files.",
+        (FocusStage::Edit, false) => " Only edits, todo_write and shell are available until a file changes. Make the next real change for this item now from the text already in context; when it lands, every tool returns. Shell is for builds and tests, not for reading or searching files.",
+        (FocusStage::Read, _) => " Search and subagents are paused until a file changes. Make the next real change for this item now with edit_file, multi_edit or write_file. read_file remains only for the exact current text an edit needs: read the smallest range, then edit. Shell stays for builds and tests, not for reading or searching files.",
     });
     text.push_str(" Never make a placeholder or unrelated edit to get tools back. If this item needs no file change, mark it completed with todo_write and start the next one. If the plan is wrong or the user changed direction, rewrite it with todo_write. If you are blocked, answer without a tool call and tell the user the concrete blocker.");
     text

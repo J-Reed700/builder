@@ -69,7 +69,9 @@ impl Drop for ProcessGroup {
     }
 }
 
-pub(super) async fn run(root: &Path, command: &str, timeout_secs: u64) -> Result<String> {
+/// Run until the command exits, or until `timeout_secs` when one is given.
+/// Cancelling the future kills the process group.
+pub(super) async fn run(root: &Path, command: &str, timeout_secs: Option<u64>) -> Result<String> {
     #[cfg(windows)]
     let mut process = {
         let mut process = tokio::process::Command::new("cmd");
@@ -99,7 +101,7 @@ pub(super) async fn run(root: &Path, command: &str, timeout_secs: u64) -> Result
     let mut out = Capture::default();
     let mut err = Capture::default();
 
-    let completed = tokio::time::timeout(Duration::from_secs(timeout_secs.clamp(1, 120)), async {
+    let work = async {
         let (status, out_result, err_result) = tokio::join!(
             child.wait(),
             capture(stdout, &mut out),
@@ -108,8 +110,11 @@ pub(super) async fn run(root: &Path, command: &str, timeout_secs: u64) -> Result
         out_result?;
         err_result?;
         Ok::<_, anyhow::Error>(status?)
-    })
-    .await;
+    };
+    let completed = match timeout_secs {
+        Some(secs) => tokio::time::timeout(Duration::from_secs(secs.max(1)), work).await,
+        None => Ok(work.await),
+    };
     let (status, failure, diagnostic) = match completed {
         Ok(Ok(status)) => (Some(status), None, String::new()),
         failure => {

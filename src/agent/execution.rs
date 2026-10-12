@@ -140,46 +140,25 @@ impl<P: Provider> Agent<P> {
                 self.profile.pipeline.tool_calls_per_response
             );
         }
-        let history = store.history_messages(&self.session)?;
-        let outcomes = store.tool_outcomes(&self.session)?;
-        let tool_guards = tool_guard_state(&history, &outcomes);
-        if let Some(violation) = tool_guard_violation(
-            unresolved.iter().copied(),
-            &tool_guards,
-            self.profile.pipeline.identical_shell_calls,
-        ) {
-            match violation {
-                ToolGuardViolation::Blocked { call, outcome } => bail!(
-                    "Refused to replay saved {} call {} because an identical execute or mutation request has a {} outcome since the latest user instruction. The unresolved batch was rejected before execution. Inspect recorded side effects and send a new explicit instruction or /cancel to discard the saved calls.",
-                    call.function.name,
-                    call.id,
-                    blocked_outcome_name(outcome)
-                ),
-                ToolGuardViolation::Repeated { call, prior_count } => bail!(
-                    "Stopped a saved repeated {} loop: call {} would exceed the configured limit of {} identical shell requests since the latest user instruction or successful file edit ({prior_count} already completed or present earlier in this batch). The unresolved batch was rejected before execution. Session remains pending; send a new instruction or /cancel to discard the saved calls.",
-                    call.function.name,
-                    call.id,
-                    self.profile.pipeline.identical_shell_calls
-                ),
-            }
-        }
-
         let mut next = 0;
         while next < unresolved.len() {
             let admitted = self.admit(store, &unresolved[next..], emit)?;
             next += admitted.len();
-            let results = if admitted
-                .first()
-                .is_some_and(|entry| self.side_effect_free(&entry.action))
-            {
-                self.execute_side_effect_free(store, &admitted, emit).await
-            } else {
-                let mut results = Vec::with_capacity(admitted.len());
-                for entry in &admitted {
-                    results.push(self.execute(store, entry, approve).await);
-                }
-                results
-            };
+            let results =
+                if let Some(reason) = admitted.first().and_then(|entry| entry.refusal.clone()) {
+                    vec![(reason, ToolOutcome::Failed)]
+                } else if admitted
+                    .first()
+                    .is_some_and(|entry| self.side_effect_free(&entry.action))
+                {
+                    self.execute_side_effect_free(store, &admitted, emit).await
+                } else {
+                    let mut results = Vec::with_capacity(admitted.len());
+                    for entry in &admitted {
+                        results.push(self.execute(store, entry, approve).await);
+                    }
+                    results
+                };
             for (entry, (result, outcome)) in admitted.into_iter().zip(results) {
                 self.commit(store, entry, result, outcome, emit)?;
             }
@@ -189,6 +168,32 @@ impl<P: Provider> Agent<P> {
             tokio::task::yield_now().await;
         }
         Ok(())
+    }
+
+    /// Answer a call without running it: the reason becomes its result, so
+    /// the model can adapt instead of the run ending.
+    pub(super) fn refuse_call(
+        &self,
+        store: &mut Store,
+        call: &ToolCall,
+        reason: String,
+        emit: &mut dyn FnMut(AgentEvent),
+    ) -> Result<()> {
+        if !store.claim_side_effect_free_tool(&self.session, &call.id)? {
+            return Ok(());
+        }
+        let detail = builder_tools::call_summary(&call.function.name, &call.function.arguments);
+        emit(AgentEvent::ToolStarted {
+            name: call.function.name.clone(),
+            detail: detail.clone(),
+        });
+        let entry = Admitted {
+            call,
+            action: Action::from_call(call),
+            detail,
+            refusal: None,
+        };
+        self.commit(store, entry, reason, ToolOutcome::Failed, emit)
     }
 
     /// Whether a decoded call is guaranteed not to change the workspace.
@@ -234,25 +239,26 @@ impl<P: Provider> Agent<P> {
                     call.function.name,
                     call.id
                 );
+                // A request the guards will not run is answered with the
+                // reason instead of ending the run, so the model can adapt.
                 if let Some(violation) = tool_guard_violation(
                     [*call],
                     &guards,
                     self.profile.pipeline.identical_shell_calls,
-                ) {
-                    match violation {
-                        ToolGuardViolation::Blocked { call, outcome } => bail!(
-                            "Refused to replay saved {} call {} because an identical execute or mutation request has a {} outcome since the latest user instruction. This call remains unclaimed; inspect recorded side effects and send a new explicit instruction or /cancel to discard saved calls.",
-                            call.function.name,
-                            call.id,
-                            blocked_outcome_name(outcome)
-                        ),
-                        ToolGuardViolation::Repeated { call, prior_count } => bail!(
-                            "Stopped a saved repeated {} loop before call {}: {prior_count} identical shell requests already completed, reaching the configured limit of {}. This call remains unclaimed; send a new instruction or /cancel to discard saved calls.",
-                            call.function.name,
-                            call.id,
-                            self.profile.pipeline.identical_shell_calls
-                        ),
-                    }
+                ) && store.claim_side_effect_free_tool(&self.session, &call.id)?
+                {
+                    let detail =
+                        builder_tools::call_summary(&call.function.name, &call.function.arguments);
+                    emit(AgentEvent::ToolStarted {
+                        name: call.function.name.clone(),
+                        detail: detail.clone(),
+                    });
+                    return Ok(vec![Admitted {
+                        call,
+                        action,
+                        detail,
+                        refusal: Some(refusal(&violation)),
+                    }]);
                 }
             }
             let claimed = if side_effect_free {
@@ -285,6 +291,7 @@ impl<P: Provider> Agent<P> {
                 call,
                 action,
                 detail,
+                refusal: None,
             });
         }
         Ok(admitted)
@@ -430,6 +437,16 @@ impl<P: Provider> Agent<P> {
                 }
                 None => Err(anyhow::anyhow!("Memory is disabled")),
             },
+            Action::Shell {
+                command,
+                timeout_secs,
+            } => {
+                let shell = Action::Shell {
+                    command: command.clone(),
+                    timeout_secs: self.profile.pipeline.command_timeout(*timeout_secs),
+                };
+                self.workspace.execute(&shell).await
+            }
             action => self.workspace.execute(action).await,
         };
         match execution {
@@ -479,6 +496,7 @@ impl<P: Provider> Agent<P> {
             call,
             action,
             detail,
+            ..
         } = entry;
         let is_research = matches!(&action, Ok(Action::Research { .. }));
         let result = if is_research {
@@ -519,4 +537,29 @@ struct Admitted<'a> {
     call: &'a ToolCall,
     action: Result<Action>,
     detail: String,
+    /// Why the guards answer this call instead of running it.
+    refusal: Option<String>,
+}
+
+/// The result recorded for a call the guards will not run. The run goes on:
+/// the model reads this and chooses something else.
+fn refusal(violation: &ToolGuardViolation<'_>) -> String {
+    match violation {
+        ToolGuardViolation::Blocked {
+            call,
+            outcome: ToolOutcome::Denied,
+        } => format!(
+            "NOT RUN: the user denied this exact {} request earlier, and it stays denied until their next message. Choose a different action or ask the user.",
+            call.function.name
+        ),
+        ToolGuardViolation::Blocked { call, outcome } => format!(
+            "NOT RUN: an identical {} request already ran and its outcome is {} (it timed out or was interrupted after starting). Check what it changed before relying on it. The identical request stays blocked until the user's next message; a different or corrected request runs normally.",
+            call.function.name,
+            blocked_outcome_name(*outcome)
+        ),
+        ToolGuardViolation::Repeated { call, prior_count } => format!(
+            "NOT RUN: this identical {} request already ran {prior_count} times since the latest user message or file change, so its result would not change. Use the recorded result, change something first, or answer the user.",
+            call.function.name
+        ),
+    }
 }

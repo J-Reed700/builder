@@ -422,8 +422,8 @@ pub(crate) async fn run(
                     ui::panel::field(
                         "Failures",
                         format!(
-                            "recover after {} consecutive failures; {} recovery rounds",
-                            pipeline.failure_check_calls, pipeline.failure_recovery_rounds
+                            "recovery guidance after {} consecutive failures",
+                            pipeline.failure_check_calls
                         ),
                     ),
                     ui::panel::field(

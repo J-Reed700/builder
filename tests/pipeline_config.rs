@@ -820,15 +820,43 @@ fn research_schemas_reject_cross_operation_fields_and_require_decoder_inputs() {
 #[test]
 fn retired_round_budgets_still_load_but_are_no_longer_settings() {
     // Saved before round budgets were removed.
-    let saved: builder_core::config::PipelineSettings =
-        toml::from_str("max_rounds = 100\nsubagent_rounds = 30\nparallel_tools = 4").unwrap();
+    let saved: builder_core::config::PipelineSettings = toml::from_str(
+        "max_rounds = 100\nsubagent_rounds = 30\nfailure_recovery_rounds = 3\nparallel_tools = 4",
+    )
+    .unwrap();
     assert_eq!(saved.parallel_tools, 4);
     let written = toml::to_string(&saved).unwrap();
-    assert!(!written.contains("max_rounds") && !written.contains("subagent_rounds"));
-    for key in ["max_rounds", "max-rounds", "subagent_rounds"] {
+    for key in ["max_rounds", "subagent_rounds", "failure_recovery_rounds"] {
+        assert!(!written.contains(key), "{key} written back");
+    }
+    for key in [
+        "max_rounds",
+        "max-rounds",
+        "subagent_rounds",
+        "failure_recovery_rounds",
+    ] {
         let error = saved.updated(&[format!("{key}=50")]).unwrap_err();
         assert!(error.to_string().contains("was removed"), "{error}");
     }
+}
+
+#[test]
+fn commands_have_no_time_limit_unless_the_model_or_the_user_sets_one() {
+    let mut settings = builder_core::config::PipelineSettings::default();
+    assert_eq!(settings.command_timeout_secs, 0);
+    assert_eq!(settings.command_timeout(None), None);
+    assert_eq!(settings.command_timeout(Some(900)), Some(900));
+    // A saved cap applies to every command, including one that asks for more.
+    settings = settings
+        .updated(&["command_timeout_secs=600".into()])
+        .unwrap();
+    assert_eq!(settings.command_timeout(None), Some(600));
+    assert_eq!(settings.command_timeout(Some(30)), Some(30));
+    assert_eq!(settings.command_timeout(Some(3600)), Some(600));
+    // Configurations saved with the old 120-second ceiling still load.
+    let saved: builder_core::config::PipelineSettings =
+        toml::from_str("command_timeout_secs = 120").unwrap();
+    assert_eq!(saved.command_timeout(None), Some(120));
 }
 
 #[test]
@@ -838,14 +866,12 @@ fn runtime_budgets_default_migrate_validate_and_persist() {
     assert_eq!(settings.progress_recovery_rounds, 88);
     assert_eq!(settings.max_no_progress_calls(), 100);
     assert_eq!(settings.failure_check_calls, 3);
-    assert_eq!(settings.failure_recovery_rounds, 3);
     assert_eq!(settings.identical_shell_calls, 3);
     assert_eq!(settings.tool_calls_per_response, 128);
     for assignment in [
         "progress_check_calls=0",
         "progress_recovery_rounds=1001",
         "failure_check_calls=101",
-        "failure_recovery_rounds=0",
         "identical_shell_calls=0",
         "tool_calls_per_response=129",
     ] {
@@ -863,7 +889,6 @@ fn runtime_budgets_default_migrate_validate_and_persist() {
                 "progress_check_calls=40",
                 "progress_recovery_rounds=210",
                 "failure_check_calls=5",
-                "failure_recovery_rounds=7",
                 "identical_shell_calls=4",
                 "tool_calls_per_response=24",
             ]
@@ -877,7 +902,6 @@ fn runtime_budgets_default_migrate_validate_and_persist() {
     assert_eq!(pipeline.progress_recovery_rounds, 210);
     assert_eq!(pipeline.max_no_progress_calls(), 250);
     assert_eq!(pipeline.failure_check_calls, 5);
-    assert_eq!(pipeline.failure_recovery_rounds, 7);
     assert_eq!(pipeline.identical_shell_calls, 4);
     assert_eq!(pipeline.tool_calls_per_response, 24);
 }

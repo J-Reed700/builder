@@ -53,8 +53,8 @@ pub fn definitions_with_pipeline_and_phase(
         ),
         schema(
             "shell",
-            "Execute a shell command in the workspace. Requires approval. Shell has the user's permissions, not a sandbox. Timeout up to 120 seconds.",
-            json!({"command":{"type":"string"},"timeout_secs":{"type":"integer","minimum":1,"maximum":120}}),
+            "Execute a shell command in the workspace. Requires approval. Shell has the user's permissions, not a sandbox. It runs until it exits, however long a build or test suite takes; set timeout_secs only for a command that may never exit, such as a server or watcher.",
+            json!({"command":{"type":"string"},"timeout_secs":{"type":"integer","minimum":1}}),
             &["command"],
         ),
     ];

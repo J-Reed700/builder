@@ -1,8 +1,7 @@
 //! Model-round orchestration. Persist only complete, validated responses.
 use super::guard::{
-    ToolGuardViolation, blocked_outcome_name, failed_tool_streak, invalid_tool_call_id,
-    no_progress_streak, step_focus, structurally_valid_tool_call, tool_guard_state,
-    tool_guard_violation, tool_phase,
+    failed_tool_streak, invalid_tool_call_id, no_progress_streak, step_focus,
+    structurally_valid_tool_call, tool_guard_state, tool_phase,
 };
 use super::progress::{
     Focus, FocusStage, Nudge, ReadLog, edit_focus, planning_reminder, progress_guidance,
@@ -14,7 +13,7 @@ use super::{
 };
 use anyhow::{Result, bail, ensure};
 use builder_core::{
-    protocol::{Message, Role},
+    protocol::{Message, Role, ToolCall},
     store::{AttemptOutcome, Store},
 };
 use builder_provider::{Event, OutputLimit, Provider};
@@ -117,6 +116,11 @@ impl<P: Provider> Agent<P> {
                 .filter(|repetition| repetition.count >= identical_shell_calls)
                 .max_by_key(|repetition| repetition.count);
             let failed_calls = failed_tool_streak(&history, &outcomes);
+            if failed_calls < self.profile.pipeline.failure_check_calls {
+                // A streak that ends (a file change, a new message) closes
+                // its recovery; the next streak is announced afresh.
+                failure_recoveries = 0;
+            }
             let todos = (self.profile.tools && self.profile.pipeline.todos)
                 .then(|| builder_core::todo::List::latest(&history, &outcomes))
                 .flatten()
@@ -169,10 +173,6 @@ impl<P: Provider> Agent<P> {
             } else if failed_calls >= self.profile.pipeline.failure_check_calls
                 && exploration_rounds == 0
             {
-                ensure!(
-                    failure_recoveries < self.profile.pipeline.failure_recovery_rounds,
-                    "Tool recovery exhausted after repeated failures. Session remains pending; inspect the recorded errors before /retry."
-                );
                 if failure_recoveries == 0 {
                     emit(AgentEvent::ExplorationRecovery {
                         calls: failed_calls,
@@ -222,7 +222,7 @@ impl<P: Provider> Agent<P> {
                     limit: identical_shell_calls,
                 });
                 let warning = format!(
-                    "Runtime repetition check: the identical {} request already completed {} times since the latest user instruction or successful file edit. Do not request it again. Use its recorded result, choose a materially different action, or answer the user. A further identical request will be rejected before execution.",
+                    "Runtime repetition check: the identical {} request already completed {} times since the latest user instruction or successful file edit. Do not request it again. Use its recorded result, choose a materially different action, or answer the user. A further identical request will not be run.",
                     repeated.name, repeated.count
                 );
                 guidance = Some(match guidance {
@@ -411,20 +411,19 @@ impl<P: Provider> Agent<P> {
                             "Model returned a malformed tool call. The entire batch was rejected before persistence or execution. Session remains pending; send a follow-up or /retry."
                         );
                     }
-                    if message.tool_calls.iter().any(|call| {
-                        !definitions.iter().any(|d| {
-                            d["function"]["name"].as_str() == Some(call.function.name.as_str())
+                    // A call to a tool this step does not offer is answered
+                    // with the reason once the response is saved; it does not
+                    // end the run.
+                    let unavailable: Vec<ToolCall> = message
+                        .tool_calls
+                        .iter()
+                        .filter(|call| {
+                            !definitions.iter().any(|d| {
+                                d["function"]["name"].as_str() == Some(call.function.name.as_str())
+                            })
                         })
-                    }) {
-                        store.finish_attempt(
-                            attempt,
-                            AttemptOutcome::Failed,
-                            "Model requested an unavailable tool",
-                        )?;
-                        bail!(
-                            "Model requested a tool unavailable for this step. No calls from that response were executed. Session is paused; send a follow-up or /retry."
-                        );
-                    }
+                        .cloned()
+                        .collect();
                     if let Some(id) = invalid_tool_call_id(&message.tool_calls) {
                         store.finish_attempt(
                             attempt,
@@ -455,40 +454,6 @@ impl<P: Provider> Agent<P> {
                         bail!(
                             "Stopped tool execution after {no_progress_calls} calls without new inspection evidence or a successful file edit since the latest user instruction. The configured limit is {max_no_progress_calls}; the entire response was rejected before execution. Existing evidence is preserved. Retry only to let the model answer without tools, or send a new instruction to continue a narrowed task."
                         );
-                    }
-                    if let Some(violation) = tool_guard_violation(
-                        message.tool_calls.iter(),
-                        &tool_guards,
-                        identical_shell_calls,
-                    ) {
-                        match violation {
-                            ToolGuardViolation::Blocked { call, outcome } => {
-                                store.finish_attempt(
-                                    attempt,
-                                    AttemptOutcome::Failed,
-                                    "Model tried to replay a denied or uncertain tool request",
-                                )?;
-                                bail!(
-                                    "Refused to replay {} call {} because an identical execute or mutation request has a {} outcome since the latest user instruction. The entire response was rejected before execution. Inspect recorded side effects and send a new explicit instruction before requesting that action again.",
-                                    call.function.name,
-                                    call.id,
-                                    blocked_outcome_name(outcome)
-                                );
-                            }
-                            ToolGuardViolation::Repeated { call, prior_count } => {
-                                store.finish_attempt(
-                                    attempt,
-                                    AttemptOutcome::Failed,
-                                    "Model repeated an identical completed tool request",
-                                )?;
-                                bail!(
-                                    "Stopped a repeated {} loop: call {} would exceed the configured limit of {} identical requests since the latest user instruction or successful file edit ({prior_count} already completed or present earlier in this response). The entire response was rejected before execution. Session remains pending; give a new instruction, or use /retry after changing the model/settings.",
-                                    call.function.name,
-                                    call.id,
-                                    identical_shell_calls
-                                );
-                            }
-                        }
                     }
                     if message.tool_calls.is_empty()
                         && self.profile.tools
@@ -528,6 +493,17 @@ impl<P: Provider> Agent<P> {
                     }
                     store.append(&self.session, &message)?;
                     store.finish_attempt(attempt, AttemptOutcome::Complete, "")?;
+                    for call in &unavailable {
+                        self.refuse_call(
+                            store,
+                            call,
+                            format!(
+                                "NOT RUN: {} is not available for this step. Use one of the tools you were given; the step's instructions say which are paused and why.",
+                                call.function.name
+                            ),
+                            emit,
+                        )?;
+                    }
                     if message.tool_calls.is_empty() {
                         // Final answers return immediately. Optional extraction/indexing
                         // resumes on a later pending turn, never after completion.

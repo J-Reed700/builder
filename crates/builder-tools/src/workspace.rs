@@ -498,7 +498,7 @@ impl Workspace {
             Action::Shell {
                 command,
                 timeout_secs,
-            } => shell::run(&self.root, command, timeout_secs.unwrap_or(30)).await?,
+            } => shell::run(&self.root, command, *timeout_secs).await?,
         };
         Ok(truncate(output, MAX_OUTPUT))
     }
