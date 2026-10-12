@@ -9,7 +9,7 @@ use super::progress::{
     progress_nudge, todo_continuation, todo_packet,
 };
 use super::{
-    Agent, AgentEvent, ApprovalMode, estimate_tokens, pending, request::RequestContext,
+    Agent, AgentEvent, ApprovalMode, estimate_history_tokens, pending, request::RequestContext,
     subagent_slots,
 };
 use anyhow::{Result, bail, ensure};
@@ -94,7 +94,7 @@ impl<P: Provider> Agent<P> {
             }
             // Room for the answer and its one larger retry.
             if budget_end == BudgetEnd::Report
-                && estimate_tokens(&messages) + 2 * output_budget
+                && estimate_history_tokens(&messages, &self.profile) + 2 * output_budget
                     >= self.profile.context_tokens * usize::from(self.profile.compact_at_percent)
                         / 100
             {

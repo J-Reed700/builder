@@ -56,7 +56,7 @@ While summarizing, the terminal shows a progress bar estimated from how much of 
 
 While the model writes an action, such as a large edit after a line of prose, the status line counts the characters streamed so far (`Preparing Edit file · 7.2k chars written`). A long edit on a local model is still generating even when no new text appears.
 
-Configure `auto_compact = false` to disable automatic summaries, or `compact_at_percent = 75` (50–90) to change the threshold in a model profile. Status shows the setting. These defaults also apply to existing profiles missing the new fields. Compaction uses the same endpoint without tools and adds model requests; it does not make inference faster. Its generation budget follows `max_output_tokens` up to 16,384. The accepted handoff allowance scales with the material being replaced and the context window, from 4,096 to 16,384 estimated tokens; it can use at most one quarter of the older context and one tenth of the full window. Hidden reasoning is stored in the transcript but excluded from prompt estimates and handoff sizing because providers do not send it back. If a fragment hits the output limit, Builder discards that partial summary and retries it once with twice the allowance (up to 32,768), reserving room in the context beforehand. A genuinely oversized visible handoff gets one separate shortening retry from the original evidence. Empty, tool-bearing, and oversized results report distinct errors; none replace saved history.
+Configure `auto_compact = false` to disable automatic summaries, or `compact_at_percent = 75` (50–90) to change the threshold in a model profile. Status shows the setting. These defaults also apply to existing profiles missing the new fields. Compaction uses the same endpoint without tools and adds model requests; it does not make inference faster. Its generation budget follows `max_output_tokens` up to 16,384. The accepted handoff allowance scales with the material being replaced and the context window, from 4,096 to 16,384 estimated tokens; it can use at most one quarter of the older context and one tenth of the full window. Hidden reasoning is stored in the transcript but excluded from prompt estimates and handoff sizing because it is not sent back, unless the profile sets `reasoning_history = "send"`; then the threshold check, the status percentage and the retained tail count it. If a fragment hits the output limit, Builder discards that partial summary and retries it once with twice the allowance (up to 32,768), reserving room in the context beforehand. A genuinely oversized visible handoff gets one separate shortening retry from the original evidence. Empty, tool-bearing, and oversized results report distinct errors; none replace saved history.
 
 Output limits are separate from context limits. On a `length` finish, Builder discards the incomplete result and retries once with up to twice the output budget (capped at 32,768 and available context). It never executes partial tool calls. If the larger response also hits its limit, the turn remains saved for a new instruction or `/retry`.
 
@@ -146,17 +146,27 @@ max_attempts = 5
 connect_timeout_secs = 10
 idle_timeout_secs = 90
 request_timeout_secs = 900
-# "auto" (default) | "send" | "strip" — see below
-reasoning_history = "auto"
+# "strip" (default) | "send" — see below
+reasoning_history = "strip"
 ```
 
 `reasoning_history` decides whether an assistant turn's reasoning
-(`reasoning_content`) goes back to the server with the history. `auto` sends
-it to servers that answer llama.cpp's `/props` probe and strips it elsewhere.
-llama.cpp needs it: its templates keep the reasoning in the rendered transcript
-and its prompt cache resumes only an append-only prefix, so a stripped
-transcript re-processes the whole conversation on every round. Memory
-extraction requests always run with thinking switched off on such servers.
+(`reasoning_content`) goes back to the server with the history. Thinking stays
+on either way; this only controls what earlier turns carry. `strip`, the
+default, sends visible output only. Reasoning is still saved in the transcript
+and shown in the browser. With thinking on, a long run produces several times
+more reasoning than visible output, and sending it back gains no prompt-cache
+reuse: Builder's per-request context trails the saved history, so the server
+re-processes the newest turn whether or not it carries its reasoning. `send`
+returns it on every turn, and token estimates, the status percentage and
+automatic compaction then count it. A saved `"auto"`, the earlier default that
+sent reasoning to llama.cpp, is read as `strip`. Memory extraction requests
+always run with thinking switched off on llama.cpp servers.
+
+On a template with Qwen's `preserve_thinking` switch, a stripped history still
+renders an empty think block for every earlier turn. Add `preserve_thinking =
+false` to the profile's `extra_body.chat_template_kwargs` to render earlier
+turns as visible output only.
 
 ### Import Continue or OpenCode models
 

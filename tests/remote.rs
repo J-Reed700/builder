@@ -1185,9 +1185,10 @@ async fn chats_open_in_folders_under_the_root_and_never_outside() {
 }
 
 #[tokio::test]
-async fn reasoning_and_explanations_reach_the_browser_and_return_to_a_caching_server() {
+async fn reasoning_and_explanations_reach_the_browser_but_reasoning_is_not_sent_back() {
     // A thinking model explains itself, calls a tool, then answers. The browser
-    // gets the explanation and the reasoning; the next model request gets neither.
+    // gets the explanation and the reasoning; the next model request gets the
+    // explanation only.
     let mut call = write_call();
     call["content"] = json!("I will write the result file first.");
     call["reasoning_content"] = json!("The user wants the file; write it before answering.");
@@ -1218,13 +1219,9 @@ async fn reasoning_and_explanations_reach_the_browser_and_return_to_a_caching_se
         .find(|m| m["role"] == "assistant")
         .expect("assistant turn is replayed to the model");
     assert_eq!(echoed["content"], "I will write the result file first.");
-    // llama.cpp renders prior reasoning into the transcript; sending it back
-    // keeps the prompt prefix append-only so the server's cache survives.
-    assert_eq!(
-        echoed["reasoning_content"],
-        "The user wants the file; write it before answering."
-    );
-    assert!(echoed.get("reasoning").is_none());
+    // Reasoning stays in the transcript, not the prompt: on llama.cpp too, it
+    // would be most of a long run's prompt and buys no cache reuse.
+    assert!(echoed.get("reasoning_content").is_none() && echoed.get("reasoning").is_none());
 }
 
 #[tokio::test]

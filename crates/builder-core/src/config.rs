@@ -61,26 +61,29 @@ impl Default for Profile {
             connect_timeout_secs: 10,
             idle_timeout_secs: 90,
             request_timeout_secs: 900,
-            reasoning_history: ReasoningHistory::Auto,
+            reasoning_history: ReasoningHistory::Strip,
         }
     }
 }
 /// What happens to an assistant turn's reasoning when the history goes back
 /// to the server.
 ///
-/// llama.cpp keeps `reasoning_content` in the rendered transcript (Qwen's
-/// `preserve_thinking`), and its prompt cache can only resume an append-only
-/// prefix: strip the reasoning and the first assistant turn of every request
-/// no longer matches what the server generated, so the whole conversation is
-/// re-processed each round. Other servers may reject the field, and it only
-/// inflates their prompt.
+/// Reasoning is stored with the transcript either way. Sent back, it is
+/// usually most of the prompt in a long run (several times the visible output
+/// per round), and it buys no prompt-cache reuse: request-only context trails
+/// the durable history, so the server's cached prefix ends before the turn it
+/// just generated and that turn is re-processed whether or not it carries its
+/// reasoning. Some servers also reject the field.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningHistory {
-    /// Send it to servers that answer llama.cpp's `/props` probe; strip it elsewhere.
-    #[default]
-    Auto,
+    /// Return `reasoning_content` with each assistant turn. Token estimates,
+    /// and so automatic compaction, then count it.
     Send,
+    /// Keep the history to visible output. `auto`, the earlier default that
+    /// sent reasoning to llama.cpp, is read as this.
+    #[default]
+    #[serde(alias = "auto")]
     Strip,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +114,10 @@ impl Profile {
         self.roles
             .iter()
             .any(|r| matches!(r, ModelRole::Chat | ModelRole::Edit | ModelRole::Apply))
+    }
+
+    pub fn sends_reasoning(&self) -> bool {
+        self.reasoning_history == ReasoningHistory::Send
     }
 
     pub fn validate(&self) -> Result<()> {

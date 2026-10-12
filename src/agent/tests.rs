@@ -29,6 +29,25 @@ fn context_estimate_excludes_transcript_only_reasoning() {
 }
 
 #[test]
+fn history_estimate_counts_reasoning_only_when_it_is_sent() {
+    let plain = Message::text(Role::Assistant, "answer");
+    let mut thinking = plain.clone();
+    thinking.reasoning = Some("private reasoning ".repeat(10_000));
+    let history = [Message::text(Role::User, "go"), thinking];
+    let mut profile = Profile::default();
+    assert_eq!(
+        estimate_history_tokens(&history, &profile),
+        estimate_tokens(&history),
+        "stripped by default, so it costs nothing"
+    );
+    profile.reasoning_history = builder_core::config::ReasoningHistory::Send;
+    assert!(
+        estimate_history_tokens(&history, &profile) >= estimate_tokens(&history) + 90_000,
+        "sent back, it is part of the request and of the compaction threshold"
+    );
+}
+
+#[test]
 fn tool_phase_uses_typed_actions_and_outcomes_and_resets_on_user_input() {
     let mut call = Message::text(Role::Assistant, "model prose saying verify is ignored");
     call.tool_calls.push(ToolCall {
