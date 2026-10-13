@@ -119,7 +119,7 @@ async fn execute(
     )?;
     store.schedule_attach_session(&run.id, &session)?;
     let _guard = store.lock(&session)?;
-    let agent = Agent {
+    let mut agent = Agent {
         provider: OpenAiCompatible::new(profile.clone())?,
         memory: MemoryRuntime::from_config(&config)?,
         profile,
@@ -131,6 +131,7 @@ async fn execute(
         },
         max_rounds: None,
     };
+    agent.fit_context().await;
     agent.submit(store, &definition.prompt)?;
     agent.run(store, &mut |_| {}, &mut |_| false).await?;
     ensure!(

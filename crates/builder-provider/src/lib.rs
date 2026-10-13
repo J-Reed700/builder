@@ -56,6 +56,11 @@ pub trait Provider {
     fn parallel_capacity(&self) -> impl Future<Output = Option<usize>> {
         async { None }
     }
+    /// The server's per-request context window in tokens, if it exposes one.
+    /// Unknown capacity must never prevent normal generation.
+    fn context_capacity(&self) -> impl Future<Output = Option<usize>> {
+        async { None }
+    }
 
     fn complete_with_budget(
         &self,

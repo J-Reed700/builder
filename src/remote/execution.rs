@@ -403,7 +403,7 @@ async fn drive(
     if profile.tools && profile.pipeline.todos {
         run.snapshot.lock().unwrap().todos = store.todos(&session)?;
     }
-    let agent = Agent {
+    let mut agent = Agent {
         memory: MemoryRuntime::from_config(&config)?,
         provider: OpenAiCompatible::new(profile.clone())?,
         max_rounds: shared.options.max_rounds,
@@ -412,6 +412,9 @@ async fn drive(
         session: session.clone(),
         approval,
     };
+    // The browser's context meter shows the fitted window through the
+    // compaction events, so no separate notice is needed here.
+    agent.fit_context().await;
     if let RunAction::Message { prompt } = &request.operation
         && let Err(error) = agent.submit(&mut store, prompt)
     {

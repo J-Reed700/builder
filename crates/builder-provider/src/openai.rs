@@ -9,11 +9,18 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Duration};
 
+/// What one `/props` probe learned about a llama.cpp server.
+#[derive(Clone, Copy, Debug)]
+struct ServerProps {
+    slots: usize,
+    context: Option<usize>,
+}
+
 pub struct OpenAiCompatible {
     client: reqwest::Client,
     profile: Profile,
     headers: reqwest::header::HeaderMap,
-    capacity: tokio::sync::OnceCell<Option<usize>>,
+    props: tokio::sync::OnceCell<Option<ServerProps>>,
     /// Derived requests (memory extraction) that must not spend their small
     /// output budget on hidden reasoning.
     suppress_thinking: bool,
@@ -129,7 +136,7 @@ impl OpenAiCompatible {
             client,
             profile,
             headers,
-            capacity: tokio::sync::OnceCell::new(),
+            props: tokio::sync::OnceCell::new(),
             suppress_thinking: false,
         })
     }
@@ -149,7 +156,7 @@ impl OpenAiCompatible {
     }
     // Probe once per connection, including unsupported/error responses. Strip only
     // the compatibility API suffix so reverse-proxy path prefixes are preserved.
-    async fn discover_parallel_capacity(&self) -> Option<usize> {
+    async fn discover_props(&self) -> Option<ServerProps> {
         let base = self.profile.base_url.trim_end_matches('/');
         let root = base.strip_suffix("/v1").unwrap_or(base);
         let response = self
@@ -174,7 +181,28 @@ impl OpenAiCompatible {
         }
         let value: Value = serde_json::from_slice(&bytes).ok()?;
         let slots = usize::try_from(value.get("total_slots")?.as_u64()?).ok()?;
-        (slots > 0).then_some(slots)
+        if slots == 0 {
+            return None;
+        }
+        // llama.cpp reports the per-slot window here; a missing or zero value
+        // leaves the configured window in charge.
+        let context = value
+            .get("default_generation_settings")
+            .and_then(|settings| settings.get("n_ctx"))
+            .and_then(Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok())
+            .filter(|&n| n > 0);
+        Some(ServerProps { slots, context })
+    }
+    async fn props(&self) -> Option<ServerProps> {
+        *self
+            .props
+            .get_or_init(|| async {
+                tokio::time::timeout(Duration::from_secs(2), self.discover_props())
+                    .await
+                    .unwrap_or(None)
+            })
+            .await
     }
     /// A bounded, read-only embedding request. Never logs response bodies or credentials.
     pub async fn embed(&self, input: &str) -> Result<Vec<f32>> {
@@ -391,14 +419,10 @@ impl OpenAiCompatible {
 
 impl Provider for OpenAiCompatible {
     async fn parallel_capacity(&self) -> Option<usize> {
-        *self
-            .capacity
-            .get_or_init(|| async {
-                tokio::time::timeout(Duration::from_secs(2), self.discover_parallel_capacity())
-                    .await
-                    .unwrap_or(None)
-            })
-            .await
+        self.props().await.map(|props| props.slots)
+    }
+    async fn context_capacity(&self) -> Option<usize> {
+        self.props().await.and_then(|props| props.context)
     }
 
     async fn complete(

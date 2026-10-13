@@ -61,7 +61,46 @@ pub struct Agent<P> {
     pub max_rounds: Option<usize>,
 }
 
+/// The configured context window was larger than the server's and was lowered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContextFit {
+    pub configured: usize,
+    pub server: usize,
+    /// The output budget, when it also had to shrink to keep the invariant
+    /// that the context exceeds it by more than 1024 tokens.
+    pub max_output_tokens: Option<usize>,
+}
+
+/// The smallest window a probe may impose. Anything below this is a
+/// misreport, not a usable context.
+const MIN_PROBED_CONTEXT: usize = 4096;
+
 impl<P: Provider> Agent<P> {
+    /// Lower the profile's context window to what the server reports, when
+    /// the server reports one and it is smaller. The configured value stays
+    /// the ceiling: a probe never raises it, so a deliberately short window
+    /// (kept short for speed) is respected, and an unreachable or silent
+    /// server changes nothing. Call once before the first run; subagents
+    /// clone the fitted profile.
+    pub async fn fit_context(&mut self) -> Option<ContextFit> {
+        let server = self.provider.context_capacity().await?;
+        let configured = self.profile.context_tokens;
+        if server < MIN_PROBED_CONTEXT || server >= configured {
+            return None;
+        }
+        self.profile.context_tokens = server;
+        let mut max_output_tokens = None;
+        if server.saturating_sub(self.profile.max_output_tokens) <= 1024 {
+            self.profile.max_output_tokens = server / 4;
+            max_output_tokens = Some(self.profile.max_output_tokens);
+        }
+        Some(ContextFit {
+            configured,
+            server,
+            max_output_tokens,
+        })
+    }
+
     pub fn submit(&self, store: &mut Store, prompt: &str) -> Result<()> {
         ensure!(!prompt.trim().is_empty(), "Prompt is empty");
         let uncertain = store.interrupt_turn(&self.session, Some(prompt))?;

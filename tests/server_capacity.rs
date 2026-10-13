@@ -83,3 +83,52 @@ async fn missing_or_invalid_capacity_is_unknown_and_cached() {
         server.abort();
     }
 }
+
+#[tokio::test]
+async fn context_probe_reads_the_per_slot_window_and_ignores_missing_or_zero() {
+    for (body, expected) in [
+        (
+            r#"{"total_slots":2,"default_generation_settings":{"n_ctx":131072}}"#,
+            Some(131072),
+        ),
+        (r#"{"total_slots":2}"#, None),
+        (
+            r#"{"total_slots":2,"default_generation_settings":{"n_ctx":0}}"#,
+            None,
+        ),
+        (
+            r#"{"total_slots":2,"default_generation_settings":{"n_ctx":"131072"}}"#,
+            None,
+        ),
+    ] {
+        let app = Router::new().route("/props", get(move || async move { body }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let profile = Profile {
+            base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
+            ..Profile::default()
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let provider = OpenAiCompatible::new(profile).unwrap();
+        assert_eq!(provider.context_capacity().await, expected, "{body}");
+        assert_eq!(provider.parallel_capacity().await, Some(2), "{body}");
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn context_is_unknown_when_the_slot_count_is_invalid() {
+    let app = Router::new().route(
+        "/props",
+        get(|| async { r#"{"total_slots":0,"default_generation_settings":{"n_ctx":131072}}"# }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let profile = Profile {
+        base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
+        ..Profile::default()
+    };
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let provider = OpenAiCompatible::new(profile).unwrap();
+    assert_eq!(provider.context_capacity().await, None);
+    assert_eq!(provider.parallel_capacity().await, None);
+    server.abort();
+}
