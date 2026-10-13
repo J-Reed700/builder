@@ -465,6 +465,15 @@ async fn shell_output_is_bounded_and_timeout_is_enforced() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("timed out"));
+    // Without a requested deadline a command runs until it exits.
+    let output = workspace
+        .execute(&Action::Shell {
+            command: "sleep 2; printf finished".into(),
+            timeout_secs: None,
+        })
+        .await
+        .unwrap();
+    assert!(output.contains("finished"), "{output}");
 }
 
 #[tokio::test]

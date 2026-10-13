@@ -45,9 +45,9 @@ fn count(value: u64) -> String {
 pub fn edit_focus_line(calls: usize, step: (usize, usize), reads: bool) -> String {
     let (number, total) = step;
     let paused = if reads {
-        "search and shell paused until it edits"
+        "search paused until it edits"
     } else {
-        "only edits and plan updates allowed"
+        "only edits, shell and plan updates allowed"
     };
     format!("{calls} actions on todo step {number} of {total} without a file change · {paused}")
 }

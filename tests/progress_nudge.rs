@@ -429,8 +429,15 @@ async fn a_run_has_no_round_budget_unless_one_is_requested() {
     );
 }
 
-const EDITS: [&str; 4] = ["write_file", "edit_file", "multi_edit", "todo_write"];
-const CIRCLING: [&str; 4] = ["list_files", "search", "subagent", "shell"];
+// Shell stays at every stage so a build or test run never waits on an edit.
+const EDITS: [&str; 5] = [
+    "write_file",
+    "edit_file",
+    "multi_edit",
+    "todo_write",
+    "shell",
+];
+const CIRCLING: [&str; 3] = ["list_files", "search", "subagent"];
 
 fn assert_offers(request: &Request, offered: &[&str], withheld: &[&str]) {
     let tools = tool_names(request);
@@ -467,10 +474,7 @@ async fn new_reads_do_not_hide_a_step_that_never_reaches_an_edit() {
         ),
         "{text}"
     );
-    assert!(
-        text.contains("Search, shell and subagents are paused"),
-        "{text}"
-    );
+    assert!(text.contains("Search and subagents are paused"), "{text}");
     assert!(
         matches!(
             events.as_slice(),
@@ -497,7 +501,7 @@ async fn at_twice_the_focus_budget_only_edits_and_plan_updates_remain() {
     );
     let text = last_text(&requests[0]);
     assert!(
-        text.contains("Only edits and todo_write are available"),
+        text.contains("Only edits, todo_write and shell are available"),
         "{text}"
     );
     assert!(

@@ -25,7 +25,7 @@ pub fn definition() -> Value {
         "artifacts":{"type":"array","items":artifact,"maxItems":8},"dependencies":{"type":"array","items":artifact,"maxItems":8},
         "server":text,"args":strings,"path":text,"line":{"type":"integer","minimum":0},"character":{"type":"integer","minimum":0},"feature":{"type":"string","enum":["definition","references","diagnostics"]},
         "query":text,"glob":text,"claim":text,"falsification":text,"evidence_ids":strings,"hypothesis_id":text,
-        "criterion":text,"command":text,"timeout_secs":{"type":"integer","minimum":1,"maximum":120},
+        "criterion":text,"command":text,"timeout_secs":{"type":"integer","minimum":1},
         "patches":{"type":"array","maxItems":8,"items":{"type":"object","properties":{"path":text,"source_hash":text,"old":text,"new":text},"required":["path","source_hash","old","new"],"additionalProperties":false}},
         "candidate_id":text,"key":text,"phase":{"type":"string","enum":["locate","diagnose","implement","verify"]},
         "procedure":text,"applicability":text,"verification_ids":strings,"supersedes":text,"reason":text,
@@ -327,12 +327,7 @@ pub async fn candidate_with_settings(
     let isolated = Workspace::new(temp.path())?;
     apply_patches(&isolated, patches).await?;
     let tested = Snapshot::capture_with_settings(&isolated, settings)?;
-    let output = check(
-        &isolated,
-        command,
-        Some(timeout.unwrap_or(30).min(settings.command_timeout_secs)),
-    )
-    .await?;
+    let output = check(&isolated, command, settings.command_timeout(timeout)).await?;
     let after = Snapshot::capture_with_settings(&isolated, settings)?;
     let unchanged = Snapshot::capture_with_settings(workspace, settings)?.hash == baseline.hash;
     let stable = tested.hash == after.hash && unchanged;

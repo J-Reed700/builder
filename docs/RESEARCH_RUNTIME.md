@@ -70,7 +70,7 @@ A candidate copy is **not an OS sandbox**. Its command still runs with the user'
 * Source snapshot: 20,000 files, 2 MiB/file, 64 MiB total, no symlinks. Exceeding a limit fails; a partial manifest is never proof.
 * Retrieval: newest 256 committed research results; at most four procedures. Proof falling outside that window requires revalidation. Original records remain accessible through history paging.
 * Candidates: at most three claimed attempts per original active user turn, including failures and interruptions. Compaction/restart does not reset the count.
-* Commands: 1–120 seconds; existing subprocess output caps apply. Checks keep bounded previews and explicit measured status.
+* Commands: no time limit unless the model requests one or `command_timeout_secs` sets a cap; existing subprocess output caps apply. Checks keep bounded previews and explicit measured status.
 * LSP: 20-second process lifetime, 5-second diagnostic wait, 1 MiB/message, 128 messages per response, 20 KiB returned result.
 * Analysis: up to four excerpts plus one synthesis; 45 seconds/call and 2,048 output tokens/call. No subcall receives executable tools. This is explicit bounded map/reduce, not unrestricted recursive agent execution.
 * History: 16 search results/page; original JSON pages of up to 8,000 bytes with UTF-8-safe offsets.
@@ -177,7 +177,7 @@ their existing permissions; these switches do not create an OS sandbox.
 | `analysis_artifacts` | 4 | 1–4 source excerpts, plus at most one synthesis |
 | `analysis_timeout_secs` | 45 | 1–120 per analysis or review call |
 | `analysis_output_tokens` | 2048 | 256–8192 per analysis or review call |
-| `command_timeout_secs` | 120 | 1–120 maximum for research checks/candidates |
+| `command_timeout_secs` | 0 | Cap in seconds on any shell or research command; 0 sets none |
 | `semantic_timeout_secs` | 20 | 1–120 total language-server session |
 | `diagnostic_wait_secs` | 5 | 1–120, bounded by remaining server lifetime |
 | `snapshot_max_files` | 20000 | 1–20000 |
@@ -188,8 +188,8 @@ their existing permissions; these switches do not create an OS sandbox.
 | `procedure_results` | 4 | 1–4 retrieved procedures |
 | `retrieval_records` | 256 | 1–256 recent committed research records |
 
-A requested command timeout is capped by `command_timeout_secs`; its existing
-30-second default applies when no timeout is requested. Analysis requests must
+A requested command timeout is capped by `command_timeout_secs` when that is
+set; with neither, a command runs until it exits or the turn is cancelled. Analysis requests must
 also fit the model's configured context window. Reducing retrieval or snapshot
 budgets never makes incomplete evidence trustworthy: unavailable proof fails
 closed, and the separate durable acceptance-plan lookup remains active. Bounds

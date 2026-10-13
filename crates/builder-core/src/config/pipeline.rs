@@ -34,10 +34,10 @@ pub struct PipelineSettings {
     pub progress_check_calls: usize,
     pub progress_recovery_rounds: usize,
     /// Tool calls on one todo item without a file change before Builder
-    /// pauses search and shell; at twice this, reads pause too.
+    /// pauses search and subagents; at twice this, reads pause too. Shell
+    /// is never paused.
     pub edit_focus_calls: usize,
     pub failure_check_calls: usize,
-    pub failure_recovery_rounds: usize,
     pub identical_shell_calls: usize,
     pub tool_calls_per_response: usize,
     pub parallel_tools: usize,
@@ -47,6 +47,8 @@ pub struct PipelineSettings {
     pub analysis_artifacts: usize,
     pub analysis_timeout_secs: u64,
     pub analysis_output_tokens: usize,
+    /// A cap in seconds on one shell or research command; 0, the default,
+    /// sets none.
     pub command_timeout_secs: u64,
     pub semantic_timeout_secs: u64,
     pub diagnostic_wait_secs: u64,
@@ -90,6 +92,11 @@ pub struct PipelineSettings {
     #[doc(hidden)]
     #[serde(rename = "subagent_rounds", skip_serializing)]
     pub retired_subagent_rounds: Option<u64>,
+    /// Retired: failure recovery guides the model for as long as a failure
+    /// streak lasts instead of ending the run after a set number of rounds.
+    #[doc(hidden)]
+    #[serde(rename = "failure_recovery_rounds", skip_serializing)]
+    pub retired_failure_recovery_rounds: Option<u64>,
 }
 impl Default for PipelineSettings {
     fn default() -> Self {
@@ -123,7 +130,6 @@ impl Default for PipelineSettings {
             progress_recovery_rounds: 88,
             edit_focus_calls: 16,
             failure_check_calls: 3,
-            failure_recovery_rounds: 3,
             identical_shell_calls: 3,
             tool_calls_per_response: 128,
             parallel_tools: 8,
@@ -133,7 +139,7 @@ impl Default for PipelineSettings {
             analysis_artifacts: 4,
             analysis_timeout_secs: 45,
             analysis_output_tokens: 2048,
-            command_timeout_secs: 120,
+            command_timeout_secs: 0,
             semantic_timeout_secs: 20,
             diagnostic_wait_secs: 5,
             snapshot_max_files: 20000,
@@ -169,11 +175,12 @@ impl Default for PipelineSettings {
             memory_min_margin_percent: 3,
             retired_max_rounds: None,
             retired_subagent_rounds: None,
+            retired_failure_recovery_rounds: None,
         }
     }
 }
 /// Settings that no longer exist but may remain in saved configurations.
-const RETIRED: [&str; 2] = ["max_rounds", "subagent_rounds"];
+const RETIRED: [&str; 3] = ["max_rounds", "subagent_rounds", "failure_recovery_rounds"];
 
 impl PipelineSettings {
     pub fn validate(&self) -> Result<()> {
@@ -187,12 +194,6 @@ impl PipelineSettings {
             ),
             ("edit_focus_calls", self.edit_focus_calls, 1, 1000),
             ("failure_check_calls", self.failure_check_calls, 1, 100),
-            (
-                "failure_recovery_rounds",
-                self.failure_recovery_rounds,
-                1,
-                100,
-            ),
             ("identical_shell_calls", self.identical_shell_calls, 1, 100),
             (
                 "tool_calls_per_response",
@@ -331,7 +332,6 @@ impl PipelineSettings {
         }
         for (name, value) in [
             ("analysis_timeout_secs", self.analysis_timeout_secs),
-            ("command_timeout_secs", self.command_timeout_secs),
             ("semantic_timeout_secs", self.semantic_timeout_secs),
             ("diagnostic_wait_secs", self.diagnostic_wait_secs),
         ] {
@@ -359,6 +359,16 @@ impl PipelineSettings {
         Ok(())
     }
 
+    /// The deadline for one shell or research command: the model's request,
+    /// capped by `command_timeout_secs` when that is set. With neither, the
+    /// command runs until it exits or the user cancels it.
+    pub fn command_timeout(&self, requested: Option<u64>) -> Option<u64> {
+        let cap = (self.command_timeout_secs > 0).then_some(self.command_timeout_secs);
+        match (requested, cap) {
+            (Some(requested), Some(cap)) => Some(requested.min(cap)),
+            (requested, cap) => requested.or(cap),
+        }
+    }
     pub fn max_no_progress_calls(&self) -> usize {
         self.progress_check_calls
             .saturating_add(self.progress_recovery_rounds)
@@ -374,7 +384,7 @@ impl PipelineSettings {
             let key = key.replace('-', "_");
             ensure!(
                 !RETIRED.contains(&key.as_str()),
-                "pipeline.{key} was removed: runs continue until their work is done, and the loop guards stop a run that stalls"
+                "pipeline.{key} was removed: runs continue until their work is done, and the loop guards steer a run that stalls"
             );
             let slot = value.get_mut(&key).ok_or_else(|| {
                 anyhow::anyhow!(

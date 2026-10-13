@@ -186,16 +186,9 @@ pub async fn execute_with_settings<P: Provider>(
             }
             let before = execution::observe(workspace, dependencies)?;
             let snapshot = Snapshot::capture_with_settings(workspace, settings)?;
-            let output = execution::check(
-                workspace,
-                command,
-                Some(
-                    timeout_secs
-                        .unwrap_or(30)
-                        .min(settings.command_timeout_secs),
-                ),
-            )
-            .await?;
+            let output =
+                execution::check(workspace, command, settings.command_timeout(*timeout_secs))
+                    .await?;
             let stable = Snapshot::capture_with_settings(workspace, settings)
                 .is_ok_and(|s| s.hash == snapshot.hash)
                 && execution::fresh(workspace, &before);

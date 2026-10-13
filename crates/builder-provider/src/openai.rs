@@ -2,7 +2,7 @@ use crate::{Activity, Event, OutputLimit, Provider, SseDecoder};
 use anyhow::{Context, Result, bail, ensure};
 use builder_core::protocol::Role;
 use builder_core::{
-    config::{Profile, ReasoningHistory},
+    config::Profile,
     protocol::{Function, Message, ToolCall},
 };
 use futures_util::StreamExt;
@@ -489,18 +489,9 @@ impl OpenAiCompatible {
             );
             outbound.splice(..leading, [system]);
         }
-        // Earlier-turn reasoning normally stays transcript-only: servers differ
-        // on whether they accept it back, and it inflates the prompt. llama.cpp
-        // is the exception that matters: its templates keep `reasoning_content`
-        // in the rendered transcript and its prompt cache resumes only an
-        // append-only prefix, so stripping it rewrote the first assistant turn
-        // of every request and forced the whole conversation to be re-processed
-        // each round (20-40 s before the first token on a 30k-token chat).
-        let send_reasoning = match self.profile.reasoning_history {
-            ReasoningHistory::Send => true,
-            ReasoningHistory::Strip => false,
-            ReasoningHistory::Auto => self.parallel_capacity().await.is_some(),
-        };
+        // Earlier-turn reasoning stays transcript-only unless the profile asks
+        // for it; see `builder_core::config::ReasoningHistory`.
+        let send_reasoning = self.profile.sends_reasoning();
         let mut wire = Vec::with_capacity(outbound.len());
         for message in &outbound {
             let mut value = serde_json::to_value(message)?;

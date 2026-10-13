@@ -644,8 +644,8 @@ async fn tool_markup_at_progress_boundary_is_hidden_and_repaired_without_executi
 }
 
 #[tokio::test]
-async fn repeated_shell_loop_is_rejected_before_fourth_execution_after_restart() {
-    let replies = (0..4)
+async fn repeated_shell_loop_is_answered_not_run_at_the_fourth_request_after_restart() {
+    let mut replies: Vec<_> = (0..4)
         .map(|index| {
             (
                 StatusCode::OK,
@@ -665,6 +665,7 @@ async fn repeated_shell_loop_is_rejected_before_fourth_execution_after_restart()
             )
         })
         .collect();
+    replies.push(text_reply("It prints stable."));
     let server = server(replies).await;
     let home = tempfile::tempdir().unwrap();
     let mut store = Store::open(home.path()).unwrap();
@@ -694,33 +695,42 @@ async fn repeated_shell_loop_is_rejected_before_fourth_execution_after_restart()
     drop(store);
     let mut store = Store::open(home.path()).unwrap();
     agent.max_rounds = Some(5);
-    let error = agent
+    // The fourth identical request is answered, not run, and the run goes on
+    // to the model's answer instead of stopping.
+    agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("Stopped a repeated shell loop"), "{error}");
-    assert!(error.contains("rejected before execution"), "{error}");
-    assert_eq!(store.tool_outcomes(&session).unwrap().len(), 3);
+        .unwrap();
+    let outcomes = store.tool_outcomes(&session).unwrap();
+    for index in 0..3 {
+        assert_eq!(
+            outcomes[&format!("same_shell_{index}")],
+            ToolOutcome::Succeeded
+        );
+    }
+    assert_eq!(outcomes["same_shell_3"], ToolOutcome::Failed);
+    let refused = store
+        .tool_result(&session, "same_shell_3")
+        .unwrap()
+        .unwrap();
     assert!(
-        !store
-            .used_call_ids(&session)
-            .unwrap()
-            .contains("same_shell_3")
+        refused.starts_with("NOT RUN") && refused.contains("3 times"),
+        "{refused}"
     );
-    assert!(pending(&store.messages(&session).unwrap()));
+    assert!(!pending(&store.messages(&session).unwrap()));
 
     let requests = server.mock.requests.lock().unwrap();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 5);
     assert!(
         requests[3]["messages"]
             .to_string()
             .contains("Runtime repetition check")
     );
+    assert!(requests[4]["messages"].to_string().contains("NOT RUN"));
 }
 
 #[tokio::test]
-async fn repeated_calls_inside_one_batch_are_rejected_before_any_dispatch() {
+async fn repeated_calls_inside_one_batch_run_to_the_limit_and_the_rest_are_answered() {
     let calls = (0..4)
         .map(|index| {
             json!({
@@ -734,14 +744,17 @@ async fn repeated_calls_inside_one_batch_are_rejected_before_any_dispatch() {
             })
         })
         .collect::<Vec<_>>();
-    let server = server(vec![(
-        StatusCode::OK,
-        format!(
-            "{}{}",
-            delta(json!({"tool_calls":calls})),
-            finish("tool_calls")
+    let server = server(vec![
+        (
+            StatusCode::OK,
+            format!(
+                "{}{}",
+                delta(json!({"tool_calls":calls})),
+                finish("tool_calls")
+            ),
         ),
-    )])
+        text_reply("It prints stable."),
+    ])
     .await;
     let home = tempfile::tempdir().unwrap();
     let mut store = Store::open(home.path()).unwrap();
@@ -758,16 +771,24 @@ async fn repeated_calls_inside_one_batch_are_rejected_before_any_dispatch() {
         max_rounds: Some(2),
     };
     agent.submit(&mut store, "Do bounded work").unwrap();
-    let error = agent
+    agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("Stopped a repeated shell loop"), "{error}");
-    assert!(error.contains("entire response was rejected"), "{error}");
-    assert!(store.used_call_ids(&session).unwrap().is_empty());
-    assert!(store.tool_outcomes(&session).unwrap().is_empty());
-    assert!(pending(&store.messages(&session).unwrap()));
+        .unwrap();
+    let outcomes = store.tool_outcomes(&session).unwrap();
+    for index in 0..3 {
+        assert_eq!(
+            outcomes[&format!("same_batch_{index}")],
+            ToolOutcome::Succeeded
+        );
+    }
+    assert_eq!(outcomes["same_batch_3"], ToolOutcome::Failed);
+    let refused = store
+        .tool_result(&session, "same_batch_3")
+        .unwrap()
+        .unwrap();
+    assert!(refused.starts_with("NOT RUN"), "{refused}");
+    assert!(!pending(&store.messages(&session).unwrap()));
 }
 
 #[tokio::test]
@@ -824,8 +845,8 @@ async fn oversized_tool_batch_is_rejected_as_a_whole_before_dispatch() {
 }
 
 #[tokio::test]
-async fn saved_repeated_shell_is_rejected_before_resume_dispatch() {
-    let server = server(vec![]).await;
+async fn saved_repeated_shell_is_answered_not_run_on_resume() {
+    let server = server(vec![text_reply("It printed before.")]).await;
     let home = tempfile::tempdir().unwrap();
     let marker = home.path().join("repeated-resume-marker");
     let command = "printf touched >> repeated-resume-marker";
@@ -870,22 +891,24 @@ async fn saved_repeated_shell_is_rejected_before_resume_dispatch() {
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
     };
-    let error = agent
+    agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("Stopped a saved repeated shell loop"),
-        "{error}"
-    );
-    assert!(error.contains("rejected before execution"), "{error}");
+        .unwrap();
+    // Answered with the reason, never run, and the run went on.
     assert!(!marker.exists());
     assert_eq!(
-        store.tool_run_state(&session, "saved_repeat_3").unwrap(),
-        ToolRunState::Unclaimed
+        store.tool_outcomes(&session).unwrap()["saved_repeat_3"],
+        ToolOutcome::Failed
     );
-    assert!(server.mock.requests.lock().unwrap().is_empty());
+    let refused = store
+        .tool_result(&session, "saved_repeat_3")
+        .unwrap()
+        .unwrap();
+    assert!(refused.starts_with("NOT RUN"), "{refused}");
+    let requests = server.mock.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0]["messages"].to_string().contains("NOT RUN"));
 }
 
 #[tokio::test]
@@ -1549,19 +1572,22 @@ async fn uncertain_shell_cannot_be_replayed_with_a_new_id_or_timeout_on_retry() 
     replay.tool_calls[0].function.arguments =
         json!({"command":command, "timeout_secs":30}).to_string();
     let replay_call = replay.tool_calls[0].clone();
-    let server = server(vec![(
-        StatusCode::OK,
-        format!(
-            "{}{}",
-            delta(json!({"tool_calls":[{
-                "index":0,
-                "id":replay_call.id,
-                "type":"function",
-                "function":replay_call.function
-            }]})),
-            finish("tool_calls")
+    let server = server(vec![
+        (
+            StatusCode::OK,
+            format!(
+                "{}{}",
+                delta(json!({"tool_calls":[{
+                    "index":0,
+                    "id":replay_call.id,
+                    "type":"function",
+                    "function":replay_call.function
+                }]})),
+                finish("tool_calls")
+            ),
         ),
-    )])
+        text_reply("I left it alone."),
+    ])
     .await;
     let home = tempfile::tempdir().unwrap();
     let marker = home.path().join("uncertain-replay-marker");
@@ -1596,24 +1622,25 @@ async fn uncertain_shell_cannot_be_replayed_with_a_new_id_or_timeout_on_retry() 
     assert!(first_error.contains("uncertain outcome"), "{first_error}");
     assert!(server.mock.requests.lock().unwrap().is_empty());
 
-    let retry_error = agent
+    // The replay is answered with the reason, never run, and the run goes on.
+    agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        retry_error.contains("Refused to replay shell"),
-        "{retry_error}"
-    );
-    assert!(retry_error.contains("uncertain outcome"), "{retry_error}");
+        .unwrap();
     assert!(!marker.exists());
-    assert!(
-        !store
-            .used_call_ids(&session)
-            .unwrap()
-            .contains("uncertain_replay")
+    assert_eq!(
+        store.tool_outcomes(&session).unwrap()["uncertain_replay"],
+        ToolOutcome::Failed
     );
-    assert_eq!(server.mock.requests.lock().unwrap().len(), 1);
+    let refused = store
+        .tool_result(&session, "uncertain_replay")
+        .unwrap()
+        .unwrap();
+    assert!(
+        refused.starts_with("NOT RUN") && refused.contains("uncertain"),
+        "{refused}"
+    );
+    assert_eq!(server.mock.requests.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -1635,7 +1662,12 @@ async fn denied_shell_cannot_be_replayed_under_a_new_call_id() {
             ),
         )
     };
-    let server = server(vec![response("denied_original"), response("denied_replay")]).await;
+    let server = server(vec![
+        response("denied_original"),
+        response("denied_replay"),
+        text_reply("Read-only mode: I cannot run it."),
+    ])
+    .await;
     let home = tempfile::tempdir().unwrap();
     let marker = home.path().join("denied-replay-marker");
     let mut store = Store::open(home.path()).unwrap();
@@ -1652,25 +1684,24 @@ async fn denied_shell_cannot_be_replayed_under_a_new_call_id() {
         max_rounds: Some(3),
     };
     agent.submit(&mut store, "Run the command").unwrap();
-    let error = agent
+    agent
         .run(&mut store, &mut |_| {}, &mut |_| panic!("read-only mode"))
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("Refused to replay shell"), "{error}");
-    assert!(error.contains("denied outcome"), "{error}");
+        .unwrap();
     assert!(!marker.exists());
-    assert_eq!(
-        store.tool_outcomes(&session).unwrap()["denied_original"],
-        ToolOutcome::Denied
-    );
+    let outcomes = store.tool_outcomes(&session).unwrap();
+    assert_eq!(outcomes["denied_original"], ToolOutcome::Denied);
+    // The replay stays denied: answered with the reason, never run.
+    assert_eq!(outcomes["denied_replay"], ToolOutcome::Failed);
+    let refused = store
+        .tool_result(&session, "denied_replay")
+        .unwrap()
+        .unwrap();
     assert!(
-        !store
-            .used_call_ids(&session)
-            .unwrap()
-            .contains("denied_replay")
+        refused.starts_with("NOT RUN") && refused.contains("denied"),
+        "{refused}"
     );
-    assert_eq!(server.mock.requests.lock().unwrap().len(), 2);
+    assert_eq!(server.mock.requests.lock().unwrap().len(), 3);
 }
 
 #[tokio::test]
@@ -3598,7 +3629,7 @@ async fn recovery_resolves_queued_batch_and_retains_denials_without_granting_per
 }
 
 #[tokio::test]
-async fn recovery_restricts_broad_discovery_and_rejects_unknown_batches() {
+async fn recovery_restricts_broad_discovery_and_answers_unknown_tools() {
     for outcome in ["edit", "answer", "unavailable"] {
         let mut replies = vec![];
         for i in 0..13 {
@@ -3633,9 +3664,7 @@ async fn recovery_restricts_broad_discovery_and_rejects_unknown_batches() {
                     finish("tool_calls")
                 ),
             ));
-            if outcome == "edit" {
-                replies.push(text_reply("Changed the rate."));
-            }
+            replies.push(text_reply("Changed the rate."));
         }
         let server = server(replies).await;
         let home = tempfile::tempdir().unwrap();
@@ -3675,25 +3704,25 @@ async fn recovery_restricts_broad_discovery_and_rejects_unknown_batches() {
                 "code_search",
             ]
         );
+        // A call to a tool the step does not offer is answered with the
+        // reason; the rest of its batch runs and the run goes on.
+        result.unwrap();
+        assert!(!pending(&store.messages(&session).unwrap()));
         if outcome == "unavailable" {
-            assert!(result.unwrap_err().to_string().contains("unavailable"));
-            assert!(
-                !store
-                    .used_call_ids(&session)
-                    .unwrap()
-                    .contains("decision_edit")
-            );
-            assert!(pending(&store.messages(&session).unwrap()));
-        } else {
-            result.unwrap();
-            assert!(!pending(&store.messages(&session).unwrap()));
+            let outcomes = store.tool_outcomes(&session).unwrap();
+            assert_eq!(outcomes["unavailable_read"], ToolOutcome::Failed);
+            let refused = store
+                .tool_result(&session, "unavailable_read")
+                .unwrap()
+                .unwrap();
+            assert!(refused.starts_with("NOT RUN: unknown_tool"), "{refused}");
         }
         assert_eq!(
             std::fs::read_to_string(home.path().join("rate.ts")).unwrap(),
-            if outcome == "edit" {
-                "new rate"
-            } else {
+            if outcome == "answer" {
                 "old rate"
+            } else {
+                "new rate"
             }
         );
         if outcome == "edit" {
@@ -3707,7 +3736,7 @@ async fn recovery_restricts_broad_discovery_and_rejects_unknown_batches() {
 }
 
 #[tokio::test]
-async fn invalid_research_loop_recovers_after_restart_and_has_a_hard_bound() {
+async fn invalid_research_loop_keeps_recovery_guidance_until_the_model_recovers() {
     for recovers in [true, false] {
         let invalid = |id: &str| -> Message {
             serde_json::from_value(json!({"role":"assistant","content":null,"tool_calls":[{
@@ -3722,6 +3751,7 @@ async fn invalid_research_loop_recovers_after_restart_and_has_a_hard_bound() {
                 let call = invalid(&format!("bad{index}")).tool_calls.remove(0);
                 replies.push((StatusCode::OK, format!("{}{}", delta(json!({"tool_calls":[{"index":0,"id":call.id,"type":"function","function":call.function}]})), finish("tool_calls"))));
             }
+            replies.push(text_reply("The finish record keeps failing; reporting it."));
         }
         let server = server(replies).await;
         let home = tempfile::tempdir().unwrap();
@@ -3776,30 +3806,25 @@ async fn invalid_research_loop_recovers_after_restart_and_has_a_hard_bound() {
                 panic!("invalid requests cannot execute")
             })
             .await;
-        if recovers {
-            result.unwrap();
-        } else {
-            assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("Tool recovery exhausted")
-            );
-        }
-        assert_eq!(pending(&store.messages(&session).unwrap()), !recovers);
+        // Recovery guides every round of the failure streak; it never ends
+        // the run, which goes on until the model answers.
+        result.unwrap();
+        assert!(!pending(&store.messages(&session).unwrap()));
         let history = store.history_messages(&session).unwrap();
         assert_eq!(
             serde_json::to_value(&history[..original.len()]).unwrap(),
             serde_json::to_value(original).unwrap()
         );
         let requests = server.mock.requests.lock().unwrap();
-        assert_eq!(requests.len(), if recovers { 1 } else { 3 });
+        assert_eq!(requests.len(), if recovers { 1 } else { 4 });
         assert!(requests[0]["tools"].is_array());
-        assert!(
-            requests[0]["messages"]
-                .to_string()
-                .contains("Runtime tool failure recovery")
-        );
+        for request in requests.iter() {
+            assert!(
+                request["messages"]
+                    .to_string()
+                    .contains("Runtime tool failure recovery")
+            );
+        }
     }
 }
 

@@ -1,5 +1,7 @@
 //! Explicit, durable context checkpoints. No tools execute while summarizing.
-use crate::agent::{Agent, AgentEvent, SummaryStage, estimate_tokens, pending};
+use crate::agent::{
+    Agent, AgentEvent, SummaryStage, estimate_history_tokens, estimate_tokens, pending,
+};
 use anyhow::{Context, Result, ensure};
 use builder_core::{
     protocol::{Message, Role},
@@ -332,7 +334,10 @@ impl<P: Provider> Agent<P> {
         let Some(latest_user) = latest_user else {
             return Ok(false);
         };
-        let before = estimate_tokens(&original);
+        // Measured as sent: the retained tail goes back with its reasoning
+        // when the profile sends reasoning.
+        let sent = |messages: &[Message]| estimate_history_tokens(messages, &self.profile);
+        let before = sent(&original);
         let tail_budget = (self.profile.context_tokens / 8).min(12000).min(before / 4);
         // A tool result always stays with its assistant request.
         let mut boundary = original.len();
@@ -342,7 +347,7 @@ impl<P: Provider> Agent<P> {
             while start > 0 && original[start].role == Role::Tool {
                 start -= 1;
             }
-            let cost = estimate_tokens(&original[start..boundary]);
+            let cost = sent(&original[start..boundary]);
             if tail_tokens + cost > tail_budget {
                 break;
             }
@@ -432,14 +437,14 @@ impl<P: Provider> Agent<P> {
             .min(8192)
             .min(estimate_tokens(&older) / 4)
             .min(self.profile.context_tokens.saturating_sub(
-                estimate_tokens(&retained)
+                sent(&retained)
                     + self.profile.max_output_tokens
                     + summary_limit
                     + inventory_cost
                     + 1025,
             ));
         ensure!(
-            estimate_tokens(&retained)
+            sent(&retained)
                 + self.profile.max_output_tokens
                 + summary_limit
                 + inventory_cost
@@ -693,7 +698,7 @@ impl<P: Provider> Agent<P> {
                 "[The completed response is included in the handoff above.]",
             ));
         }
-        let after = estimate_tokens(&context);
+        let after = sent(&context);
         ensure!(
             after < before && after + self.profile.max_output_tokens < self.profile.context_tokens,
             "Compaction did not free enough context; original history is intact"

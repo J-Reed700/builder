@@ -303,9 +303,9 @@ impl<P: Provider> Agent<P> {
                         &error.to_string(),
                     )?;
                     let larger = budget.saturating_mul(2).min(32768).min(
-                        self.profile
-                            .context_tokens
-                            .saturating_sub(super::estimate_tokens(&messages) + 1024),
+                        self.profile.context_tokens.saturating_sub(
+                            super::estimate_history_tokens(&messages, &self.profile) + 1024,
+                        ),
                     );
                     if error.is::<builder_provider::OutputLimit>()
                         && budget == self.profile.max_output_tokens

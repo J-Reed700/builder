@@ -1,7 +1,6 @@
-//! The outbound prompt must stay append-only for servers that cache it.
-//! llama.cpp keeps `reasoning_content` in the rendered transcript, so the
-//! reasoning goes back to it (and only to it, unless configured), and derived
-//! extraction requests switch thinking off there.
+//! Assistant reasoning stays out of the outbound history unless the profile
+//! asks for it, on llama.cpp too, and derived extraction requests switch
+//! thinking off where the switch is understood.
 use axum::{
     Json, Router,
     extract::State,
@@ -81,30 +80,38 @@ fn assistant(body: &Value) -> &Value {
 }
 
 #[tokio::test]
-async fn auto_returns_reasoning_only_to_a_llama_cpp_server() {
-    let (url, requests) = server(true).await;
-    let sent = body(&url, &requests, ReasoningHistory::Auto, false).await;
+async fn reasoning_stays_out_of_the_history_by_default_even_on_llama_cpp() {
+    for props in [true, false] {
+        let (url, requests) = server(props).await;
+        let sent = body(&url, &requests, ReasoningHistory::default(), false).await;
+        let turn = assistant(&sent);
+        assert!(
+            turn.get("reasoning_content").is_none() && turn.get("reasoning").is_none(),
+            "props: {props}"
+        );
+        assert_eq!(turn["content"], "Writing it now.");
+    }
+}
+
+#[test]
+fn the_old_auto_setting_reads_as_strip() {
+    #[derive(serde::Deserialize)]
+    struct Setting {
+        reasoning_history: ReasoningHistory,
+    }
+    let setting: Setting = toml::from_str("reasoning_history = \"auto\"").unwrap();
+    assert_eq!(setting.reasoning_history, ReasoningHistory::Strip);
+}
+
+#[tokio::test]
+async fn send_returns_reasoning_and_strip_never_does() {
+    let (url, requests) = server(false).await;
+    let sent = body(&url, &requests, ReasoningHistory::Send, false).await;
     let turn = assistant(&sent);
     assert_eq!(turn["reasoning_content"], "The user wants the file first.");
     assert!(
         turn.get("reasoning").is_none(),
         "the internal field never leaves"
-    );
-    assert_eq!(turn["content"], "Writing it now.");
-
-    let (url, requests) = server(false).await;
-    let sent = body(&url, &requests, ReasoningHistory::Auto, false).await;
-    let turn = assistant(&sent);
-    assert!(turn.get("reasoning_content").is_none() && turn.get("reasoning").is_none());
-}
-
-#[tokio::test]
-async fn explicit_send_and_strip_override_detection() {
-    let (url, requests) = server(false).await;
-    let sent = body(&url, &requests, ReasoningHistory::Send, false).await;
-    assert_eq!(
-        assistant(&sent)["reasoning_content"],
-        "The user wants the file first."
     );
 
     let (url, requests) = server(true).await;
@@ -115,12 +122,12 @@ async fn explicit_send_and_strip_override_detection() {
 #[tokio::test]
 async fn extraction_requests_switch_thinking_off_where_the_switch_exists() {
     let (url, requests) = server(true).await;
-    let sent = body(&url, &requests, ReasoningHistory::Auto, true).await;
+    let sent = body(&url, &requests, ReasoningHistory::default(), true).await;
     assert_eq!(sent["chat_template_kwargs"]["enable_thinking"], false);
 
     // No probe answer and no explicit entry: the field is not understood, so it is not sent.
     let (url, requests) = server(false).await;
-    let sent = body(&url, &requests, ReasoningHistory::Auto, true).await;
+    let sent = body(&url, &requests, ReasoningHistory::default(), true).await;
     assert!(sent.get("chat_template_kwargs").is_none());
 
     // An explicit entry is understood even without the probe, and is overridden.

@@ -12,7 +12,7 @@ use self::{
 use crate::commands;
 use anyhow::{Context, Result, ensure};
 use builder::{
-    agent::{Agent, ApprovalMode, estimate_tokens, pending},
+    agent::{Agent, ApprovalMode, estimate_history_tokens, pending},
     ui,
 };
 use builder_core::{
@@ -101,7 +101,7 @@ pub(crate) async fn run(
         if memory_task.is_none() && compaction_task.is_none() && !pending(&messages) {
             memory_task = start_memory_task(agent, &home, &config);
         }
-        let used = estimate_tokens(&messages);
+        let used = estimate_history_tokens(&messages, &agent.profile);
         let percent = used.saturating_mul(100) / agent.profile.context_tokens;
         let status = compaction_task.as_ref().map_or_else(
             || {
@@ -299,7 +299,7 @@ pub(crate) async fn run(
                             "disabled".into()
                         }
                     });
-                let used = estimate_tokens(&messages);
+                let used = estimate_history_tokens(&messages, &agent.profile);
                 let limit = agent.profile.context_tokens;
                 let percent = used.saturating_mul(100) / limit.max(1);
                 let pipeline = &agent.profile.pipeline;
@@ -422,8 +422,8 @@ pub(crate) async fn run(
                     ui::panel::field(
                         "Failures",
                         format!(
-                            "recover after {} consecutive failures; {} recovery rounds",
-                            pipeline.failure_check_calls, pipeline.failure_recovery_rounds
+                            "recovery guidance after {} consecutive failures",
+                            pipeline.failure_check_calls
                         ),
                     ),
                     ui::panel::field(

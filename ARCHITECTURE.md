@@ -170,7 +170,7 @@ a drop guard. Normal completion, timeout, dispatch failure, and cancellation
 release capacity. Dropping a response future does not cancel or replay a host
 mutation; a late response is ignored after its registry entry is removed.
 
-Tools bound file sizes and returned output. On Unix, a shell tool owns a process-group guard that terminates non-detached descendants on cancellation, timeout, or completion. `kill_on_drop` protects the direct child as well. File operations are synchronous and bounded; large directory searches may delay cancellation. A worker pool is a possible later optimization, but cancellation must still leave mutations explicitly uncertain.
+Tools bound file sizes and returned output. A shell command has no deadline unless the model requests one or `command_timeout_secs` caps it, so long builds and test suites finish. On Unix, a shell tool owns a process-group guard that terminates non-detached descendants on cancellation, timeout, or completion. `kill_on_drop` protects the direct child as well. File operations are synchronous and bounded; large directory searches may delay cancellation. A worker pool is a possible later optimization, but cancellation must still leave mutations explicitly uncertain.
 
 ## Protocol and configuration
 
@@ -258,15 +258,19 @@ removed from recovery requests until a successful typed file change or new user
 instruction resets the streak. Targeted reads, edits, and verification remain
 available; progress checks never force mutations, and shell must not be used to
 bypass the discovery restriction. The per-response tool limit is profile-configured.
-Oversized, malformed, duplicate-ID, reused-ID, and unknown-tool batches are rejected
-before persistence or dispatch. Normalized shell name/argument pairs are counted
-from durable original history after the latest user instruction or successful file
-change. The configured identical-shell limit is enforced before persistence or
-dispatch. A saved pending batch
+Oversized, malformed, duplicate-ID, and reused-ID batches are rejected before
+persistence or dispatch. Guards otherwise steer rather than stop: a call the guards
+will not run is answered with a `NOT RUN:` result giving the reason, never executed,
+and the run continues so the model can choose differently. A call to a tool the step
+does not offer is answered that way once its response is saved; the rest of its
+batch runs. Normalized shell name/argument pairs are counted from durable original
+history after the latest user instruction or successful file change, and a request
+past the configured identical-shell limit is answered `NOT RUN`. Repeated tool
+failures receive recovery guidance for as long as the streak lasts. A saved pending batch
 is validated before any unclaimed call executes after restart. A previously claimed
 call takes precedence over structural and liveness checks and remains uncertain rather than
 being replayed. An identical execute or mutation request following a denied or
-uncertain outcome is rejected immediately until a new user instruction resets that
+uncertain outcome is answered `NOT RUN` until a new user instruction resets that
 prohibition; a successful unrelated edit does not erase it. Compaction and restart
 cannot reset either counter. Approval and uncertainty checks are unchanged. The
 last guided round is mechanically tool-free and its continuation text agrees that

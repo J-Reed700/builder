@@ -187,19 +187,13 @@ const FIELDS: &[Field] = &[
     (
         "edit_focus_calls",
         "Edit focus after calls",
-        "1–1000 tools on one todo item without a file change before search and shell pause; reads pause at twice this. Plan progress resets it, a new message does not.",
+        "1–1000 tools on one todo item without a file change before search and subagents pause; reads pause at twice this. Shell always stays. Plan progress resets it, a new message does not.",
         "Loop guards",
     ),
     (
         "failure_check_calls",
         "Failure check after calls",
         "1–100 consecutive failed tools before recovery guidance.",
-        "Loop guards",
-    ),
-    (
-        "failure_recovery_rounds",
-        "Failure recovery rounds",
-        "1–100 guided model rounds allowed for repeated tool failures.",
         "Loop guards",
     ),
     (
@@ -246,8 +240,8 @@ const FIELDS: &[Field] = &[
     ),
     (
         "command_timeout_secs",
-        "Check timeout (seconds)",
-        "1–120 seconds maximum per research command.",
+        "Command time cap (seconds)",
+        "0 = no cap (default): shell and research commands run until they exit. Otherwise the most seconds one command may run.",
         "Research budgets",
     ),
     (

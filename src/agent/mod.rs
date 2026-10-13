@@ -127,6 +127,22 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
         })
         .sum()
 }
+/// [`estimate_tokens`] for history as the provider sends it: assistant
+/// reasoning counts too when the profile sends it back, as the request does.
+pub fn estimate_history_tokens(messages: &[Message], profile: &Profile) -> usize {
+    let reasoning = if profile.sends_reasoning() {
+        messages
+            .iter()
+            .filter(|m| m.role == Role::Assistant)
+            .filter_map(|m| m.reasoning.as_deref())
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| text.len().div_ceil(2) + 8)
+            .sum()
+    } else {
+        0
+    };
+    estimate_tokens(messages) + reasoning
+}
 
 #[cfg(test)]
 mod tests;
