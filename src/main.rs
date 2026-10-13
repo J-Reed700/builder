@@ -202,6 +202,16 @@ async fn app(cli: Cli) -> Result<()> {
         approval: cli.approval_mode(),
         max_rounds,
     };
+    if let Some(fit) = agent.fit_context().await {
+        eprintln!(
+            "Context window: the server reports {} tokens per request; using that instead of the profile's {}.{}",
+            fit.server,
+            fit.configured,
+            fit.max_output_tokens
+                .map(|n| format!(" Output budget lowered to {n}."))
+                .unwrap_or_default()
+        );
+    }
     if !interactive {
         agent.submit(
             &mut store,
