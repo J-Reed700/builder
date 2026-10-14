@@ -47,7 +47,7 @@ npm run test:browser:ui
 
 | Layer | Scope | Main cases |
 | --- | --- | --- |
-| Rust unit and integration | `src/`, `crates/`, `tests/*.rs` | Persistence, tool claims, crash recovery, stale observations, permissions, provider retries, streaming, budgets, research, memory, code retrieval, scheduling, concurrency, compaction, and protocol boundaries |
+| Rust unit and integration | `src/`, `crates/`, `tests/*.rs` | Persistence, tool claims, crash recovery, stale observations, permissions, provider retries, streaming, budgets, research, memory, code retrieval, scheduling, concurrency, compaction, protocol boundaries, CLI commands driven through the real binary (`tests/cli_commands.rs`), endpoint conformance probes, and gateway pairing with the real gateway in-process (`tests/gateway_pairing.rs`) |
 | Jest + jsdom | `tests/web/` | Production HTML and JavaScript; authentication, gateway setup, drafts, busy/archive states, approval decisions, pagination, bounded exports, queued sends, stale responses, clipboard failures, focus, and error recovery |
 | Playwright + actual Builder process | `tests/browser/` | Login/reload/disconnect, durable Unicode history, actual approved/denied writes, read-only policy, lost acknowledgements, duplicate input, pause/retry/cancel, provider failure, compaction queues, chat management, exports, scoped folders, hostile HTML, and viewport/focus behavior |
 | Unix PTY | `tests/terminal_*.py` | Large paste, resize, interruption, rewind, compaction, pipeline settings, and memory menus in raw and plain terminals |
@@ -103,8 +103,9 @@ The coverage runner instruments and measures **all workspace crates**, writes
 `coverage/rust/coverage.json`, `coverage/rust/lcov.info`, and
 `coverage/rust/html/index.html`, then checks the per-crate floors in
 `tests/coverage-baseline.json`. Missing data and newly added crates without an
-explicit floor fail the gate. The workspace floor is 76% lines; core and provider
-floors are 90%. These are measured starting floors, not a claim of full Rust
+explicit floor fail the gate. The workspace floor is 84% lines; `src` is 80%,
+core is 94%, tools and provider are 90%, and the gateway is 78%. These are
+measured starting floors, not a claim of full Rust
 coverage. Raise them as coverage improves; do not lower them to accommodate an
 unexplained regression. Stable LLVM coverage here measures lines, functions and
 regions; it does not measure Rust branch coverage.

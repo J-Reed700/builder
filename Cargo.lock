@@ -214,6 +214,7 @@ dependencies = [
  "axum",
  "builder-core",
  "builder-embedding",
+ "builder-gateway",
  "builder-provider",
  "builder-remote-protocol",
  "builder-tools",
