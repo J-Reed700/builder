@@ -798,7 +798,19 @@ async fn resume_and_daemon_report_missing_sessions_and_misused_flags() {
         text.contains("Daemon permissions are stored per schedule"),
         "{text}"
     );
-    for format in ["launchd", "systemd"] {
+    // Templates escape and canonicalize paths per format (systemd doubles
+    // backslashes; Windows canonical paths gain a `\\?\` prefix), so match
+    // the components that survive every rendering.
+    let exe_name = Path::new(env!("CARGO_BIN_EXE_builder"))
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let home_name = home.path().file_name().unwrap().to_str().unwrap();
+    for (format, marker) in [
+        ("launchd", "<key>ProgramArguments</key>"),
+        ("systemd", "ExecStart="),
+    ] {
         let output = builder(
             home.path(),
             workspace.path(),
@@ -806,14 +818,10 @@ async fn resume_and_daemon_report_missing_sessions_and_misused_flags() {
         )
         .await;
         let text = ok(&output);
-        assert!(
-            text.contains(env!("CARGO_BIN_EXE_builder")),
-            "{format}: {text}"
-        );
-        assert!(
-            text.contains(home.path().to_str().unwrap()),
-            "{format}: {text}"
-        );
+        assert!(text.contains(marker), "{format}: {text}");
+        assert!(text.contains(exe_name), "{format}: {text}");
+        assert!(text.contains(home_name), "{format}: {text}");
+        assert!(text.contains("daemon"), "{format}: {text}");
     }
 }
 
