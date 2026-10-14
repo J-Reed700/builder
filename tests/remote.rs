@@ -462,7 +462,9 @@ async fn task_outcome_distinguishes_unverified_answers_and_failed_commands() {
 
     let failed = Host::new(
         vec![
-            shell_call("printf diagnostic >&2; exit 7"),
+            // `exit` is a command in sh and cmd alike; `;` is only a
+            // separator in sh, so chain with `&&`.
+            shell_call("echo diagnostic >&2 && exit 7"),
             answer("Finished"),
         ],
         ApprovalMode::Trust,
