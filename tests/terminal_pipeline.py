@@ -106,21 +106,21 @@ max_output_tokens = 1024
             plain.expect("Choose an item:", mark)
             plain.send("1\r")
             plain.expect_row("Research pipeline", "On", mark)
-            # The run budget is a menu setting and applies without restarting.
+            # A loop-guard budget is a menu setting and applies without restarting.
             import re
             field_source = Path(__file__).resolve().parents[1] / "src/input/pipeline.rs"
             field_keys = re.findall(r'\(\s*"([a-z_]+)",', field_source.read_text().split("const SAVE")[0])
-            budget_index = field_keys.index("max_rounds") + 1
+            budget_index = field_keys.index("progress_check_calls") + 1
             plain.send(f"{budget_index}\r")
             plain.expect("New value", mark)
-            plain.send("250\r")
-            plain.expect_row("Agent rounds per run", "250", mark)
+            plain.send("25\r")
+            plain.expect_row("Progress check after calls", "25", mark)
             plain.send("s\r")
             plain.expect("Pipeline settings saved", mark)
             assert tomllib.loads(path.read_text())["profiles"]["local"]["pipeline"]["enabled"]
-            assert tomllib.loads(path.read_text())["profiles"]["local"]["pipeline"]["max_rounds"] == 250
+            assert tomllib.loads(path.read_text())["profiles"]["local"]["pipeline"]["progress_check_calls"] == 25
             plain.send("/status\r")
-            plain.expect_row("Rounds per run", "250", mark)
+            plain.expect_row("Progress", "focus after 25 tool calls", mark)
             plain.send("/exit\r")
             plain.expect("Saved. Continue with", mark)
             print("PASS: numbered settings menu in plain terminals")
