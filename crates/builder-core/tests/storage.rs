@@ -744,10 +744,14 @@ fn checkout_indexes_are_isolated_databases_so_one_writer_cannot_block_another() 
     let busy = store.try_code_index_lock("repo-a").unwrap().unwrap();
     store.code_index_record_failure(&busy, "seed").unwrap();
     let blocker = rusqlite::Connection::open(index_database(home.path())).unwrap();
+    // Creating repo-b's database is file I/O that repo-a's writer cannot
+    // influence, and it is slow on Windows CI; keep it out of the timed
+    // section so a slow disk is never mistaken for a blocked writer.
+    let other = store.try_code_index_lock("repo-b").unwrap().unwrap();
+    assert!(store.code_index_status("repo-b").unwrap().is_none());
     blocker.execute_batch("BEGIN IMMEDIATE;").unwrap();
 
     let started = std::time::Instant::now();
-    let other = store.try_code_index_lock("repo-b").unwrap().unwrap();
     store
         .code_index_record_failure(&other, "independent")
         .unwrap();
