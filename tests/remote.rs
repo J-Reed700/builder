@@ -836,8 +836,6 @@ async fn chat_management_preserves_originals_and_rejects_stale_rewind() {
     host.start(Some(id)).await;
     host.chat_phase(id, &["complete"]).await;
     let path = format!("sessions/{id}");
-    // Wait for the final guard to drop, without stopping the server.
-    tokio::time::sleep(Duration::from_millis(30)).await;
     let info = host.get(&path).await;
     assert_eq!(info["pending"], false);
     let original = host
@@ -942,7 +940,6 @@ async fn cancelling_saved_turn_checks_tip_and_never_replays_model_or_tools() {
     let id = first["session"].as_str().unwrap();
     host.post("pause", json!({"run_id":first["run_id"]})).await;
     host.chat_phase(id, &["paused"]).await;
-    tokio::time::sleep(Duration::from_millis(30)).await;
     let path = format!("sessions/{id}");
     let info = host.get(&path).await;
     assert_eq!(info["pending"], true);
