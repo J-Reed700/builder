@@ -229,7 +229,9 @@ async fn capture(mut stream: impl AsyncRead + Unpin, saved: &mut Capture) -> Res
     Ok(())
 }
 
-#[cfg(test)]
+// Every scenario here drives a POSIX shell, so the module is Unix-only;
+// otherwise its helpers are dead code on Windows.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::{Action, Workspace};
