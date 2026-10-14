@@ -462,7 +462,9 @@ async fn task_outcome_distinguishes_unverified_answers_and_failed_commands() {
 
     let failed = Host::new(
         vec![
-            shell_call("printf diagnostic >&2; exit 7"),
+            // `exit` is a command in sh and cmd alike; `;` is only a
+            // separator in sh, so chain with `&&`.
+            shell_call("echo diagnostic >&2 && exit 7"),
             answer("Finished"),
         ],
         ApprovalMode::Trust,
@@ -834,8 +836,6 @@ async fn chat_management_preserves_originals_and_rejects_stale_rewind() {
     host.start(Some(id)).await;
     host.chat_phase(id, &["complete"]).await;
     let path = format!("sessions/{id}");
-    // Wait for the final guard to drop, without stopping the server.
-    tokio::time::sleep(Duration::from_millis(30)).await;
     let info = host.get(&path).await;
     assert_eq!(info["pending"], false);
     let original = host
@@ -940,7 +940,6 @@ async fn cancelling_saved_turn_checks_tip_and_never_replays_model_or_tools() {
     let id = first["session"].as_str().unwrap();
     host.post("pause", json!({"run_id":first["run_id"]})).await;
     host.chat_phase(id, &["paused"]).await;
-    tokio::time::sleep(Duration::from_millis(30)).await;
     let path = format!("sessions/{id}");
     let info = host.get(&path).await;
     assert_eq!(info["pending"], true);

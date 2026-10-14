@@ -474,3 +474,31 @@ mod tests {
         assert!(gateway_urls("file:///tmp/socket").is_err());
     }
 }
+
+#[cfg(test)]
+mod url_tests {
+    use super::gateway_urls;
+
+    #[test]
+    fn gateway_url_rejects_credentials_queries_fragments_and_missing_hosts() {
+        let (origin, socket) = gateway_urls("http://localhost:8080").unwrap();
+        assert_eq!(origin, "http://localhost:8080");
+        assert_eq!(socket, "ws://localhost:8080/api/gateway/connect");
+        assert_eq!(
+            gateway_urls("https://builder.example.com/").unwrap().0,
+            "https://builder.example.com",
+            "a bare trailing slash is the same origin"
+        );
+        for bad in [
+            "https://user:pw@builder.example.com",
+            "https://builder.example.com/?x=1",
+            "https://builder.example.com/#frag",
+            "ws://builder.example.com",
+            "https://",
+            "builder.example.com",
+            "",
+        ] {
+            assert!(gateway_urls(bad).is_err(), "{bad:?} must be rejected");
+        }
+    }
+}

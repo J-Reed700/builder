@@ -56,6 +56,8 @@ tower = { version = "0.5", features = ["util"] }
 url = "2"
 
 [dev-dependencies]
+# The real gateway, paired in-process with the host connector in tests only.
+builder-gateway = { path = "crates/builder-gateway" }
 syn = { version = "2", features = ["full", "visit"] }
 tempfile = "3"
 rusqlite = { version = "0.37", features = ["bundled"] }

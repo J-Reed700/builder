@@ -173,7 +173,7 @@ impl Store {
                 file,
                 scope: scope.to_owned(),
             })),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) if super::lock_contended(&error) => Ok(None),
             Err(error) => Err(error).context("Could not acquire code index maintenance lock"),
         }
     }

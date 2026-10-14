@@ -247,8 +247,10 @@ impl Store {
                     "Invalid stored vector"
                 );
                 let v = b
-                    .chunks_exact(4)
-                    .map(|x| f32::from_le_bytes(x.try_into().unwrap()))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|x| f32::from_le_bytes(*x))
                     .collect::<Vec<_>>();
                 validate_vector(&v)?;
                 Ok(v)
