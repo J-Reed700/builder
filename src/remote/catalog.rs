@@ -113,9 +113,17 @@ pub(super) fn scoped_session(
 
 /// Path of a chat folder relative to the host root; empty for the root itself.
 fn folder_name(options: &RemoteOptions, workspace: &FilePath) -> String {
+    // Always `/`-separated: the browser sends these names back as folder
+    // paths, and `Path` accepts that form on every platform.
     workspace
         .strip_prefix(&options.workspace)
-        .map(|relative| relative.to_string_lossy().into_owned())
+        .map(|relative| {
+            relative
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
         .unwrap_or_default()
 }
 
