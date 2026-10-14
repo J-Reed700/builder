@@ -65,10 +65,18 @@ pub fn capture(workspace: &Workspace, settings: &PipelineSettings) -> Result<Cod
             source_bytes.saturating_add(size) <= settings.code_index_max_bytes,
             "Code index exceeds configured total byte limit; previous generation remains active"
         );
+        // Index paths use `/` on every platform so they join with git history
+        // and read the same in model-facing output; `Path` accepts them back.
         let path = relative
-            .to_str()
-            .context("Non-UTF8 source path")?
-            .to_owned();
+            .components()
+            .map(|component| {
+                component
+                    .as_os_str()
+                    .to_str()
+                    .context("Non-UTF8 source path")
+            })
+            .collect::<Result<Vec<_>>>()?
+            .join("/");
         let mut bytes = Vec::with_capacity(size);
         std::fs::File::open(workspace.resolve(&path)?)?
             .take(settings.code_index_max_file_bytes as u64 + 1)

@@ -107,6 +107,9 @@ pub(super) fn save_credential(path: &Path, credential: &SavedCredential) -> Resu
     file.sync_all()?;
     std::fs::rename(&temporary_path, path)?;
     cleanup.0 = None;
+    // Directory handles cannot be opened this way on Windows; the rename is
+    // already atomic there.
+    #[cfg(unix)]
     std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }

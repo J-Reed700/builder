@@ -58,7 +58,7 @@ impl Store {
         let file = private_lock_options().open(self.home.join("scheduler.lock"))?;
         match file.try_lock_exclusive() {
             Ok(()) => Ok(false),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
+            Err(error) if super::lock_contended(&error) => Ok(true),
             Err(error) => Err(error.into()),
         }
     }
