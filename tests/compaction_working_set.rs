@@ -229,22 +229,43 @@ async fn changed_or_deleted_source_is_not_restored_as_current() {
 }
 
 #[tokio::test]
+async fn every_current_read_survives_when_the_window_has_room_for_it() {
+    // A 160k-token window compacted below half full once kept 8k of 27k tokens
+    // of hash-current reads, and the agent immediately read every dropped file
+    // again.
+    let mut f = Fixture::new();
+    f.agent.profile.context_tokens = 163_840;
+    let line = "    program_id TEXT NOT NULL REFERENCES learning_programs(id),\n";
+    for n in 0..4 {
+        let path = format!("migration{n}.sql");
+        std::fs::write(f.home.path().join(&path), line.repeat(150)).unwrap();
+        f.read(&format!("read{n}"), &path);
+    }
+    f.pad();
+    let active = f.compact().await;
+    let restored = reads(&active);
+    assert_eq!(restored.len(), 4);
+    assert!(estimate_tokens(&restored.into_iter().cloned().collect::<Vec<_>>()) > 16_000);
+}
+
+#[tokio::test]
 async fn repeated_reads_are_deduplicated_and_working_set_is_bounded() {
     let mut f = Fixture::new();
     f.agent.profile.context_tokens = 131_072;
-    for n in 0..12 {
+    for n in 0..40 {
         let path = format!("file{n}.txt");
         std::fs::write(f.home.path().join(&path), format!("file {n}\n")).unwrap();
         f.read(&format!("read{n}"), &path);
     }
-    f.read("duplicate", "file11.txt");
+    f.read("duplicate", "file39.txt");
+    f.pad();
     let active = f.compact().await;
     let restored = reads(&active);
-    assert_eq!(restored.len(), 8);
+    assert_eq!(restored.len(), 32);
     assert_eq!(
         restored
             .iter()
-            .filter(|m| m.content.as_deref().unwrap().contains("file11.txt"))
+            .filter(|m| m.content.as_deref().unwrap().contains("file39.txt"))
             .count(),
         1
     );
@@ -290,9 +311,10 @@ async fn source_is_checked_after_the_summarizer_finishes() {
 async fn oversized_read_is_omitted_without_truncating_exact_source() {
     let mut f = Fixture::new();
     f.agent.profile.context_tokens = 32_768;
+    f.agent.profile.compact_at_percent = 50;
     std::fs::write(
         f.home.path().join("large.txt"),
-        "long source line ".repeat(5).repeat(100),
+        format!("{}\n", "long source line ".repeat(5)).repeat(130),
     )
     .unwrap();
     f.read("large", "large.txt");
