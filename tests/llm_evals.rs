@@ -7,7 +7,7 @@ use builder_core::{
     protocol::{Function, Message, Role, ToolCall},
     store::Store,
 };
-use builder_provider::{Event, OpenAiCompatible};
+use builder_provider::{Endpoint, Event};
 use builder_tools::{Action, Workspace};
 use serde_json::{Value, json};
 use std::{collections::HashSet, path::Path, time::Instant};
@@ -538,7 +538,7 @@ async fn live_behavior_suite() -> Result<()> {
             let mut store = Store::open(temp.path())?;
             let agent = Agent {
                 memory: builder::memory::MemoryRuntime::from_config(&config)?,
-                provider: OpenAiCompatible::new(profile.clone())?,
+                provider: Endpoint::new(profile.clone())?,
                 profile: profile.clone(),
                 workspace,
                 session: session.clone(),

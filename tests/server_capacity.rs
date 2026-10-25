@@ -5,7 +5,7 @@ use axum::{
     routing::get,
 };
 use builder_core::config::Profile;
-use builder_provider::{OpenAiCompatible, Provider};
+use builder_provider::{Endpoint, Provider};
 use std::{
     collections::HashMap,
     sync::{
@@ -43,7 +43,7 @@ async fn capacity_probe_preserves_proxy_prefix_auth_and_model_and_caches_results
         builder_core::config::Secret::Literal("Bearer test-key".into()),
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let provider = OpenAiCompatible::new(profile).unwrap();
+    let provider = Endpoint::new(profile).unwrap();
     let (a, b) = tokio::join!(provider.parallel_capacity(), provider.parallel_capacity());
     assert_eq!((a, b), (Some(4), Some(4)));
     assert_eq!(hits.load(Ordering::SeqCst), 1);
@@ -76,7 +76,7 @@ async fn missing_or_invalid_capacity_is_unknown_and_cached() {
             ..Profile::default()
         };
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let provider = OpenAiCompatible::new(profile).unwrap();
+        let provider = Endpoint::new(profile).unwrap();
         assert_eq!(provider.parallel_capacity().await, None);
         assert_eq!(provider.parallel_capacity().await, None);
         assert_eq!(hits.load(Ordering::SeqCst), 1);
@@ -108,7 +108,7 @@ async fn context_probe_reads_the_per_slot_window_and_ignores_missing_or_zero() {
             ..Profile::default()
         };
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let provider = OpenAiCompatible::new(profile).unwrap();
+        let provider = Endpoint::new(profile).unwrap();
         assert_eq!(provider.context_capacity().await, expected, "{body}");
         assert_eq!(provider.parallel_capacity().await, Some(2), "{body}");
         server.abort();
@@ -127,7 +127,7 @@ async fn context_is_unknown_when_the_slot_count_is_invalid() {
         ..Profile::default()
     };
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let provider = OpenAiCompatible::new(profile).unwrap();
+    let provider = Endpoint::new(profile).unwrap();
     assert_eq!(provider.context_capacity().await, None);
     assert_eq!(provider.parallel_capacity().await, None);
     server.abort();

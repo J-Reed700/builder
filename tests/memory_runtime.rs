@@ -543,7 +543,7 @@ async fn live_embedding_index_survives_restart_and_retrieves_in_another_session(
         .unwrap();
     read(&mut store, &session, &workspace, "read1").await;
     let (_, profile) = config.profile(Some("Nomic Embed (llama.cpp)")).unwrap();
-    let vector = builder_provider::OpenAiCompatible::new(profile)
+    let vector = builder_provider::Endpoint::new(profile)
         .unwrap()
         .embed("search_document: shield chance is 0.025")
         .await

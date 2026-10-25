@@ -5,7 +5,7 @@ use builder_core::{
     protocol::{Message, Role},
     store::Store,
 };
-use builder_provider::OpenAiCompatible;
+use builder_provider::Endpoint;
 use builder_tools::{Action, Workspace};
 use serde_json::json;
 
@@ -56,7 +56,7 @@ async fn compacted_investigation_reaches_a_real_edit() -> anyhow::Result<()> {
     let mut store = Store::open(temp.path())?;
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(profile.clone())?,
+        provider: Endpoint::new(profile.clone())?,
         profile,
         workspace,
         session: session.clone(),
@@ -139,7 +139,7 @@ async fn stalled_session_recovery_completes_run_with_multiple_edits() -> anyhow:
     store.checkpoint(&session, &before, &context)?;
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(profile.clone())?,
+        provider: Endpoint::new(profile.clone())?,
         profile,
         workspace: Workspace::new(temp.path())?,
         session: session.clone(),

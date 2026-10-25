@@ -4,7 +4,7 @@ use builder_core::{
     config::{Config, Profile},
     store::Store,
 };
-use builder_provider::OpenAiCompatible;
+use builder_provider::Endpoint;
 use builder_tools::Workspace;
 
 pub(super) struct MemoryTask {
@@ -117,7 +117,7 @@ pub(super) fn reap_memory_task(task: &mut Option<MemoryTask>) {
 }
 
 pub(super) fn start_memory_task(
-    agent: &Agent<OpenAiCompatible>,
+    agent: &Agent<Endpoint>,
     home: &std::path::Path,
     config: &Config,
 ) -> Option<MemoryTask> {
@@ -361,7 +361,7 @@ mod tests {
         config.memory.embedding_profile = Some("test".into());
         config.profiles.insert("test".into(), profile.clone());
         let agent = Agent {
-            provider: OpenAiCompatible::new(profile.clone()).unwrap(),
+            provider: Endpoint::new(profile.clone()).unwrap(),
             profile,
             memory: builder::memory::MemoryRuntime::from_config(&config).unwrap(),
             workspace,

@@ -6,7 +6,7 @@ use builder_core::{
     config::{Config, EmbeddingBackend, ModelRole},
     memory::digest,
 };
-use builder_provider::OpenAiCompatible;
+use builder_provider::Endpoint;
 use serde_json::json;
 use std::{
     cell::{Cell, RefCell},
@@ -15,7 +15,7 @@ use std::{
 
 enum Embedding {
     Local(builder_embedding::LocalEmbedding),
-    Remote(Box<OpenAiCompatible>),
+    Remote(Box<Endpoint>),
 }
 
 pub struct EmbeddingRuntime {
@@ -82,7 +82,7 @@ impl EmbeddingRuntime {
                 ]))?
                 .as_bytes(),
             );
-            runtime.embedding = Some(Embedding::Remote(Box::new(OpenAiCompatible::new(profile)?)));
+            runtime.embedding = Some(Embedding::Remote(Box::new(Endpoint::new(profile)?)));
             runtime.query_prefix = config.memory.query_prefix.clone();
             runtime.document_prefix = config.memory.document_prefix.clone();
         }

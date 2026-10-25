@@ -20,7 +20,7 @@ use builder_core::{
     protocol::{Message, Role},
     store::Store,
 };
-use builder_provider::OpenAiCompatible;
+use builder_provider::Endpoint;
 use console::style;
 use std::{
     io::{self, IsTerminal},
@@ -36,7 +36,7 @@ pub(crate) struct SessionOptions {
 }
 
 pub(crate) async fn run(
-    agent: &mut Agent<OpenAiCompatible>,
+    agent: &mut Agent<Endpoint>,
     store: &mut Store,
     initial_prompt: Option<String>,
     options: SessionOptions,

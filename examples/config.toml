@@ -20,3 +20,14 @@ Authorization = { env = "BUILDER_BASIC_AUTH" }
 # An API-key endpoint instead uses this field inside its profile:
 # api_key = { env = "MODEL_API_KEY" }
 # An explicit Authorization header takes precedence over bearer/API-key auth.
+
+# Claude via the Anthropic Messages API. Uses ANTHROPIC_OAUTH_TOKEN, then
+# ANTHROPIC_API_KEY, unless the profile sets api_key / api_key_env
+# (`builder config token` stores an override). OAuth tokens (sk-ant-oat...)
+# from a Claude Pro/Max subscription work as well as API keys.
+[profiles.claude]
+api = "anthropic"
+base_url = "https://api.anthropic.com/v1"
+model = "claude-sonnet-5-5"
+context_tokens = 200000
+max_output_tokens = 16384

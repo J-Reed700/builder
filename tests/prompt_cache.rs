@@ -10,7 +10,7 @@ use builder_core::{
     config::{Profile, ReasoningHistory},
     protocol::{Message, Role},
 };
-use builder_provider::{OpenAiCompatible, Provider};
+use builder_provider::{Endpoint, Provider};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
@@ -59,7 +59,7 @@ async fn body(
         reasoning_history: history,
         ..Profile::default()
     };
-    let mut provider = OpenAiCompatible::new(profile).unwrap();
+    let mut provider = Endpoint::new(profile).unwrap();
     if thinking_off {
         provider = provider.without_thinking();
     }
@@ -142,7 +142,7 @@ async fn extraction_requests_switch_thinking_off_where_the_switch_exists() {
         "chat_template_kwargs".into(),
         json!({"enable_thinking": true, "reasoning_effort": "high"}),
     );
-    OpenAiCompatible::new(profile)
+    Endpoint::new(profile)
         .unwrap()
         .without_thinking()
         .complete(&history(), &[], &mut |_| {})

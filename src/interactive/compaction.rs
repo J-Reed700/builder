@@ -4,7 +4,7 @@ use builder::{
     ui,
 };
 use builder_core::{config::Config, store::Store};
-use builder_provider::OpenAiCompatible;
+use builder_provider::Endpoint;
 
 struct CompactionState {
     status: std::sync::Mutex<String>,
@@ -57,7 +57,7 @@ impl CompactionTask {
 }
 
 pub(super) fn start_compaction(
-    agent: &Agent<OpenAiCompatible>,
+    agent: &Agent<Endpoint>,
     home: &std::path::Path,
     config: &Config,
 ) -> Result<CompactionTask> {
@@ -84,7 +84,7 @@ pub(super) fn start_compaction(
                     .context("Could not start the compaction runtime")?;
                 let mut store = Store::open(&home)?;
                 let memory = builder::memory::MemoryRuntime::from_config(&config)?;
-                let provider = OpenAiCompatible::new(profile.clone())?;
+                let provider = Endpoint::new(profile.clone())?;
                 let compact_agent = Agent {
                     provider,
                     memory,
@@ -226,7 +226,7 @@ mod tests {
 
     /// A session with `findings` large assistant turns; a follow-up user
     /// message makes the earlier turns "older" context that can be summarized.
-    fn agent(home: &std::path::Path, url: &str, findings: usize) -> Agent<OpenAiCompatible> {
+    fn agent(home: &std::path::Path, url: &str, findings: usize) -> Agent<Endpoint> {
         let workspace = Workspace::new(home).unwrap();
         let mut store = Store::open(home).unwrap();
         let session = store.create("compaction", "local", home, "system").unwrap();
@@ -256,7 +256,7 @@ mod tests {
             ..Profile::default()
         };
         Agent {
-            provider: OpenAiCompatible::new(profile.clone()).unwrap(),
+            provider: Endpoint::new(profile.clone()).unwrap(),
             memory: None,
             profile,
             workspace,

@@ -17,6 +17,9 @@ use std::{
 #[serde(default, deny_unknown_fields)]
 pub struct Profile {
     pub pipeline: PipelineSettings,
+    /// Wire protocol spoken by `base_url`. See [`Api`].
+    #[serde(skip_serializing_if = "Api::is_default")]
+    pub api: Api,
     pub base_url: String,
     pub model: String,
     pub api_key_env: Option<String>,
@@ -43,6 +46,7 @@ impl Default for Profile {
     fn default() -> Self {
         Self {
             pipeline: PipelineSettings::default(),
+            api: Api::default(),
             base_url: "http://localhost:11434/v1".into(),
             model: "qwen3:8b".into(),
             api_key_env: None,
@@ -65,6 +69,28 @@ impl Default for Profile {
         }
     }
 }
+/// The request/response protocol a profile's endpoint speaks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Api {
+    /// OpenAI-compatible `/chat/completions` (llama.cpp, Ollama, vLLM, gateways).
+    #[default]
+    OpenAi,
+    /// Anthropic Messages API (`/messages`). Authenticates with a Claude API
+    /// key (`x-api-key`) or a Claude Pro/Max OAuth token (`sk-ant-oat…`, sent
+    /// as a bearer token with the OAuth beta), the same way pi and Claude Code
+    /// do. Without a profile credential, `ANTHROPIC_OAUTH_TOKEN` and then
+    /// `ANTHROPIC_API_KEY` are used.
+    Anthropic,
+}
+impl Api {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+/// Default endpoint for [`Api::Anthropic`] profiles.
+pub const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/v1";
+
 /// What happens to an assistant turn's reasoning when the history goes back
 /// to the server.
 ///
@@ -225,6 +251,7 @@ impl Profile {
                         | "max_tokens"
                         | "max_completion_tokens"
                         | "n"
+                        | "system"
                 ),
                 "extra_body cannot override protocol field {name}"
             );

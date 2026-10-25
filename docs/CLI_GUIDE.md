@@ -190,6 +190,30 @@ The [OpenCode custom-provider subset](https://opencode.ai/providers/) supports `
 
 Embedding profiles retain their endpoint and auth, and can use `models`/`doctor`. Builder rejects them for chat. Local CPU embeddings and explicitly configured remote embeddings support persistent hybrid semantic/keyword retrieval. See [memory](MEMORY.md).
 
+### Claude (Anthropic API)
+
+Builder can talk to Claude directly through the Anthropic Messages API, authenticating the same way pi and Claude Code do:
+
+```bash
+builder config add claude --api anthropic --model claude-sonnet-5-5 --context-tokens 200000 --max-output-tokens 16384
+builder config use claude
+```
+
+The base URL defaults to `https://api.anthropic.com/v1`. Credentials are resolved in this order, first match wins:
+
+1. An explicit `Authorization` or `x-api-key` entry in the profile's `[headers]` (for proxies).
+2. The profile override: `api_key` (set with `builder config token`) or `api_key_env`.
+3. `ANTHROPIC_OAUTH_TOKEN`, then `ANTHROPIC_API_KEY`.
+
+`builder config token` reads the credential from stdin with echo off (or from a pipe, e.g. `pbpaste | builder config token`), so it never appears in shell history. It stores the token in the 0600 config file. `builder config token --clear` removes the override.
+
+Two credential kinds are accepted:
+
+- **API key** (`sk-ant-api…`, from the Anthropic Console): sent as `x-api-key`.
+- **Claude Pro/Max OAuth token** (`sk-ant-oat…`, e.g. from `claude setup-token`): sent as `Authorization: Bearer`, with the `oauth-2025-04-20` and `claude-code-20250219` betas and the Claude Code identity, which the subscription endpoint requires.
+
+Anthropic profiles support streaming, tool calls, and prompt caching of the system prompt and tool definitions. Embeddings are not available from Anthropic, so use a local or OpenAI-compatible profile for memory embeddings. Extended thinking (`extra_body.thinking`) is not yet supported in tool loops because Builder does not persist thinking signatures.
+
 ### Authentication and advanced settings
 
 See the [README Basic Auth walkthrough](../README.md#custom-endpoint-with-http-basic-auth) for a complete config and credential prompt command.
