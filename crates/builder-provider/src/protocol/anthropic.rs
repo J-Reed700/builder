@@ -1,8 +1,8 @@
-//! Anthropic Messages API translation for [`crate::OpenAiCompatible`] when a
-//! profile sets `api = "anthropic"`. Transport, retries, and durable message
-//! validation stay shared; this module only maps the wire format and auth.
-use crate::openai::{Failure, validate};
-use crate::{Activity, Event, OutputLimit, SseDecoder};
+//! Anthropic Messages API (`/messages`), selected by `api = "anthropic"`.
+//! Authenticates like pi and Claude Code: API keys as `x-api-key`, Claude
+//! Pro/Max OAuth tokens as a bearer token with the OAuth beta and identity.
+use super::{Options, RESPONSE_LIMIT, Request, sensitive};
+use crate::{Activity, Event, OutputLimit, SseDecoder, failure::Failure, reply::validate};
 use anyhow::{Result, bail, ensure};
 use builder_core::config::{Profile, Secret};
 use builder_core::protocol::{Function, Message, Role, ToolCall};
@@ -11,7 +11,7 @@ use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue, USER_AG
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-pub(crate) const VERSION: &str = "2023-06-01";
+pub(super) const VERSION: &str = "2023-06-01";
 /// Claude Pro/Max subscription tokens carry this marker; API keys never do.
 const OAUTH_MARKER: &str = "sk-ant-oat";
 const OAUTH_BETAS: &str = "claude-code-20250219,oauth-2025-04-20";
@@ -20,14 +20,7 @@ const OAUTH_BETAS: &str = "claude-code-20250219,oauth-2025-04-20";
 const OAUTH_USER_AGENT: &str = "claude-cli/2.1.280";
 const OAUTH_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 /// Environment fallbacks, in priority order, when the profile has no credential.
-pub const TOKEN_ENV: [&str; 2] = ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
-
-fn sensitive(value: &str) -> Result<HeaderValue> {
-    let mut value = HeaderValue::from_str(value)
-        .map_err(|_| anyhow::anyhow!("Invalid Claude credential; expected a single-line token"))?;
-    value.set_sensitive(true);
-    Ok(value)
-}
+const TOKEN_ENV: [&str; 2] = ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
 
 /// The profile's credential: `api_key`, then `api_key_env`, then the standard
 /// Anthropic environment variables. Profile settings override the environment.
@@ -45,7 +38,7 @@ fn token(profile: &Profile) -> Result<Option<String>> {
 
 /// Adds Anthropic auth and version headers. Returns whether the credential is
 /// a subscription OAuth token, which changes the request body.
-pub(crate) fn authorize(profile: &Profile, headers: &mut HeaderMap) -> Result<bool> {
+pub(super) fn authorize(profile: &Profile, headers: &mut HeaderMap) -> Result<bool> {
     headers
         .entry(HeaderName::from_static("anthropic-version"))
         .or_insert(HeaderValue::from_static(VERSION));
@@ -60,10 +53,16 @@ pub(crate) fn authorize(profile: &Profile, headers: &mut HeaderMap) -> Result<bo
     };
     let token = token.trim();
     if !token.contains(OAUTH_MARKER) {
-        headers.insert(HeaderName::from_static("x-api-key"), sensitive(token)?);
+        headers.insert(
+            HeaderName::from_static("x-api-key"),
+            sensitive(token, "Claude credential")?,
+        );
         return Ok(false);
     }
-    headers.insert(AUTHORIZATION, sensitive(&format!("Bearer {token}"))?);
+    headers.insert(
+        AUTHORIZATION,
+        sensitive(&format!("Bearer {token}"), "Claude credential")?,
+    );
     let beta = HeaderName::from_static("anthropic-beta");
     match headers.get(&beta).and_then(|v| v.to_str().ok()) {
         Some(existing) if existing.contains("oauth-2025-04-20") => {}
@@ -130,15 +129,16 @@ fn push(wire: &mut Vec<Value>, role: &str, blocks: Vec<Value>) {
     wire.push(json!({"role": role, "content": blocks}));
 }
 
-/// Build the Messages request body. Returns the body and prompt size.
-pub(crate) fn body(
+/// Encode a Messages request. `json_mode` has no wire equivalent here; the
+/// caller parses and validates the object, as for servers without
+/// `response_format`. `llama_cpp` never applies to hosted Claude.
+pub(super) fn encode(
     profile: &Profile,
     messages: &[Message],
     tools: &[Value],
-    max_output_tokens: usize,
+    options: &Options,
     oauth: bool,
-    suppress_thinking: bool,
-) -> Result<(Value, usize)> {
+) -> Result<Request> {
     let leading = messages
         .iter()
         .take_while(|m| m.role == Role::System)
@@ -221,7 +221,7 @@ pub(crate) fn body(
     let mut body = json!({
         "model": profile.model,
         "messages": wire,
-        "max_tokens": max_output_tokens,
+        "max_tokens": options.max_output_tokens,
         "stream": profile.stream,
     });
     if !system.is_empty() {
@@ -262,10 +262,12 @@ pub(crate) fn body(
     for (key, value) in &profile.extra_body {
         body[key] = value.clone();
     }
-    if suppress_thinking && let Some(object) = body.as_object_mut() {
+    if options.suppress_thinking
+        && let Some(object) = body.as_object_mut()
+    {
         object.remove("thinking");
     }
-    Ok((body, prompt_bytes))
+    Ok(Request { body, prompt_bytes })
 }
 
 fn check_stop(reason: Option<&str>) -> std::result::Result<(), Failure> {
@@ -314,7 +316,7 @@ fn new_call(block: &Value) -> ToolCall {
 }
 
 /// Parse a non-streaming Messages response.
-pub(crate) fn parse(
+pub(super) fn parse(
     value: &Value,
     emit: &mut dyn FnMut(Event),
 ) -> std::result::Result<Message, Failure> {
@@ -352,7 +354,7 @@ pub(crate) fn parse(
 }
 
 /// Consume a streaming Messages response.
-pub(crate) async fn stream(
+pub(super) async fn stream(
     response: reqwest::Response,
     emit: &mut dyn FnMut(Event),
 ) -> std::result::Result<Message, Failure> {
@@ -367,7 +369,7 @@ pub(crate) async fn stream(
     while let Some(chunk) = bytes_stream.next().await {
         let bytes = chunk.map_err(|e| Failure::transient(e.without_url().to_string()))?;
         received += bytes.len();
-        if received > 16 * 1024 * 1024 {
+        if received > RESPONSE_LIMIT {
             return Err(Failure::permanent("Response exceeds 16 MiB"));
         }
         for event in decoder
@@ -497,7 +499,9 @@ mod tests {
         let tools = vec![
             json!({"type":"function","function":{"name":"read","description":"d","parameters":{"type":"object"}}}),
         ];
-        let (body, _) = body(&profile, &messages, &tools, 100, true, false).unwrap();
+        let body = encode(&profile, &messages, &tools, &options(), true)
+            .unwrap()
+            .body;
         assert_eq!(body["system"][0]["text"], OAUTH_IDENTITY);
         assert_eq!(body["system"][1]["text"], "policy");
         let wire = body["messages"].as_array().unwrap();
@@ -509,12 +513,19 @@ mod tests {
         assert_eq!(results[1]["tool_use_id"], "call_2");
         assert_eq!(results[2]["type"], "text");
         assert_eq!(body["tools"][0]["input_schema"], json!({"type":"object"}));
-        let (plain, _) = body_for_api_key(&profile, &messages);
+        let plain = encode(&profile, &messages, &[], &options(), false)
+            .unwrap()
+            .body;
         assert_eq!(plain["system"][0]["text"], "policy");
     }
 
-    fn body_for_api_key(profile: &Profile, messages: &[Message]) -> (Value, usize) {
-        body(profile, messages, &[], 100, false, false).unwrap()
+    fn options() -> Options {
+        Options {
+            max_output_tokens: 100,
+            json_mode: false,
+            suppress_thinking: false,
+            llama_cpp: false,
+        }
     }
 
     #[test]

@@ -10,7 +10,7 @@ use builder_core::{
     config::{self, Config},
     store::Store,
 };
-use builder_provider::OpenAiCompatible;
+use builder_provider::Endpoint;
 use builder_tools::Workspace;
 use clap::Parser;
 use cli::{Cli, Command};
@@ -127,7 +127,7 @@ async fn app(cli: Cli) -> Result<()> {
     let (profile_name, mut profile) = config.profile(profile_name)?;
     profile.pipeline = profile.pipeline.updated(&cli.pipeline)?;
     profile.validate()?;
-    let provider = OpenAiCompatible::new(profile.clone())?;
+    let provider = Endpoint::new(profile.clone())?;
     if matches!(cli.command, Some(Command::Models | Command::Doctor)) {
         return commands::diagnostics::run(
             matches!(cli.command, Some(Command::Doctor)),

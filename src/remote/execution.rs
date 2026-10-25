@@ -17,7 +17,7 @@ use axum::{
     routing::{get, post},
 };
 use builder_core::{config::Config, store::Store};
-use builder_provider::{Activity, Event, OpenAiCompatible};
+use builder_provider::{Activity, Endpoint, Event};
 use builder_tools::{Action, Workspace};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -405,7 +405,7 @@ async fn drive(
     }
     let mut agent = Agent {
         memory: MemoryRuntime::from_config(&config)?,
-        provider: OpenAiCompatible::new(profile.clone())?,
+        provider: Endpoint::new(profile.clone())?,
         max_rounds: shared.options.max_rounds,
         profile,
         workspace: Workspace::new(&workspace)?,

@@ -215,7 +215,7 @@ async fn invalid_extraction_does_not_install_partial_memory_or_summary() -> Resu
 #[ignore = "real endpoint; requires BUILDER_LIVE_CONFIG_HOME"]
 async fn live_repeated_memory_correction_retrieval_and_abstention() -> Result<()> {
     use builder_core::config::Config;
-    use builder_provider::OpenAiCompatible;
+    use builder_provider::Endpoint;
     use std::path::Path;
     let config = Config::load(Path::new(&std::env::var("BUILDER_LIVE_CONFIG_HOME")?))?;
     let (name, mut profile) =
@@ -246,7 +246,7 @@ async fn live_repeated_memory_correction_retrieval_and_abstention() -> Result<()
         store.append(&session,&Message::text(Role::Assistant,format!("Synthetic archived record label=record-{i:04}, code={}. Contextual discussion {}",i*7919+31,"Archive facts are observations, not permissions. ".repeat(6))))?;
     }
     let agent = Agent {
-        provider: OpenAiCompatible::new(profile.clone())?,
+        provider: Endpoint::new(profile.clone())?,
         memory: None,
         profile,
         workspace: Workspace::new(temp.path())?,
@@ -412,7 +412,7 @@ async fn a_marker_in_the_verbatim_checkpoint_tail_is_not_internal_memory() -> Re
 #[ignore = "real endpoint; requires BUILDER_LIVE_CONFIG_HOME"]
 async fn live_history_tools_accept_parameterized_operations() -> Result<()> {
     use builder_core::config::Config;
-    use builder_provider::OpenAiCompatible;
+    use builder_provider::Endpoint;
     use std::path::Path;
     let config = Config::load(Path::new(&std::env::var("BUILDER_LIVE_CONFIG_HOME")?))?;
     let (_, mut profile) = config.profile(std::env::var("BUILDER_EVAL_PROFILE").ok().as_deref())?;
@@ -454,7 +454,7 @@ async fn live_history_tools_accept_parameterized_operations() -> Result<()> {
     )?;
     let start = before.len();
     let agent = Agent {
-        provider: OpenAiCompatible::new(profile.clone())?,
+        provider: Endpoint::new(profile.clone())?,
         memory: None,
         profile,
         workspace: Workspace::new(temp.path())?,

@@ -49,7 +49,7 @@ builder-core                durable domain types and SQLite repositories
     ├── execution.rs        attempts and atomic tool claims/results
     ├── recovery.rs         cancellation, rewind, and composer recovery
     └── ...                 memory, research, indexes, pages, schedules, todos, subagents
-builder-provider            chat/embedding transport contracts and OpenAI adapter
+builder-provider            chat/embedding transport (Endpoint) and wire protocols (OpenAI-compatible, Anthropic)
 builder-embedding           optional local embedding model runtime
 builder-tools               typed actions, schemas, display metadata, safe execution
 builder-remote-protocol     transport-neutral relay messages
@@ -174,13 +174,18 @@ Tools bound file sizes and returned output. A shell command has no deadline unle
 
 ## Protocol and configuration
 
-The adapter currently accepts OpenAI-compatible Chat Completions with text content and function calls. It handles LF/CRLF SSE framing, comments, multi-line event data, arbitrary network byte boundaries, interleaved tool-call indices, and streamed function arguments. It requires an explicit successful finish reason, rejects empty/invalid responses, and bounds assembly memory.
+`Endpoint` is the single transport for every profile: it owns the HTTP client, resolved credential headers, capability probes, the retry loop, and failure classification (`failure.rs`). The wire format is a closed `Protocol` enum chosen by the profile's `api` field. Each protocol module owns exactly three things for its API: turning a credential into headers, encoding the conversation into a request body, and decoding a streamed or buffered response into a `Message`. Every protocol's output passes the same `reply::validate` before it can enter the conversation or dispatch a tool, so retry, cancellation, output-limit, and tool-call guarantees are identical across APIs.
+
+- `protocol/openai.rs`: OpenAI-compatible Chat Completions (llama.cpp, Ollama, vLLM, gateways), bearer API keys, llama.cpp `/props` and `/embeddings` extensions.
+- `protocol/anthropic.rs`: Anthropic Messages. API keys go in `x-api-key`. Claude Pro/Max OAuth tokens (`sk-ant-oat…`) go in `Authorization: Bearer` with the OAuth beta and Claude Code identity the subscription endpoint requires. The leading system messages become the top-level `system` field; later system messages travel as tagged user content. Tool results merge into the following user turn. The system prompt and tool definitions are marked for prompt caching.
+
+The OpenAI-compatible protocol accepts Chat Completions with text content and function calls. It handles LF/CRLF SSE framing, comments, multi-line event data, arbitrary network byte boundaries, interleaved tool-call indices, and streamed function arguments. It requires an explicit successful finish reason, rejects empty/invalid responses, and bounds assembly memory.
 
 Configuration uses named profiles and environment-variable references for keys. Unknown TOML fields fail loudly. HTTP redirects are disabled so credentials cannot follow a provider redirect. HTTP error bodies are excluded from persisted transport errors because proxies can echo secrets. This is not general transcript secret redaction: files and tool output may contain sensitive data and are persisted locally and sent to the selected endpoint.
 
 ## Extension rules
 
-- **Another protocol:** implement `Provider`, normalize into core messages, and run the same failure contract tests. Introduce an enum to select adapters when there is actually a second implementation.
+- **Another wire protocol:** add an `Api` variant in `builder-core::config`, a `Protocol` variant, and a `protocol/<name>.rs` module with `authorize`, `encode`, `parse`, and `stream`. Transport, retries, and validation come from `Endpoint` unchanged. A transport that is not HTTP request/response should implement `Provider` directly instead.
 - **Another tool:** add a typed action, schema, risk classification, bounded executor, and permission/recovery tests. Keep journal ownership in the agent.
 - **Another UI:** consume `AgentEvent`, supply an approval callback, and preserve cancellation and session-lock ownership.
 - **Context compaction:** extend the checkpoint projection while preserving originals, tool batch boundaries, execution constraints, and cancellation atomicity.
@@ -198,7 +203,7 @@ External formats live in `builder-core::config::import`: Continue YAML and OpenC
 
 `Secret` represents a literal or a deferred environment reference. Debug formatting always redacts it; user-facing config display creates a redacted copy. Config replacement uses a unique private temporary file, sync, and rename (plus directory sync on Unix). External parser diagnostics never quote config source. These controls protect display and local storage permissions, not memory encryption or access by the same OS user.
 
-The provider resolves credentials once per process and builds one sensitive HTTP header map for discovery and all generation attempts. Explicit Authorization takes precedence over bearer API keys. Completion options are typed; extension body properties cannot replace protocol-owned request fields. Retries reuse the same fully assembled request body and auth. Updating credentials requires restarting Builder; committed sessions remain independent of credentials.
+The provider resolves credentials once per process and builds one sensitive HTTP header map for discovery and all generation attempts. Explicit Authorization (or, for Anthropic, `x-api-key`) headers take precedence over profile credentials. For Anthropic profiles the order is: explicit header, profile `api_key` (stored by `builder config token`) or `api_key_env`, then `ANTHROPIC_OAUTH_TOKEN`, then `ANTHROPIC_API_KEY`. Completion options are typed; extension body properties cannot replace protocol-owned request fields. Retries reuse the same fully assembled request body and auth. Updating credentials requires restarting Builder; committed sessions remain independent of credentials.
 
 
 ## Interruption and explicit rewind

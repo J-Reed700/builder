@@ -5,10 +5,10 @@ use builder::{
     ui,
 };
 use builder_core::{config::Config, store::Store};
-use builder_provider::OpenAiCompatible;
+use builder_provider::Endpoint;
 
 pub(super) async fn drive_foreground(
-    agent: &Agent<OpenAiCompatible>,
+    agent: &Agent<Endpoint>,
     store: &mut Store,
     interactive: bool,
     home: &std::path::Path,
@@ -29,7 +29,7 @@ pub(super) async fn drive_foreground(
 }
 
 pub(crate) async fn drive(
-    agent: &Agent<OpenAiCompatible>,
+    agent: &Agent<Endpoint>,
     store: &mut Store,
     interactive: bool,
 ) -> Result<()> {

@@ -8,7 +8,7 @@ use builder_core::{
     config::{CompletionOptions, Profile, Secret},
     protocol::{Message, Role},
 };
-use builder_provider::{OpenAiCompatible, Provider};
+use builder_provider::{Endpoint, Provider};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -67,7 +67,7 @@ async fn custom_auth_survives_discovery_generation_and_retry_without_duplicate_b
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    let provider = OpenAiCompatible::new(p).unwrap();
+    let provider = Endpoint::new(p).unwrap();
     assert_eq!(
         provider.models().await.unwrap()["data"][0]["id"],
         "Qwen3.8.gguf"
@@ -105,13 +105,13 @@ fn invalid_headers_and_missing_credentials_fail_without_echoing_values() {
         )]),
         ..Default::default()
     };
-    let error = OpenAiCompatible::new(p).err().unwrap();
+    let error = Endpoint::new(p).err().unwrap();
     assert!(!format!("{error:#}").contains("private-secret"));
     let p = Profile {
         api_key_env: Some("BUILDER_TEST_INTENTIONALLY_UNSET_KEY_238199".into()),
         ..Default::default()
     };
-    assert!(OpenAiCompatible::new(p).is_err());
+    assert!(Endpoint::new(p).is_err());
     let p = Profile {
         headers: BTreeMap::from([
             ("Authorization".into(), Secret::Literal("one".into())),
@@ -119,7 +119,7 @@ fn invalid_headers_and_missing_credentials_fail_without_echoing_values() {
         ]),
         ..Default::default()
     };
-    assert!(OpenAiCompatible::new(p).is_err());
+    assert!(Endpoint::new(p).is_err());
 }
 
 #[tokio::test]
@@ -149,7 +149,7 @@ async fn embedding_requests_preserve_auth_and_reject_invalid_responses() {
         ..Default::default()
     };
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let provider = OpenAiCompatible::new(profile).unwrap();
+    let provider = Endpoint::new(profile).unwrap();
     assert_eq!(provider.embed("valid").await.unwrap(), vec![0.5, -0.5]);
     for input in ["zero", "overflow", "multiple", "wrong-index", "failure"] {
         let error = provider.embed(input).await.unwrap_err().to_string();

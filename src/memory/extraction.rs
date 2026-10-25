@@ -6,7 +6,7 @@ use builder_core::{
     protocol::{Message, Role},
     store::Store,
 };
-use builder_provider::{OpenAiCompatible, Provider};
+use builder_provider::{Endpoint, Provider};
 use builder_tools::Workspace;
 use serde_json::{Value, json};
 use std::{collections::HashMap, time::Duration};
@@ -17,10 +17,8 @@ impl MemoryRuntime {
     /// is understood (an explicit `chat_template_kwargs` entry, or a server that
     /// answers llama.cpp's `/props` probe) — a profile no longer has to carry
     /// the key for the switch to apply.
-    pub fn extraction_provider(
-        profile: &builder_core::config::Profile,
-    ) -> Result<OpenAiCompatible> {
-        Ok(OpenAiCompatible::new(profile.clone())?.without_thinking())
+    pub fn extraction_provider(profile: &builder_core::config::Profile) -> Result<Endpoint> {
+        Ok(Endpoint::new(profile.clone())?.without_thinking())
     }
     /// Missing embeddings are the durable queue. Only current revisions are indexed;
     /// cancellation leaves the missing vector eligible for a later bounded pass.

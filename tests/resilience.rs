@@ -6,7 +6,7 @@ use builder_core::{
     protocol::Message,
     store::{Store, ToolOutcome, ToolRunState},
 };
-use builder_provider::{Event, OpenAiCompatible, Provider, SseDecoder};
+use builder_provider::{Endpoint, Event, Provider, SseDecoder};
 use builder_tools::Workspace;
 use serde_json::{Value, json};
 use std::{
@@ -179,7 +179,7 @@ async fn progress_check_preserves_large_context_and_clears_after_edit() {
     profile.context_tokens = 163_840;
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile,
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -299,7 +299,7 @@ async fn twelve_distinct_successful_reads_keep_discovery_tools_available() {
     }
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session,
@@ -371,7 +371,7 @@ async fn unique_shell_commands_consume_durable_liveness_budget_after_restart() {
     let mut store = Store::open(home.path()).unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -439,7 +439,7 @@ async fn saved_unique_shell_batch_stops_at_durable_no_progress_execution_limit()
     let mut store = Store::open(home.path()).unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -534,7 +534,7 @@ async fn ignored_progress_check_forces_a_tool_free_conclusion() {
     }
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -601,7 +601,7 @@ async fn tool_markup_at_progress_boundary_is_hidden_and_repaired_without_executi
     }
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -674,7 +674,7 @@ async fn repeated_shell_loop_is_answered_not_run_at_the_fourth_request_after_res
         .unwrap();
     let mut agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -763,7 +763,7 @@ async fn repeated_calls_inside_one_batch_run_to_the_limit_and_the_rest_are_answe
         .unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -824,7 +824,7 @@ async fn oversized_tool_batch_is_rejected_as_a_whole_before_dispatch() {
     profile.pipeline.tool_calls_per_response = 16;
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile,
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -884,7 +884,7 @@ async fn saved_repeated_shell_is_answered_not_run_on_resume() {
     let mut store = Store::open(home.path()).unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -949,7 +949,7 @@ async fn saved_oversized_batch_is_rejected_before_resume_dispatch() {
     profile.pipeline.tool_calls_per_response = 16;
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile,
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -1001,7 +1001,7 @@ async fn saved_duplicate_call_ids_are_rejected_before_resume_dispatch() {
     let mut store = Store::open(home.path()).unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -1049,7 +1049,7 @@ async fn saved_empty_call_id_is_rejected_before_resume_dispatch() {
     let mut store = Store::open(home.path()).unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -1097,7 +1097,7 @@ async fn saved_non_function_call_is_rejected_before_resume_dispatch() {
     let mut store = Store::open(home.path()).unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -1143,7 +1143,7 @@ async fn interrupted_claim_takes_precedence_over_saved_structure_validation() {
     let mut store = Store::open(home.path()).unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -1209,7 +1209,7 @@ async fn saved_call_cannot_reuse_an_earlier_generation_id_or_result() {
     let mut store = Store::open(home.path()).unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -1252,7 +1252,7 @@ async fn fresh_duplicate_call_ids_are_rejected_as_a_whole() {
         .unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -1317,7 +1317,7 @@ async fn finished_tool_missing_from_legacy_projection_is_restored_without_reexec
     let mut store = Store::open(home.path()).unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -1396,7 +1396,7 @@ async fn uncertain_finished_projection_is_restored_then_pauses_without_dispatch(
     let mut store = Store::open(home.path()).unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -1475,7 +1475,7 @@ async fn completed_legacy_oversized_batch_can_resume_to_final_without_reexecutio
     profile.pipeline.tool_calls_per_response = 16;
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile,
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -1539,7 +1539,7 @@ async fn interrupted_claim_takes_precedence_over_saved_repetition_guard() {
     let mut store = Store::open(home.path()).unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -1607,7 +1607,7 @@ async fn uncertain_shell_cannot_be_replayed_with_a_new_id_or_timeout_on_retry() 
     let mut store = Store::open(home.path()).unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -1676,7 +1676,7 @@ async fn denied_shell_cannot_be_replayed_under_a_new_call_id() {
         .unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -1747,7 +1747,7 @@ async fn giant_read_returns_a_bounded_opening_then_a_targeted_read() {
         .unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -1790,7 +1790,7 @@ async fn read_inventory_survives_repeated_compaction_and_restart_even_if_model_f
         .unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -1872,7 +1872,7 @@ async fn dropped_stream_retries_identical_context_and_discards_partial() {
         text_reply("complete response"),
     ])
     .await;
-    let provider = OpenAiCompatible::new(server.profile.clone()).unwrap();
+    let provider = Endpoint::new(server.profile.clone()).unwrap();
     let messages = vec![
         Message::text(Role::System, "remember everything"),
         Message::text(Role::User, "first"),
@@ -1904,7 +1904,7 @@ async fn rate_limits_and_service_failures_retry_but_auth_does_not() {
         text_reply("ok"),
     ])
     .await;
-    let provider = OpenAiCompatible::new(retrying.profile.clone()).unwrap();
+    let provider = Endpoint::new(retrying.profile.clone()).unwrap();
     provider
         .complete(&[Message::text(Role::User, "hi")], &[], &mut |_| {})
         .await
@@ -1918,7 +1918,7 @@ async fn rate_limits_and_service_failures_retry_but_auth_does_not() {
         text_reply("must not run"),
     ])
     .await;
-    let error = OpenAiCompatible::new(auth.profile.clone())
+    let error = Endpoint::new(auth.profile.clone())
         .unwrap()
         .complete(&[Message::text(Role::User, "hi")], &[], &mut |_| {})
         .await
@@ -1939,7 +1939,7 @@ async fn fragmented_tool_arguments_assemble_before_execution() {
         finish("tool_calls")
     );
     let server = server(vec![(StatusCode::OK, reply)]).await;
-    let response = OpenAiCompatible::new(server.profile.clone())
+    let response = Endpoint::new(server.profile.clone())
         .unwrap()
         .complete(&[Message::text(Role::User, "read")], &[], &mut |_| {})
         .await
@@ -1953,7 +1953,7 @@ async fn fragmented_tool_arguments_assemble_before_execution() {
 #[tokio::test]
 async fn json_mode_requests_response_format_and_plain_requests_do_not() {
     let server = server(vec![text_reply("{\"findings\":[]}"), text_reply("plain")]).await;
-    let provider = OpenAiCompatible::new(server.profile.clone()).unwrap();
+    let provider = Endpoint::new(server.profile.clone()).unwrap();
     provider
         .complete_json(&[Message::text(Role::User, "extract")], 2048, &mut |_| {})
         .await
@@ -1981,7 +1981,7 @@ async fn output_limit_never_commits_or_dispatches_incomplete_tool() {
         ),
     )])
     .await;
-    let error = OpenAiCompatible::new(server.profile.clone())
+    let error = Endpoint::new(server.profile.clone())
         .unwrap()
         .complete(&[Message::text(Role::User, "hi")], &[], &mut |_| {})
         .await
@@ -2038,7 +2038,7 @@ async fn interrupted_tool_is_not_reexecuted_on_resume() {
     let mut store = Store::open(home.path()).unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(workspace.path()).unwrap(),
         session: session.clone(),
@@ -2086,7 +2086,7 @@ async fn completed_tool_is_not_repeated_when_next_generation_fails() {
         .unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(workspace.path()).unwrap(),
         session: session.clone(),
@@ -2138,7 +2138,7 @@ async fn context_overflow_preserves_every_message_without_contacting_endpoint() 
     };
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(profile.clone()).unwrap(),
+        provider: Endpoint::new(profile.clone()).unwrap(),
         profile,
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -2180,7 +2180,7 @@ async fn read_only_denies_model_mutations_and_records_denial() {
         .unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(workspace.path()).unwrap(),
         session: session.clone(),
@@ -2268,7 +2268,7 @@ async fn idle_endpoint_times_out_within_budget() {
         axum::serve(listener, app).await.unwrap();
     });
     let start = std::time::Instant::now();
-    let result = OpenAiCompatible::new(profile)
+    let result = Endpoint::new(profile)
         .unwrap()
         .complete(&[Message::text(Role::User, "hi")], &[], &mut |_| {})
         .await;
@@ -2355,7 +2355,7 @@ async fn cli_runs_and_resumes_with_complete_context() {
 async fn oversized_nonstream_response_is_rejected_without_retry() {
     let mut server = server(vec![(StatusCode::OK, "x".repeat(17 * 1024 * 1024))]).await;
     server.profile.stream = false;
-    let error = OpenAiCompatible::new(server.profile.clone())
+    let error = Endpoint::new(server.profile.clone())
         .unwrap()
         .complete(&[Message::text(Role::User, "hi")], &[], &mut |_| {})
         .await
@@ -2422,7 +2422,7 @@ async fn reasoning_activity_is_reported_without_becoming_conversation_content() 
     reply.push_str(&delta(json!({"content":"final answer"})));
     reply.push_str(&finish("stop"));
     let server = server(vec![(StatusCode::OK, reply)]).await;
-    let provider = OpenAiCompatible::new(server.profile.clone()).unwrap();
+    let provider = Endpoint::new(server.profile.clone()).unwrap();
     let mut activities = vec![];
     let mut visible = String::new();
     let mut reasoning = String::new();
@@ -2482,7 +2482,7 @@ async fn follow_up_after_interruption_cancels_queued_tools_and_uses_new_instruct
         .unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(workspace.path()).unwrap(),
         session: session.clone(),
@@ -2529,7 +2529,7 @@ async fn steering_persists_new_prompt_but_halts_for_uncertain_execution_even_in_
         .unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -2589,7 +2589,7 @@ async fn rewind_excludes_abandoned_turn_and_reserves_its_tool_ids() {
         .unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -2648,7 +2648,7 @@ async fn auto_compaction_preserves_tool_evidence_originals_and_latest_instructio
     profile.max_output_tokens = 1024;
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(profile.clone()).unwrap(),
+        provider: Endpoint::new(profile.clone()).unwrap(),
         profile,
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -2746,7 +2746,7 @@ async fn compaction_preserves_exact_user_contract_and_corrections_despite_bad_su
         .unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -2821,7 +2821,7 @@ async fn failed_compaction_never_changes_context_or_dispatches_summary_tools() {
         .unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -2955,7 +2955,7 @@ async fn output_limit_recovery_is_bounded_and_never_executes_partial_tool_calls(
             .unwrap();
         let agent = Agent {
             memory: None,
-            provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+            provider: Endpoint::new(server.profile.clone()).unwrap(),
             profile: server.profile.clone(),
             workspace: Workspace::new(home.path()).unwrap(),
             session: session.clone(),
@@ -3044,7 +3044,7 @@ async fn compaction_retains_denied_actions_verbatim_even_if_summary_omits_them()
         .unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -3113,7 +3113,7 @@ async fn compaction_output_limit_retries_once_then_continues_or_preserves_origin
         };
         let agent = Agent {
             memory: None,
-            provider: OpenAiCompatible::new(profile.clone()).unwrap(),
+            provider: Endpoint::new(profile.clone()).unwrap(),
             profile,
             workspace: Workspace::new(home.path()).unwrap(),
             session: session.clone(),
@@ -3209,7 +3209,7 @@ async fn compaction_sizes_only_the_handoff_that_will_be_kept() {
     };
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(profile.clone()).unwrap(),
+        provider: Endpoint::new(profile.clone()).unwrap(),
         profile,
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -3264,7 +3264,7 @@ async fn larger_compaction_generation_budget_does_not_allow_an_oversized_handoff
     };
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(profile.clone()).unwrap(),
+        provider: Endpoint::new(profile.clone()).unwrap(),
         profile,
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -3313,7 +3313,7 @@ async fn compaction_shortens_from_original_evidence_and_can_recover_output_limit
     };
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(profile.clone()).unwrap(),
+        provider: Endpoint::new(profile.clone()).unwrap(),
         profile,
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -3410,7 +3410,7 @@ async fn missing_response_retries_identical_input_and_commits_only_completed_ans
                 .unwrap();
             let agent = Agent {
                 memory: None,
-                provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+                provider: Endpoint::new(server.profile.clone()).unwrap(),
                 profile: server.profile.clone(),
                 workspace: Workspace::new(home.path()).unwrap(),
                 session: session.clone(),
@@ -3480,7 +3480,7 @@ async fn empty_and_reasoning_only_responses_preserve_pending_turn_after_configur
                 .unwrap();
             let agent = Agent {
                 memory: None,
-                provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+                provider: Endpoint::new(server.profile.clone()).unwrap(),
                 profile: server.profile.clone(),
                 workspace: Workspace::new(home.path()).unwrap(),
                 session: session.clone(),
@@ -3542,7 +3542,7 @@ async fn failed_model_request_during_progress_recovery_preserves_full_context() 
         let original = store.messages(&session).unwrap();
         let agent = Agent {
             memory: None,
-            provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+            provider: Endpoint::new(server.profile.clone()).unwrap(),
             profile: server.profile.clone(),
             workspace: Workspace::new(home.path()).unwrap(),
             session: session.clone(),
@@ -3588,7 +3588,7 @@ async fn recovery_resolves_queued_batch_and_retains_denials_without_granting_per
     store.append(&session, &tool_message()).unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -3676,7 +3676,7 @@ async fn recovery_restricts_broad_discovery_and_answers_unknown_tools() {
         seed_investigation(&mut store, &session);
         let agent = Agent {
             memory: None,
-            provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+            provider: Endpoint::new(server.profile.clone()).unwrap(),
             profile: server.profile.clone(),
             workspace: Workspace::new(home.path()).unwrap(),
             session: session.clone(),
@@ -3794,7 +3794,7 @@ async fn invalid_research_loop_keeps_recovery_guidance_until_the_model_recovers(
         let mut store = Store::open(home.path()).unwrap();
         let agent = Agent {
             memory: None,
-            provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+            provider: Endpoint::new(server.profile.clone()).unwrap(),
             profile: server.profile.clone(),
             workspace: Workspace::new(home.path()).unwrap(),
             session: session.clone(),
@@ -3841,7 +3841,7 @@ async fn research_results_expose_the_durable_id_for_followup_evidence() {
         .create("evidence ids", "local", workspace.root(), "system")
         .unwrap();
     let agent = Agent {
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         memory: None,
         profile: server.profile.clone(),
         workspace,
@@ -3961,7 +3961,7 @@ async fn successful_memory_loop_recovers_or_concludes_with_originals_retained() 
         let mut store = Store::open(home.path()).unwrap();
         let agent = Agent {
             memory: Some(builder::memory::MemoryRuntime::lexical()),
-            provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+            provider: Endpoint::new(server.profile.clone()).unwrap(),
             profile: server.profile.clone(),
             workspace: Workspace::new(home.path()).unwrap(),
             session: session.clone(),
@@ -4049,7 +4049,7 @@ async fn recorded_outcomes_distinguish_real_edits_noops_and_execution_errors() {
         .unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -4088,7 +4088,7 @@ async fn productive_work_passes_twenty_rounds_and_budget_pause_resumes_pending_c
         .unwrap();
     let agent = Agent {
         memory: None,
-        provider: OpenAiCompatible::new(server.profile.clone()).unwrap(),
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
         profile: server.profile.clone(),
         workspace: Workspace::new(home.path()).unwrap(),
         session: session.clone(),
@@ -4162,7 +4162,7 @@ async fn streamed_tool_arguments_report_progress_after_prose() {
         finish("tool_calls")
     );
     let server = server(vec![(StatusCode::OK, body)]).await;
-    let provider = OpenAiCompatible::new(server.profile.clone()).unwrap();
+    let provider = Endpoint::new(server.profile.clone()).unwrap();
     let mut seen = Vec::new();
     let message = provider
         .complete(&[Message::text(Role::User, "hi")], &[], &mut |event| {
@@ -4199,7 +4199,7 @@ async fn reported_prompt_processing_becomes_progress_and_drives_the_summary_bar(
         finish("stop")
     );
     let server = server(vec![(StatusCode::OK, body.clone()), (StatusCode::OK, body)]).await;
-    let provider = OpenAiCompatible::new(server.profile.clone()).unwrap();
+    let provider = Endpoint::new(server.profile.clone()).unwrap();
     let mut seen = Vec::new();
     let message = provider
         .complete(&[Message::text(Role::User, "hi")], &[], &mut |event| {

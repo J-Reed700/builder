@@ -6,7 +6,7 @@ use builder::{
     memory::MemoryRuntime,
 };
 use builder_core::{config::Config, protocol::Message, research::Request, store::Store};
-use builder_provider::{Event, OpenAiCompatible, Provider};
+use builder_provider::{Endpoint, Event, Provider};
 use builder_tools::{Action, Workspace};
 use serde_json::{Value, json};
 use std::{
@@ -61,7 +61,7 @@ async fn grade(source: &str, hidden: &str) -> Result<bool> {
     Ok(builder_tools::research::passed(&output))
 }
 struct Ablation {
-    inner: OpenAiCompatible,
+    inner: Endpoint,
     research: bool,
     calls: AtomicUsize,
 }
@@ -173,7 +173,7 @@ async fn same_model_baseline_memory_and_research_ablation() -> Result<()> {
                 let session = store.create(case.name, "eval", workspace.root(), SYSTEM)?;
                 let agent = Agent {
                     provider: Ablation {
-                        inner: OpenAiCompatible::new(profile.clone())?,
+                        inner: Endpoint::new(profile.clone())?,
                         research: mode == "research",
                         calls: AtomicUsize::new(0),
                     },

@@ -6,7 +6,7 @@ use builder_core::{
     protocol::{Message, Role},
     store::Store,
 };
-use builder_provider::{Event, OpenAiCompatible, Provider};
+use builder_provider::{Endpoint, Event, Provider};
 use builder_tools::Workspace;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -162,7 +162,7 @@ async fn live_many_turns_preserve_early_middle_and_recent_findings() -> Result<(
     let expected = seed(&mut store, &session, rounds)?;
     let before = store.messages(&session)?;
     let agent = Agent {
-        provider: OpenAiCompatible::new(profile.clone())?,
+        provider: Endpoint::new(profile.clone())?,
         memory: None,
         profile,
         workspace: Workspace::new(temp.path())?,

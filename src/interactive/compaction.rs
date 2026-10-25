@@ -4,7 +4,7 @@ use builder::{
     ui,
 };
 use builder_core::{config::Config, store::Store};
-use builder_provider::OpenAiCompatible;
+use builder_provider::Endpoint;
 
 struct CompactionState {
     status: std::sync::Mutex<String>,
@@ -57,7 +57,7 @@ impl CompactionTask {
 }
 
 pub(super) fn start_compaction(
-    agent: &Agent<OpenAiCompatible>,
+    agent: &Agent<Endpoint>,
     home: &std::path::Path,
     config: &Config,
 ) -> Result<CompactionTask> {
@@ -84,7 +84,7 @@ pub(super) fn start_compaction(
                     .context("Could not start the compaction runtime")?;
                 let mut store = Store::open(&home)?;
                 let memory = builder::memory::MemoryRuntime::from_config(&config)?;
-                let provider = OpenAiCompatible::new(profile.clone())?;
+                let provider = Endpoint::new(profile.clone())?;
                 let compact_agent = Agent {
                     provider,
                     memory,

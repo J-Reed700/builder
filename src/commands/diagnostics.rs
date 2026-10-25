@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use builder::ui;
 use builder_core::{config::Profile, store::Store};
-use builder_provider::OpenAiCompatible;
+use builder_provider::Endpoint;
 use std::path::Path;
 
 pub(crate) async fn run(
@@ -9,7 +9,7 @@ pub(crate) async fn run(
     home: &Path,
     profile_name: &str,
     profile: &Profile,
-    provider: &OpenAiCompatible,
+    provider: &Endpoint,
     store: &mut Store,
 ) -> Result<()> {
     if doctor {

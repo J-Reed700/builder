@@ -13,7 +13,7 @@ use builder_core::{
     schedule::{Access, Run, RunStatus, Schedule},
     store::Store,
 };
-use builder_provider::OpenAiCompatible;
+use builder_provider::Endpoint;
 use builder_tools::Workspace;
 use std::{path::Path, time::Duration};
 
@@ -120,7 +120,7 @@ async fn execute(
     store.schedule_attach_session(&run.id, &session)?;
     let _guard = store.lock(&session)?;
     let mut agent = Agent {
-        provider: OpenAiCompatible::new(profile.clone())?,
+        provider: Endpoint::new(profile.clone())?,
         memory: MemoryRuntime::from_config(&config)?,
         profile,
         workspace,

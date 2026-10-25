@@ -1,11 +1,16 @@
-//! Provider boundary and OpenAI-compatible / Anthropic transport. No UI or filesystem tools.
-mod anthropic;
-mod openai;
-pub use anthropic::TOKEN_ENV as ANTHROPIC_TOKEN_ENV;
+//! Provider boundary and model transport. No UI or filesystem tools.
+//!
+//! [`Endpoint`] is the one transport for every configured model. The wire
+//! format it speaks (OpenAI-compatible or Anthropic Messages) is chosen by the
+//! profile's `api` and implemented in `protocol`.
+mod endpoint;
+mod failure;
+mod protocol;
+mod reply;
 mod sse;
 use anyhow::Result;
 use builder_core::protocol::Message;
-pub use openai::OpenAiCompatible;
+pub use endpoint::Endpoint;
 use serde_json::Value;
 pub use sse::SseDecoder;
 use std::{future::Future, pin::Pin};
