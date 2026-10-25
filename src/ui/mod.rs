@@ -67,3 +67,75 @@ pub fn approve(action: &Action) -> bool {
     let mut answer = String::new();
     io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "Y" | "yes")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn safe_strips_terminal_escapes_and_controls_but_keeps_text_layout() {
+        assert_eq!(safe("plain text"), "plain text");
+        assert_eq!(safe("tab\tand\nnewline"), "tab\tand\nnewline");
+        assert_eq!(safe("\x1b[31mred\x1b[0m"), "red");
+        assert_eq!(safe("title\x1b]0;evil\x07 kept"), "title kept");
+        assert_eq!(safe("bell\x07 null\0 cr\r end"), "bell null cr end");
+        assert_eq!(safe("ünïcödé · ok"), "ünïcödé · ok");
+    }
+
+    #[test]
+    fn short_path_collapses_the_home_directory_only() {
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
+            && home != Path::new("/")
+        {
+            assert_eq!(short_path(&home.join("Code/builder")), "~/Code/builder");
+            assert_eq!(short_path(&home), "~/");
+            let elsewhere = Path::new("/nonexistent-root-9f3c/x");
+            assert_eq!(short_path(elsewhere), elsewhere.display().to_string());
+        }
+    }
+
+    #[test]
+    fn banner_and_todo_board_render_without_a_terminal() {
+        // Both write to stderr only; this checks they tolerate any width and
+        // an empty profile name without panicking.
+        banner(
+            "",
+            "qwen3:8b",
+            Path::new("/tmp/project"),
+            "0123456789abcdef",
+            "ask",
+        );
+        banner(
+            "local",
+            "qwen3:8b",
+            Path::new("/tmp/project"),
+            "short",
+            "auto",
+        );
+        let list = builder_core::todo::List {
+            items: vec![builder_core::todo::Item {
+                content: "write the tests".into(),
+                status: builder_core::todo::Status::InProgress,
+            }],
+        };
+        print_todos(&list);
+        print_todos(&builder_core::todo::List::default());
+    }
+
+    #[test]
+    fn approval_is_denied_without_a_terminal() {
+        if !io::stdin().is_terminal() {
+            let action = Action::from_call(&builder_core::protocol::ToolCall {
+                id: "1".into(),
+                kind: "function".into(),
+                function: builder_core::protocol::Function {
+                    name: "shell".into(),
+                    arguments: r#"{"command":"rm -rf build"}"#.into(),
+                },
+            })
+            .unwrap();
+            assert!(!approve(&action));
+        }
+    }
+}

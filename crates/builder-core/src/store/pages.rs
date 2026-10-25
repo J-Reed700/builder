@@ -148,11 +148,16 @@ impl Store {
         let workspace = workspace
             .canonicalize()
             .unwrap_or_else(|_| workspace.to_path_buf());
-        // Prefix match by path component, without LIKE escaping concerns.
+        // Prefix match by path component, without LIKE escaping concerns. Stored
+        // paths are canonical, so the boundary is the platform separator: a
+        // chat under `C:\root\apps` follows `C:\root` with `\`, never `/`.
         let scope = if within {
-            "(s.workspace=?1 OR substr(s.workspace,1,length(?1)+1)=?1||'/')"
+            format!(
+                "(s.workspace=?1 OR substr(s.workspace,1,length(?1)+1)=?1||'{}')",
+                std::path::MAIN_SEPARATOR_STR
+            )
         } else {
-            "s.workspace=?1"
+            "s.workspace=?1".to_owned()
         };
         let mut stmt = self.conn.prepare(&format!("SELECT s.id,s.title,s.profile,s.workspace,s.updated_at,COALESCE(m.archived,0)
             FROM sessions s LEFT JOIN chat_metadata m ON m.session_id=s.id
