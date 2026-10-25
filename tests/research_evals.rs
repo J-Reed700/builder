@@ -205,6 +205,7 @@ async fn same_model_baseline_memory_and_research_ablation() -> Result<()> {
                         role: builder_core::protocol::Role::Assistant,
                         content: None,
                         reasoning: None,
+                        images: vec![],
                         tool_calls: vec![call],
                         tool_call_id: None,
                     };

@@ -12,6 +12,8 @@ The UI uses a multiline composer, lavender accents, a live context/status line, 
 
 On macOS, **Ctrl+V reads the clipboard directly** using `pbpaste`, bypassing slow terminal clipboard delivery. Use it instead of Cmd+V if large pastes stall. It inserts text into the draft without submitting. Clipboard reads time out after two seconds and oversized text is rejected in full. Cmd+V still uses the terminal’s normal paste path.
 
+When the clipboard holds no text but an image (a screenshot or a copied picture), Ctrl+V attaches it to the draft instead, for profiles with `vision = true`. Screenshots are converted to PNG; images are capped at 4 MiB. Backspace on an empty draft removes the most recent image, and an image-only message can be sent on its own.
+
 Bracketed paste is handled as one insertion. Pastes of 256 bytes or more, or at least three lines, become compact blocks such as `[paste 1 · 121 lines · 5.6 KiB]`. Their full contents are retained, including indentation and line endings, and are expanded only when you send. Paste never sends by itself. You can type before/after a block, remove it with Backspace, and restore it with Undo. Blocks are atomic; their contents are not edited inline.
 
 The composer paints only a bounded viewport and batches bursts of key events. Large blocks use shared immutable storage so typing, layout, undo, and history navigation don't copy the pasted payload. Drafts are capped at 4 MiB; an oversized insertion is rejected in full. History and undo also have memory/count budgets. After submission, the UI distinguishes the saved prompt awaiting the endpoint, an established connection, model reasoning, and tool-call preparation. Reasoning activity is indicated without adding intermediate reasoning to conversation history. While the model responds, terminal output is coalesced on a 16 ms timer or at an 8 KiB threshold, then flushed at completion and tool/retry boundaries.
@@ -68,7 +70,7 @@ Use `/cancel` after pausing to end the pending response without sending another 
 
 Rewind changes conversation context only: **file edits and other tool side effects remain**. The original transcript is retained in `/history archived`, and old tool IDs remain reserved. An interrupted tool with an uncertain outcome still stops for inspection—even with `--auto`. When a follow-up discovers that condition, the new message is saved; inspect the workspace and use `/retry` to continue.
 
-`/attach` sends small files (up to 200 lines and 12 KiB of formatted output) through the workspace read tool into the conversation. For larger files, send the path and describe the relevant question so the agent can search and read a targeted range. The workspace's root `AGENTS.md` is captured in the system message when the session is created. The model is instructed to respect additional applicable instructions it discovers.
+`/attach` sends small files (up to 200 lines and 12 KiB of formatted output) through the workspace read tool into the conversation. On a profile with `vision = true`, `/attach` of a PNG, JPEG, GIF or WebP file (up to 4 MiB) sends the image itself. Each image is budgeted as about 2,000 tokens in context estimates, not by its file size. Profiles without `vision` never receive image data: earlier images in the history are replaced by a short note, and compaction summarizes them the same way. For larger files, send the path and describe the relevant question so the agent can search and read a targeted range. The workspace's root `AGENTS.md` is captured in the system message when the session is created. The model is instructed to respect additional applicable instructions it discovers.
 
 ## Persistence and recovery
 
@@ -140,6 +142,8 @@ model = "qwen3:8b"
 # api_key_env = "MY_MODEL_API_KEY"
 stream = true
 tools = true
+# Set for vision models so pasted and /attach'ed images reach them.
+vision = false
 context_tokens = 32768
 max_output_tokens = 4096
 max_attempts = 5
@@ -167,6 +171,23 @@ On a template with Qwen's `preserve_thinking` switch, a stripped history still
 renders an empty think block for every earlier turn. Add `preserve_thinking =
 false` to the profile's `extra_body.chat_template_kwargs` to render earlier
 turns as visible output only.
+
+Do not set `enable_thinking = false` on a hybrid reasoning model unless direct,
+non-thinking responses are intentional. Qwen3.8 thinks by default; omit the
+switch or set it to `true` for normal agent work. For example:
+
+```toml
+[profiles."Qwen3.8".completion]
+temperature = 1.0
+top_p = 0.95
+top_k = 20
+min_p = 0.0
+presence_penalty = 0.0
+
+[profiles."Qwen3.8".extra_body.chat_template_kwargs]
+enable_thinking = true
+preserve_thinking = false # pairs with reasoning_history = "strip"
+```
 
 ### Import Continue or OpenCode models
 
@@ -210,18 +231,12 @@ idle_timeout_secs = 1800
 # Variable contains the entire header value, e.g. Basic <base64(user:password)>.
 Authorization = { env = "PANGOLIN_AUTHORIZATION" }
 X-API-Key = { env = "GATEWAY_KEY" }
-
-[profiles.hosted.completion]
-temperature = 0.6
-top_p = 0.85
-top_k = 20
-min_p = 0.0
-presence_penalty = 0.0
-frequency_penalty = 0.0
-
-[profiles.hosted.extra_body.chat_template_kwargs]
-enable_thinking = false
 ```
+
+Sampling values and chat-template controls are model-specific, so the generic
+hosted example deliberately omits them. An accidental `enable_thinking =
+false` silently removes reasoning from every foreground request. Use the
+explicit Qwen3.8 example above when that is the selected model.
 
 **An explicit `Authorization` header wins over the API key**, case-insensitively. Builder sends exactly one authorization value on discovery and every generation attempt. Without that header, `api_key` or the legacy `api_key_env` becomes bearer auth. Redirects remain disabled. Headers cannot override HTTP routing or message framing, and extra body properties cannot replace messages, model, tools, stream mode, or output limits.
 

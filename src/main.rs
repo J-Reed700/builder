@@ -17,8 +17,36 @@ use cli::{Cli, Command};
 use console::style;
 use std::io::{self, IsTerminal, Read};
 
+/// `builder sessions | head` must end quietly, not panic. Rust ignores SIGPIPE,
+/// so `println!` to a closed pipe panics; restoring the default signal instead
+/// would let any child process that exits before reading its stdin kill a
+/// running agent. Only the stdout broken-pipe panic is intercepted, and it
+/// exits like a Unix tool killed by SIGPIPE (128 + 13).
+fn exit_quietly_on_closed_stdout() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        if is_closed_stdout(message) {
+            std::process::exit(141);
+        }
+        default(info);
+    }));
+}
+
+fn is_closed_stdout(panic: &str) -> bool {
+    // EPIPE on Unix; ERROR_NO_DATA ("the pipe is being closed") on Windows.
+    panic.starts_with("failed printing to stdout")
+        && (panic.contains("(os error 32)") || panic.contains("(os error 232)"))
+}
+
 #[tokio::main]
 async fn main() {
+    exit_quietly_on_closed_stdout();
     if let Err(error) = app(Cli::parse()).await {
         eprintln!(
             "\n{} {}",
@@ -143,6 +171,15 @@ async fn app(cli: Cli) -> Result<()> {
         profile.supports_chat(),
         "This profile is for embedding/autocomplete/reranking; select a chat model with --profile"
     );
+    // Everything that can be rejected cheaply is rejected before a session is
+    // created, so a mistaken invocation never leaves an empty one behind.
+    let interactive = !matches!(cli.command, Some(Command::Run { .. }));
+    if interactive {
+        ensure!(
+            io::stdin().is_terminal(),
+            "Interactive mode requires a terminal. Use builder run - for piped input."
+        );
+    }
     let workspace = Workspace::new(
         resume
             .as_ref()
@@ -162,6 +199,14 @@ async fn app(cli: Cli) -> Result<()> {
         }),
         _ => None,
     };
+    if !interactive {
+        ensure!(
+            initial_prompt
+                .as_deref()
+                .is_some_and(|prompt| !prompt.trim().is_empty()),
+            "Prompt is empty"
+        );
+    }
     let session = if let Some(session) = resume {
         session.id
     } else {
@@ -185,13 +230,6 @@ async fn app(cli: Cli) -> Result<()> {
         )?
     };
     let _guard = store.lock(&session)?;
-    let interactive = !matches!(cli.command, Some(Command::Run { .. }));
-    if interactive {
-        ensure!(
-            io::stdin().is_terminal(),
-            "Interactive mode requires a terminal. Use builder run - for piped input."
-        );
-    }
     let max_rounds = cli.max_rounds.map(usize::from);
     let mut agent = Agent {
         memory: builder::memory::MemoryRuntime::from_config(&config)?,

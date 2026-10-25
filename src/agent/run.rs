@@ -84,9 +84,6 @@ impl<P: Provider> Agent<P> {
                 break;
             }
             self.recover_tools(store, emit, approve).await?;
-            if !pending(&store.messages(&self.session)?) {
-                return Ok(());
-            }
             let messages = store.messages(&self.session)?;
             if !pending(&messages) {
                 return Ok(());

@@ -240,3 +240,21 @@ fn opencode_provider_sampling_and_basic_auth_import_together() {
         .is_err()
     );
 }
+
+#[test]
+fn continue_vision_capability_enables_pasted_images() {
+    let vision = CONTINUE.replace(
+        "capabilities: [tool_use]",
+        "capabilities: [tool_use, vision]",
+    );
+    let imported = import::parse(&vision, Format::Continue).unwrap();
+    assert!(imported.config.profiles["Qwen"].vision);
+    assert!(imported.config.profiles["Qwen"].tools);
+    assert!(
+        !import::parse(CONTINUE, Format::Continue)
+            .unwrap()
+            .config
+            .profiles["Qwen"]
+            .vision
+    );
+}

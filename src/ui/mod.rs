@@ -10,7 +10,7 @@ pub use crate::presentation::nudge_line;
 use builder_tools::Action;
 use console::style;
 pub use help::help;
-pub use renderer::Renderer;
+pub use renderer::{Renderer, token_count};
 use std::io::{self, IsTerminal, Write};
 
 pub fn safe(text: &str) -> String {

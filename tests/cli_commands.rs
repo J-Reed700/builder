@@ -1010,3 +1010,59 @@ async fn schedule_commands_cover_every_cadence_and_state_transition() {
     let text = failed(&cli.run(&["schedule", "show", "zzz"]).await);
     assert!(!text.is_empty());
 }
+
+#[tokio::test]
+async fn rejected_invocations_never_leave_an_empty_session_behind() {
+    let server = serve(Tools::Prose, json!({"data":[{"id":"test-model"}]}), 131_072).await;
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    save_config(home.path(), &server.url, false);
+    let cli = Cli::new(home.path(), workspace.path());
+
+    // Interactive mode without a terminal (stdin is /dev/null here).
+    assert!(failed(&cli.run(&[]).await).contains("requires a terminal"));
+    assert!(failed(&cli.run(&["chat", "hello"]).await).contains("requires a terminal"));
+    // Blank prompts, from an argument or from empty stdin.
+    assert!(failed(&cli.run(&["run", "   "]).await).contains("Prompt is empty"));
+    assert!(failed(&cli.run(&["run", "-"]).await).contains("Prompt is empty"));
+
+    assert!(ok(&cli.run(&["sessions"]).await).starts_with("No sessions yet"));
+    assert!(
+        Store::open(home.path())
+            .unwrap()
+            .sessions()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_closed_stdout_ends_quietly_instead_of_panicking() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    save_config(home.path(), "http://127.0.0.1:9/v1", true);
+    // A pipe whose reader is already gone, as with `builder config show | head`
+    // once head has exited.
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_builder"))
+        .env_remove("BUILDER_HOME")
+        .arg("--home")
+        .arg(home.path())
+        .arg("-C")
+        .arg(workspace.path())
+        .args(["config", "show"])
+        .stdin(std::process::Stdio::null())
+        .stdout(writer)
+        .stderr(std::process::Stdio::piped())
+        // `output()` would replace stdout with its own pipe; spawn keeps ours.
+        .spawn()
+        .unwrap()
+        .wait_with_output()
+        .await
+        .unwrap();
+    let stderr = stderr(&output);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_eq!(output.status.code(), Some(141), "{stderr}");
+}

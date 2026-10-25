@@ -244,6 +244,7 @@ mod tests {
             role: Role::Assistant,
             content: None,
             reasoning: None,
+            images: vec![],
             tool_calls: vec![
                 ToolCall {
                     id: "one".into(),

@@ -27,6 +27,8 @@ pub struct Renderer {
     tools: usize,
     reflow: stream::Reflow,
     prompt_tokens: usize,
+    reasoning_bytes: usize,
+    reasoning_started_at: Option<std::time::Instant>,
     model_activity: Option<ModelActivity>,
     /// Tools started and not yet finished; more than one means a parallel group.
     running: Vec<(String, String)>,
@@ -93,6 +95,8 @@ impl Renderer {
             tools: 0,
             reflow: stream::Reflow::default(),
             prompt_tokens: 0,
+            reasoning_bytes: 0,
+            reasoning_started_at: None,
             model_activity: None,
             running: Vec::new(),
             subagents: std::collections::BTreeMap::new(),
@@ -584,7 +588,11 @@ impl Renderer {
                             Activity::Connected => {
                                 format!("Waiting on {size} · ctrl+c cancel")
                             }
-                            Activity::Thinking => "Thinking · ctrl+c cancel".to_owned(),
+                            Activity::Thinking => {
+                                self.reasoning_bytes = 0;
+                                self.reasoning_started_at = Some(std::time::Instant::now());
+                                "Thinking · ctrl+c cancel".to_owned()
+                            }
                             Activity::PreparingTools => {
                                 "Preparing actions · ctrl+c cancel".to_owned()
                             }
@@ -598,6 +606,8 @@ impl Renderer {
                 self.started = false;
                 self.reflow.reset();
                 self.pending.reset();
+                self.reasoning_bytes = 0;
+                self.reasoning_started_at = None;
                 // The summarization bar stays in place across fragment requests.
                 if self.interactive && self.summary_bar {
                     return;
@@ -630,9 +640,47 @@ impl Renderer {
                     }
                 }
             }
-            // Reasoning stays out of the terminal; the spinner already says the
-            // model is thinking, and the transcript keeps it for remote viewers.
-            Event::Reasoning(_) => self.record_model_activity(),
+            Event::Reasoning(text) => {
+                self.record_model_activity();
+                self.reasoning_bytes += text.len();
+                if self.reasoning_started_at.is_none() {
+                    self.reasoning_started_at = Some(std::time::Instant::now());
+                }
+                if !self.interactive || self.compacting || self.summary_bar {
+                    return;
+                }
+                let tokens = (self.reasoning_bytes / 4).max(1);
+                let message = if tokens < 50 {
+                    "Thinking · ctrl+c cancel".to_owned()
+                } else {
+                    let elapsed = self
+                        .reasoning_started_at
+                        .map_or(0.0, |t| t.elapsed().as_secs_f64());
+                    if elapsed >= 1.0 {
+                        let rate = (tokens as f64 / elapsed).round() as u64;
+                        format!(
+                            "Thinking · {} tokens · {rate} tok/s · ctrl+c cancel",
+                            compact_count(tokens as u64)
+                        )
+                    } else {
+                        format!(
+                            "Thinking · {} tokens · ctrl+c cancel",
+                            compact_count(tokens as u64)
+                        )
+                    }
+                };
+                if self.spinner.is_none() {
+                    self.finish_stream();
+                    if self.started {
+                        println!();
+                        self.started = false;
+                        self.reflow.reset();
+                    }
+                    self.start_spinner(message, true);
+                } else if let Some(spinner) = &self.spinner {
+                    spinner.set_message(self.fit(&message, 14));
+                }
+            }
             Event::ToolProgress { name, calls, bytes } => {
                 if !self.interactive || self.compacting || self.summary_bar {
                     return;
@@ -738,7 +786,7 @@ fn display_width(text: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(text)
 }
 
-fn token_count(tokens: usize) -> String {
+pub fn token_count(tokens: usize) -> String {
     if tokens < 1000 {
         format!("{tokens} tokens")
     } else {
@@ -821,6 +869,28 @@ mod timing_tests {
         );
         renderer.model_event(Event::Activity(Activity::PreparingTools));
         assert!(renderer.spinner.as_ref().unwrap().elapsed() >= elapsed);
+    }
+
+    #[test]
+    fn reasoning_tracks_progress_and_token_count() {
+        let mut renderer = Renderer::new(true);
+        renderer.start_spinner("Sending".into(), true);
+        renderer
+            .spinner
+            .as_ref()
+            .unwrap()
+            .set_draw_target(indicatif::ProgressDrawTarget::hidden());
+        renderer.model_event(Event::Activity(Activity::Thinking));
+        // Small reasoning under 50 tokens keeps the base message
+        renderer.model_event(Event::Reasoning("short thinking".into()));
+        assert_eq!(
+            renderer.spinner.as_ref().unwrap().message(),
+            "Thinking · ctrl+c cancel"
+        );
+        // Accumulated reasoning over 50 tokens (>= 200 bytes) reports token count
+        renderer.model_event(Event::Reasoning("a".repeat(400)));
+        let message = renderer.spinner.as_ref().unwrap().message();
+        assert!(message.starts_with("Thinking · 103 tokens"));
     }
 
     #[test]

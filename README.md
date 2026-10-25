@@ -56,7 +56,12 @@ cd builder
 ```
 
 If `builder` is not found afterward, add `~/.cargo/bin` to your `PATH`. On
-Windows, run `cargo install --path . --locked` directly.
+Windows, run `cargo install --path . --locked` directly; Rust's MSVC toolchain
+needs the Visual Studio Build Tools ("Desktop development with C++"). The
+prebuilt Windows archive from a release instead needs Windows 10 version 1903
+or later and the [Microsoft Visual C++ Redistributable
+(x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe), which the bundled ONNX
+Runtime for local memory embeddings links against.
 
 ### 2. Connect a model
 

@@ -62,6 +62,7 @@ fn assistant(content: Option<&str>, tool_calls: Vec<ToolCall>) -> Message {
         role: Role::Assistant,
         content: content.map(Into::into),
         reasoning: None,
+        images: vec![],
         tool_calls,
         tool_call_id: None,
     }

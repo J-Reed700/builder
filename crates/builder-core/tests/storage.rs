@@ -430,6 +430,53 @@ fn interrupt_records_claimed_uncertainty_as_a_typed_atomic_outcome() {
 }
 
 #[test]
+fn interrupt_turn_with_keeps_the_pasted_image_and_closes_pending_calls() {
+    use builder_core::protocol::{Image, Message, Role};
+    let home = tempfile::tempdir().unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    let id = store
+        .create("image interrupt", "local", home.path(), "system")
+        .unwrap();
+    store
+        .append(&id, &Message::text(Role::User, "run command"))
+        .unwrap();
+    let calls: Message = serde_json::from_value(serde_json::json!({
+        "role": "assistant",
+        "tool_calls": [
+            {"id": "queued", "type": "function", "function": {"name": "shell", "arguments": "{}"}}
+        ]
+    }))
+    .unwrap();
+    store.append(&id, &calls).unwrap();
+    let image = Image {
+        mime: "image/png".into(),
+        data: "aGVsbG8=".into(),
+    };
+    assert!(
+        store
+            .interrupt_turn_with(&id, Some(&Message::text(Role::User, "  ")))
+            .is_err()
+    );
+    let next = Message::text(Role::User, "read this instead").with_images(vec![image.clone()]);
+    assert_eq!(store.interrupt_turn_with(&id, Some(&next)).unwrap(), 0);
+    let messages = store.messages(&id).unwrap();
+    let last = messages.last().unwrap();
+    assert_eq!(last.role, Role::User);
+    assert_eq!(last.content.as_deref(), Some("read this instead"));
+    assert_eq!(last.images, vec![image.clone()]);
+    // The unclaimed call was closed as cancelled before the new instruction.
+    assert!(messages[..messages.len() - 1].iter().any(|m| {
+        m.content
+            .as_deref()
+            .is_some_and(|c| c.contains("CANCELLED"))
+    }));
+    drop(store);
+    let store = Store::open(home.path()).unwrap();
+    let messages = store.messages(&id).unwrap();
+    assert_eq!(messages.last().unwrap().images, vec![image]);
+}
+
+#[test]
 fn rewind_preserves_originals_and_draft_across_restart() {
     use builder_core::protocol::{Message, Role};
     let home = tempfile::tempdir().unwrap();

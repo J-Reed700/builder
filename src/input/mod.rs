@@ -17,6 +17,7 @@ pub fn is_unknown_command(text: &str) -> bool {
             .is_some_and(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphabetic()))
 }
 use buffer::{Buffer, Draft};
+use builder_core::protocol::{Image, Message, Role};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 mod screen;
 use layout::Layout;
@@ -43,12 +44,12 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
         "/clear",
         "Start a fresh conversation; archive the current one",
     ),
-    ("/attach ", "Attach a file from this workspace"),
+    ("/attach ", "Attach a file or image from this workspace"),
     ("/exit", "Save and leave"),
 ];
 
 pub enum Input {
-    Submit(String),
+    Submit(Message),
     Exit,
     Interrupt,
 }
@@ -70,6 +71,9 @@ pub struct Composer {
     completion: usize,
     menu_dismissed: bool,
     history_bytes: usize,
+    images: Vec<Image>,
+    /// Whether the active profile can read pasted images.
+    pub vision: bool,
 }
 
 impl Composer {
@@ -107,7 +111,7 @@ impl Composer {
             text = self.buffer.content();
         }
         self.buffer.restore(Draft::default());
-        Ok(Input::Submit(text))
+        Ok(Input::Submit(Message::text(Role::User, text)))
     }
     pub fn read(&mut self, status: &str) -> io::Result<Input> {
         self.read_with_status(status, || None)
@@ -154,22 +158,28 @@ impl Composer {
                 Outcome::Clipboard => {
                     self.note = "Reading clipboard directly…".into();
                     screen.draw(&self.buffer, &current_status, &self.hint(), &self.menu())?;
-                    match clipboard::read(buffer::MAX_INPUT_BYTES - self.buffer.draft.bytes) {
-                        Ok(text) if text.is_empty() => {
-                            self.note = "Clipboard is empty or contains no text".into();
-                        }
-                        Ok(text) => {
+                    let text = clipboard::read(buffer::MAX_INPUT_BYTES - self.buffer.draft.bytes);
+                    match text {
+                        Ok(text) if !text.is_empty() => {
                             self.handle(Event::Paste(text), screen.content_width);
                         }
+                        Ok(_) => match clipboard::read_image() {
+                            Ok(image) if self.vision => self.attach_image(image),
+                            Ok(_) => {
+                                self.note =
+                                    "This profile cannot read images (no vision capability)".into()
+                            }
+                            Err(error) => self.note = error.to_string(),
+                        },
                         Err(error) => self.note = error.to_string(),
                     }
                     screen.draw(&self.buffer, &current_status, &self.hint(), &self.menu())?;
                 }
                 Outcome::Submit => {
-                    let text = self.buffer.content();
-                    if text.trim().is_empty() {
+                    let Some(message) = self.message() else {
                         continue;
-                    }
+                    };
+                    let text = self.buffer.content();
                     screen.clear()?;
                     let preview_width = screen.content_width;
                     drop(screen);
@@ -211,9 +221,19 @@ impl Composer {
                             ))
                         );
                     }
+                    for image in &self.images {
+                        println!(
+                            "    {}",
+                            theme::muted(&format!(
+                                "image attached · {}",
+                                buffer::size(image.data.len() * 3 / 4 + 4)
+                            ))
+                        );
+                    }
                     self.remember();
                     self.buffer.restore(Draft::default());
-                    return Ok(Input::Submit(text));
+                    self.images.clear();
+                    return Ok(Input::Submit(message));
                 }
                 Outcome::Exit => {
                     screen.clear()?;
@@ -325,9 +345,21 @@ impl Composer {
             );
         }
         if self.buffer.is_empty() {
-            "/ commands  ·  ↑ history".into()
+            if self.images.is_empty() {
+                "/ commands  ·  ↑ history".into()
+            } else {
+                format!(
+                    "{} image(s) attached · backspace removes one",
+                    self.images.len()
+                )
+            }
         } else {
-            "enter send  ·  alt+enter newline".into()
+            let images = if self.images.is_empty() {
+                String::new()
+            } else {
+                format!(" · {} image(s) attached", self.images.len())
+            };
+            format!("enter send{images}  ·  alt+enter newline")
         }
     }
     fn complete(&mut self) {
@@ -394,7 +426,13 @@ impl Composer {
                     KeyCode::Right => self.buffer.right(),
                     KeyCode::Home => self.buffer.home(),
                     KeyCode::End => self.buffer.end(),
-                    KeyCode::Backspace => self.buffer.backspace(),
+                    KeyCode::Backspace => {
+                        if self.buffer.is_empty() {
+                            self.remove_last_image();
+                        } else {
+                            self.buffer.backspace();
+                        }
+                    }
                     KeyCode::Delete => self.buffer.delete(),
                     KeyCode::Up | KeyCode::Down if !self.suggestions().is_empty() => {
                         let count = self.suggestions().len();
@@ -441,6 +479,27 @@ impl Composer {
         self.menu_dismissed = false;
         if let Err(error) = self.buffer.insert(text, false) {
             self.note = error.into();
+        }
+    }
+    /// The user message for the current draft, or None when it is empty.
+    /// An image-only draft is still a message.
+    fn message(&self) -> Option<Message> {
+        let text = self.buffer.content();
+        if text.trim().is_empty() && self.images.is_empty() {
+            return None;
+        }
+        Some(Message::text(Role::User, text).with_images(self.images.clone()))
+    }
+    /// Attach a pasted image; the caller checked the profile supports vision.
+    fn attach_image(&mut self, image: Image) {
+        let size = buffer::size(image.data.len() * 3 / 4 + 4);
+        self.images.push(image);
+        self.note = format!("Image attached · {size} · backspace removes it");
+    }
+    /// Backspace on an empty draft removes the most recently attached image.
+    fn remove_last_image(&mut self) {
+        if self.images.pop().is_some() {
+            self.note = "Image removed".into();
         }
     }
 }
@@ -585,5 +644,42 @@ mod tests {
         assert!(editor.buffer.is_empty());
         editor.buffer.undo();
         assert_eq!(editor.buffer.content(), "keep me");
+    }
+
+    fn test_image() -> Image {
+        Image {
+            mime: "image/png".into(),
+            data: "AAAA".into(),
+        }
+    }
+
+    #[test]
+    fn attached_images_travel_with_the_submitted_message() {
+        let mut editor = Composer::default();
+        editor.buffer.insert("read this", false).unwrap();
+        editor.attach_image(test_image());
+        let message = editor.message().unwrap();
+        assert_eq!(message.content.as_deref(), Some("read this"));
+        assert_eq!(message.images.len(), 1);
+        assert_eq!(message.images[0].mime, "image/png");
+        let mut image_only = Composer::default();
+        image_only.attach_image(test_image());
+        let submitted = image_only.message().unwrap();
+        assert_eq!(submitted.content.as_deref(), Some(""));
+        assert!(Composer::default().message().is_none());
+    }
+
+    #[test]
+    fn backspace_on_an_empty_draft_removes_the_attached_image() {
+        let mut editor = Composer::default();
+        editor.attach_image(test_image());
+        editor.handle(key(KeyCode::Backspace, KeyModifiers::NONE), 80);
+        assert!(editor.images.is_empty());
+        editor.attach_image(test_image());
+        editor.buffer.insert("x", false).unwrap();
+        editor.handle(key(KeyCode::Backspace, KeyModifiers::NONE), 80);
+        // Text is deleted before the image is ever touched.
+        assert_eq!(editor.buffer.content(), "");
+        assert_eq!(editor.images.len(), 1);
     }
 }

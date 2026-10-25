@@ -3,7 +3,7 @@ use anyhow::{Result, ensure};
 use builder::agent::{Agent, ApprovalMode, estimate_tokens};
 use builder_core::{
     config::{Config, Profile},
-    protocol::{Message, Role},
+    protocol::{Image, Message, Role},
     store::Store,
 };
 use builder_provider::{Event, OpenAiCompatible, Provider};
@@ -139,6 +139,69 @@ async fn many_user_turns_keep_active_context_bounded() -> Result<()> {
                 .is_some_and(|s| s.contains("Keep deployment frozen."))
         }));
     }
+    Ok(())
+}
+
+/// A summarizer that fails the test if an image payload ever reaches it.
+struct ImageBlindSummary(&'static str);
+impl Provider for ImageBlindSummary {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[Value],
+        emit: &mut dyn FnMut(Event),
+    ) -> Result<Message> {
+        for message in messages {
+            assert!(message.images.is_empty(), "summarizer received an image");
+            assert!(
+                !message.content.as_deref().unwrap_or("").contains(self.0),
+                "summarizer received base64 image data"
+            );
+        }
+        SmallSummary.complete(messages, tools, emit).await
+    }
+}
+
+#[tokio::test]
+async fn pasted_screenshots_never_reach_the_summarizer_or_blow_the_budget() -> Result<()> {
+    // One early user turn carries a ~3 MB screenshot. Counted as text it
+    // would read as ~1.5M tokens and split into far more fragments than
+    // compaction allows; it must be charged a fixed budget and summarized as
+    // a note, while the archived original keeps the image.
+    let temp = tempfile::tempdir()?;
+    let mut store = Store::open(temp.path())?;
+    let session = store.create("image fixture", "synthetic", temp.path(), "Answer.")?;
+    let payload = "QUJD".repeat(750_000);
+    store.append(
+        &session,
+        &Message::text(Role::User, "Here is the failing dialog.").with_images(vec![Image {
+            mime: "image/png".into(),
+            data: payload,
+        }]),
+    )?;
+    seed(&mut store, &session, 64)?;
+    let before = store.messages(&session)?;
+    assert!(
+        estimate_tokens(&before) < 163_840,
+        "an image must not be estimated by its payload size"
+    );
+    let agent = Agent {
+        provider: ImageBlindSummary("QUJDQUJDQUJD"),
+        memory: None,
+        profile: Profile {
+            context_tokens: 163840,
+            max_output_tokens: 16384,
+            vision: true,
+            ..Profile::default()
+        },
+        workspace: Workspace::new(temp.path())?,
+        session: session.clone(),
+        approval: ApprovalMode::ReadOnly,
+        max_rounds: Some(1),
+    };
+    assert!(agent.compact(&mut store, &mut |_| {}).await?);
+    assert_eq!(store.history_messages(&session)?, before);
+    assert!(estimate_tokens(&store.messages(&session)?) < 16000);
     Ok(())
 }
 

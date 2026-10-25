@@ -33,6 +33,7 @@ builder-provider = { path = "crates/builder-provider" }
 builder-remote-protocol = { path = "crates/builder-remote-protocol" }
 builder-tools = { path = "crates/builder-tools" }
 anyhow = "1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 chrono = "0.4"
 shell-words = "1"
