@@ -79,6 +79,14 @@ impl Drop for CodeIndexGuard {
     }
 }
 
+/// Whether a nonblocking lock attempt failed only because another process
+/// holds the lock. Unix reports `WouldBlock`; Windows reports
+/// `ERROR_LOCK_VIOLATION`, which `fs2` exposes as the contended error.
+fn lock_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
 fn private_lock_options() -> std::fs::OpenOptions {
     let mut options = File::options();
     options.create(true).truncate(false).read(true).write(true);

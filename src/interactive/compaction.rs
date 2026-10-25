@@ -194,3 +194,236 @@ pub(super) async fn wait_for_compaction(task: &mut Option<CompactionTask>) -> Re
         .context("Compaction task disappeared before it finished")?
         .finish()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Json, Router, routing::post};
+    use builder::agent::{ApprovalMode, SummaryStage};
+    use builder_core::{
+        config::Profile,
+        protocol::{Message, Role},
+    };
+    use builder_tools::Workspace;
+    use serde_json::{Value, json};
+    use std::time::Duration;
+
+    async fn summary_server(delay: Duration) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |Json(_body): Json<Value>| async move {
+                tokio::time::sleep(delay).await;
+                Json(json!({"choices":[{"index":0,"message":{"role":"assistant",
+                    "content":"Handoff: the user asked for a parser refactor; a.rs and b.rs were read."},
+                    "finish_reason":"stop"}]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (url, task)
+    }
+
+    /// A session with `findings` large assistant turns; a follow-up user
+    /// message makes the earlier turns "older" context that can be summarized.
+    fn agent(home: &std::path::Path, url: &str, findings: usize) -> Agent<Endpoint> {
+        let workspace = Workspace::new(home).unwrap();
+        let mut store = Store::open(home).unwrap();
+        let session = store.create("compaction", "local", home, "system").unwrap();
+        store
+            .append(&session, &Message::text(Role::User, "Refactor the parser"))
+            .unwrap();
+        for index in 0..findings {
+            store
+                .append(
+                    &session,
+                    &Message::text(
+                        Role::Assistant,
+                        format!("Finding {index}: {}", "detail ".repeat(400)),
+                    ),
+                )
+                .unwrap();
+        }
+        if findings > 0 {
+            store
+                .append(&session, &Message::text(Role::User, "continue"))
+                .unwrap();
+        }
+        let profile = Profile {
+            base_url: url.into(),
+            model: "test-model".into(),
+            stream: false,
+            ..Profile::default()
+        };
+        Agent {
+            provider: Endpoint::new(profile.clone()).unwrap(),
+            memory: None,
+            profile,
+            workspace,
+            session,
+            approval: ApprovalMode::Trust,
+            max_rounds: None,
+        }
+    }
+
+    async fn settled(task: &CompactionTask) {
+        while !task.finished() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_runs_on_a_worker_thread_and_reports_its_status() {
+        let (url, server) = summary_server(Duration::ZERO).await;
+        let home = tempfile::tempdir().unwrap();
+        let agent = agent(home.path(), &url, 6);
+        let before = Store::open(home.path())
+            .unwrap()
+            .messages(&agent.session)
+            .unwrap()
+            .len();
+        let task = start_compaction(&agent, home.path(), &Config::default()).unwrap();
+        assert!(
+            task.status().starts_with("Compacting context"),
+            "{}",
+            task.status()
+        );
+        settled(&task).await;
+        assert_eq!(
+            task.status(),
+            "Context compacted · originals searchable · enter a message to queue it"
+        );
+        let mut slot = Some(task);
+        assert!(wait_for_compaction(&mut slot).await.unwrap());
+        assert!(slot.is_none());
+        let messages = Store::open(home.path())
+            .unwrap()
+            .messages(&agent.session)
+            .unwrap();
+        assert!(messages.len() < before, "{} -> {}", before, messages.len());
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.content.as_deref().is_some_and(|t| t.contains("Handoff:"))),
+            "the model's handoff is in the active context"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_short_conversation_has_nothing_to_compact() {
+        let (url, server) = summary_server(Duration::ZERO).await;
+        let home = tempfile::tempdir().unwrap();
+        let agent = agent(home.path(), &url, 0);
+        let task = start_compaction(&agent, home.path(), &Config::default()).unwrap();
+        settled(&task).await;
+        assert_eq!(
+            task.status(),
+            "No older context to compact · enter a message to queue it"
+        );
+        let mut slot = Some(task);
+        assert!(!wait_for_compaction(&mut slot).await.unwrap());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelling_leaves_the_original_context_intact() {
+        let (url, server) = summary_server(Duration::from_secs(30)).await;
+        let home = tempfile::tempdir().unwrap();
+        let agent = agent(home.path(), &url, 6);
+        let before = Store::open(home.path())
+            .unwrap()
+            .messages(&agent.session)
+            .unwrap();
+        let mut task = start_compaction(&agent, home.path(), &Config::default()).unwrap();
+        task.cancel();
+        task.cancel();
+        settled(&task).await;
+        assert_eq!(
+            task.status(),
+            "Compaction failed · original context intact · enter a message to queue it"
+        );
+        let error = task.finish().unwrap_err().to_string();
+        assert!(error.contains("Compaction interrupted"), "{error}");
+        let after = Store::open(home.path())
+            .unwrap()
+            .messages(&agent.session)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&after).unwrap(),
+            serde_json::to_value(&before).unwrap()
+        );
+        let mut empty = None;
+        assert!(wait_for_compaction(&mut empty).await.is_err());
+        server.abort();
+    }
+
+    #[test]
+    fn status_lines_follow_compaction_events() {
+        let status = |event| compaction_event_status(&event);
+        assert_eq!(
+            status(AgentEvent::Compacting {
+                before: 1,
+                context_tokens: 2
+            })
+            .as_deref(),
+            Some("Compacting context · enter a message to queue it")
+        );
+        assert_eq!(
+            status(AgentEvent::CompactionProgress {
+                fraction: 0.456,
+                fragment: 1,
+                stage: SummaryStage::Waiting
+            })
+            .as_deref(),
+            Some("Compacting context · 46% · enter a message to queue it")
+        );
+        assert_eq!(
+            status(AgentEvent::CompactionProgress {
+                fraction: 2.0,
+                fragment: 1,
+                stage: SummaryStage::Waiting
+            })
+            .as_deref(),
+            Some("Compacting context · 100% · enter a message to queue it")
+        );
+        assert_eq!(
+            status(AgentEvent::SummaryRecovery { size: 2, limit: 1 }).as_deref(),
+            Some("Tightening context summary · enter a message to queue it")
+        );
+        assert_eq!(
+            status(AgentEvent::OutputRecovery { budget: 1 }).as_deref(),
+            Some("Retrying context summary · enter a message to queue it")
+        );
+        assert_eq!(
+            status(AgentEvent::MemoryNotice("line one\nline two".into())).as_deref(),
+            Some("Compacting context · line one line two")
+        );
+        let long = status(AgentEvent::MemoryNotice("x".repeat(200))).unwrap();
+        assert!(long.ends_with('…'), "{long}");
+        assert!(long.len() <= "Compacting context · ".len() + 120 + '…'.len_utf8());
+        assert_eq!(
+            status(AgentEvent::Compacted {
+                before: 2,
+                after: 1,
+                context_tokens: 4
+            })
+            .as_deref(),
+            Some("Context compacted · originals searchable · enter a message to queue it")
+        );
+        assert_eq!(
+            status(AgentEvent::ToolStarted {
+                name: "shell".into(),
+                detail: "ls".into()
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn one_line_flattens_and_truncates_on_char_boundaries() {
+        assert_eq!(one_line("a\r\nb", 10), "a  b");
+        assert_eq!(one_line("short", 5), "short");
+        assert_eq!(one_line(&"é".repeat(10), 7), format!("{}…", "é".repeat(3)));
+    }
+}

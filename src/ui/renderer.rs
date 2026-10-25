@@ -841,3 +841,420 @@ mod timing_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+    use builder_core::todo::{Item, List, Status};
+
+    fn hide(renderer: &Renderer) {
+        if let Some(spinner) = &renderer.spinner {
+            spinner.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+        }
+    }
+
+    fn running(name: &str, detail: &str) -> (String, String) {
+        (name.into(), detail.into())
+    }
+
+    #[test]
+    fn formatting_helpers_round_counts_durations_and_labels() {
+        assert_eq!(token_count(999), "999 tokens");
+        assert_eq!(token_count(1000), "1.0k tokens");
+        assert_eq!(token_count(131_072), "131.1k tokens");
+        assert_eq!(compact_count(42), "42");
+        assert_eq!(compact_count(12_345), "12.3k");
+        assert_eq!(short_duration(0.04), "0.0s");
+        assert_eq!(short_duration(2.26), "2.3s");
+        assert_eq!(short_duration(12.6), "13s");
+        assert_eq!(short_duration(60.0), "1m 00s");
+        assert_eq!(long_duration(0.5), "<1s");
+        assert_eq!(long_duration(5.56), "5.6s");
+        assert_eq!(long_duration(61.0), "1m 01s");
+        assert_eq!(long_duration(3599.4), "59m 59s");
+        assert_eq!(long_duration(3600.0), "1h 00m");
+        assert_eq!(long_duration(7384.0), "2h 03m");
+        assert_eq!(tool_label("read_file"), "Read file");
+        assert_eq!(tool_label("edit_file"), "Edit file");
+        assert_eq!(tool_label("multi_edit"), "Edit file");
+        assert_eq!(tool_label("subagent"), "Subagent");
+        assert_eq!(tool_label("write_file"), "Write file");
+        assert_eq!(tool_label("list_files"), "List files");
+        assert_eq!(tool_label("search"), "Search");
+        assert_eq!(tool_label("shell"), "Run command");
+        assert_eq!(tool_label("todo_write"), "Todo");
+        assert_eq!(tool_label("code_search"), "code search");
+        assert_eq!(tool_label("evil\x1b[31m_name"), "evil name");
+        assert_eq!(display_width("ab"), 2);
+        assert_eq!(display_width("日本"), 4);
+    }
+
+    #[test]
+    fn prompt_size_and_running_message_describe_the_current_work() {
+        let mut renderer = Renderer::new(true);
+        assert_eq!(renderer.prompt_size(), "the conversation");
+        renderer.model_event(Event::Prompt { bytes: 1500 });
+        assert_eq!(renderer.prompt_size(), "a ~750-token prompt");
+        renderer.model_event(Event::Prompt { bytes: 300_000 });
+        assert_eq!(renderer.prompt_size(), "a ~150k-token prompt");
+
+        renderer.running = vec![running("read_file", "src/main.rs")];
+        assert_eq!(
+            renderer.running_message(),
+            "Read file  src/main.rs · ctrl+c cancel"
+        );
+        renderer.running = vec![running("shell", "")];
+        assert_eq!(renderer.running_message(), "Run command · ctrl+c cancel");
+        renderer.running = vec![running("read_file", "a"), running("search", "b")];
+        assert_eq!(
+            renderer.running_message(),
+            "Running 2 actions in parallel · ctrl+c cancel"
+        );
+        renderer.running = vec![running("subagent", "map")];
+        renderer.subagents.insert(
+            "c1".into(),
+            SubagentStatus {
+                description: "map DI".into(),
+                actions: 3,
+                round: 2,
+                reporting: false,
+                activity: SubagentActivity::Thinking,
+            },
+        );
+        assert_eq!(
+            renderer.running_message(),
+            "Subagent  map DI · round 2 · 3 actions · thinking · ctrl+c cancel"
+        );
+        renderer.running.push(running("read_file", "x"));
+        renderer.subagents.insert(
+            "c2".into(),
+            SubagentStatus {
+                description: "trace".into(),
+                actions: 5,
+                round: 1,
+                reporting: true,
+                activity: SubagentActivity::Waiting,
+            },
+        );
+        assert_eq!(
+            renderer.running_message(),
+            "2 running (1 subagents, 8 actions) · trace: waiting for the model · ctrl+c cancel"
+        );
+    }
+
+    #[test]
+    fn interactive_events_drive_spinners_tool_rows_and_subagent_status() {
+        let mut renderer = Renderer::new(true);
+        let model = |event| AgentEvent::Model(event);
+        renderer.event(model(Event::Attempt {
+            number: 1,
+            maximum: 3,
+        }));
+        hide(&renderer);
+        assert!(renderer.spinner.is_some());
+        assert!(renderer.heading_printed);
+        assert!(renderer.model_activity.is_some());
+        renderer.event(model(Event::Activity(Activity::Connected)));
+        renderer.event(model(Event::PromptProgress {
+            processed: 10,
+            total: 2000,
+        }));
+        renderer.event(model(Event::Activity(Activity::Thinking)));
+        renderer.event(model(Event::Reasoning("hmm".into())));
+        renderer.event(model(Event::Activity(Activity::PreparingTools)));
+        renderer.event(model(Event::ToolProgress {
+            name: "edit_file".into(),
+            calls: 2,
+            bytes: 1500,
+        }));
+        renderer.event(model(Event::ToolProgress {
+            name: String::new(),
+            calls: 1,
+            bytes: 10,
+        }));
+
+        renderer.event(AgentEvent::ToolStarted {
+            name: "read_file".into(),
+            detail: "a.rs".into(),
+        });
+        hide(&renderer);
+        assert_eq!(renderer.running.len(), 1);
+        assert!(renderer.tool_started_at.is_some());
+        renderer.event(AgentEvent::ToolStarted {
+            name: "subagent".into(),
+            detail: "map".into(),
+        });
+        hide(&renderer);
+        assert_eq!(renderer.running.len(), 2);
+        assert!(
+            renderer.model_activity.is_some(),
+            "a running subagent tracks its model activity"
+        );
+        renderer.event(AgentEvent::SubagentProgress {
+            call_id: "c1".into(),
+            description: "map".into(),
+            actions: 1,
+            round: 1,
+            reporting: false,
+            activity: SubagentActivity::Reading {
+                processed: 1,
+                total: 2,
+            },
+        });
+        assert_eq!(renderer.subagents.len(), 1);
+        renderer.event(AgentEvent::ToolFinished {
+            name: "read_file".into(),
+            detail: "a.rs".into(),
+            note: Some("12 lines".into()),
+            failed: false,
+        });
+        hide(&renderer);
+        assert_eq!(renderer.tools, 1);
+        assert_eq!(renderer.running.len(), 1);
+        assert!(
+            renderer.spinner.is_some(),
+            "the remaining subagent keeps a status line"
+        );
+        renderer.event(AgentEvent::ToolFinished {
+            name: "subagent".into(),
+            detail: "map".into(),
+            note: Some("report · 44 tool calls\nsecond line of the note".into()),
+            failed: false,
+        });
+        assert!(renderer.running.is_empty());
+        assert!(renderer.subagents.is_empty());
+        assert!(renderer.tool_started_at.is_none());
+        assert!(renderer.spinner.is_none());
+
+        renderer.event(AgentEvent::ToolStarted {
+            name: "shell".into(),
+            detail: "cargo test".into(),
+        });
+        hide(&renderer);
+        renderer.event(AgentEvent::ToolFinished {
+            name: "shell".into(),
+            detail: "cargo test".into(),
+            note: Some("exit 101".into()),
+            failed: false,
+        });
+        renderer.event(AgentEvent::ToolStarted {
+            name: "edit_file".into(),
+            detail: "a.rs".into(),
+        });
+        hide(&renderer);
+        renderer.event(AgentEvent::ToolFinished {
+            name: "edit_file".into(),
+            detail: "a.rs".into(),
+            note: Some("ERROR: no match".into()),
+            failed: true,
+        });
+        assert_eq!(renderer.tools, 4);
+
+        let list = List {
+            items: vec![Item {
+                content: "step".into(),
+                status: Status::InProgress,
+            }],
+        };
+        renderer.event(AgentEvent::ToolStarted {
+            name: "todo_write".into(),
+            detail: "1 item".into(),
+        });
+        hide(&renderer);
+        renderer.event(AgentEvent::ToolFinished {
+            name: "todo_write".into(),
+            detail: "1 item".into(),
+            note: None,
+            failed: false,
+        });
+        renderer.event(AgentEvent::TodosUpdated(list));
+
+        renderer.event(model(Event::Attempt {
+            number: 2,
+            maximum: 3,
+        }));
+        hide(&renderer);
+        renderer.event(model(Event::Delta("Hello ".into())));
+        assert!(renderer.spinner.is_none(), "prose clears the spinner");
+        renderer.event(model(Event::Delta("world ".repeat(2000))));
+        assert!(renderer.bytes > 8192);
+        renderer.event(model(Event::ToolProgress {
+            name: "write_file".into(),
+            calls: 1,
+            bytes: 5,
+        }));
+        hide(&renderer);
+        assert!(
+            renderer.spinner.is_some(),
+            "a long edit after prose shows the response continues"
+        );
+        renderer.event(model(Event::Retry {
+            delay_ms: 1500,
+            reason: "connection reset".into(),
+        }));
+        assert!(renderer.spinner.is_none());
+
+        renderer.event(AgentEvent::ExplorationRecovery { calls: 3 });
+        renderer.event(AgentEvent::ProgressNudge {
+            calls: 12,
+            step: Some((2, 5)),
+            repeated_reads: 1,
+            planning: false,
+        });
+        renderer.event(AgentEvent::EditFocus {
+            calls: 16,
+            step: (2, 5),
+            reads: true,
+        });
+        renderer.event(AgentEvent::RepetitionNotice {
+            name: "shell".into(),
+            count: 3,
+            limit: 4,
+        });
+        renderer.event(AgentEvent::MemoryNotice(
+            "memory \x1b[31munavailable".into(),
+        ));
+        renderer.event(AgentEvent::OutputRecovery { budget: 8192 });
+        renderer.event(AgentEvent::SummaryRecovery {
+            size: 20_000,
+            limit: 12_000,
+        });
+
+        renderer.event(AgentEvent::AutoCompact {
+            messages: 70_000,
+            overhead: 8_000,
+            reserved: 4_000,
+            threshold: 75_000,
+            context_tokens: 100_000,
+        });
+        renderer.event(AgentEvent::Compacting {
+            before: 70_000,
+            context_tokens: 100_000,
+        });
+        assert!(renderer.compacting);
+        renderer.event(AgentEvent::OutputRecovery { budget: 8192 });
+        renderer.event(AgentEvent::CompactionProgress {
+            fraction: 0.0,
+            fragment: 1,
+            stage: SummaryStage::Waiting,
+        });
+        hide(&renderer);
+        assert!(renderer.summary_bar);
+        assert!(renderer.spinner.is_some());
+        renderer.event(model(Event::Attempt {
+            number: 1,
+            maximum: 3,
+        }));
+        assert!(renderer.summary_bar, "the bar survives fragment requests");
+        renderer.event(model(Event::Activity(Activity::Thinking)));
+        renderer.event(model(Event::PromptProgress {
+            processed: 5,
+            total: 10,
+        }));
+        renderer.event(model(Event::ToolProgress {
+            name: "x".into(),
+            calls: 1,
+            bytes: 1,
+        }));
+        renderer.event(AgentEvent::CompactionProgress {
+            fraction: 0.25,
+            fragment: 2,
+            stage: SummaryStage::Reading {
+                processed: 500,
+                total: 4000,
+            },
+        });
+        renderer.event(AgentEvent::CompactionProgress {
+            fraction: 0.5,
+            fragment: 2,
+            stage: SummaryStage::Writing {
+                summary_bytes: 0,
+                reasoning_bytes: 300,
+                expected: 4000,
+            },
+        });
+        renderer.event(AgentEvent::CompactionProgress {
+            fraction: 0.9,
+            fragment: 2,
+            stage: SummaryStage::Writing {
+                summary_bytes: 3000,
+                reasoning_bytes: 300,
+                expected: 4000,
+            },
+        });
+        assert_eq!(renderer.spinner.as_ref().unwrap().position(), 900);
+        renderer.event(AgentEvent::Compacted {
+            before: 70_000,
+            after: 20_000,
+            context_tokens: 100_000,
+        });
+        assert!(!renderer.compacting);
+        assert!(!renderer.summary_bar);
+        assert!(renderer.spinner.is_none());
+        renderer.finish();
+        assert!(renderer.spinner.is_none());
+    }
+
+    #[test]
+    fn a_headless_renderer_never_draws_progress_or_streams_prose() {
+        let mut renderer = Renderer::new(false);
+        let events = vec![
+            AgentEvent::Model(Event::Attempt {
+                number: 1,
+                maximum: 3,
+            }),
+            AgentEvent::Model(Event::Activity(Activity::Thinking)),
+            AgentEvent::Model(Event::Delta("streamed".into())),
+            AgentEvent::Model(Event::ToolProgress {
+                name: "edit_file".into(),
+                calls: 1,
+                bytes: 10,
+            }),
+            AgentEvent::ToolStarted {
+                name: "read_file".into(),
+                detail: "a.rs".into(),
+            },
+            AgentEvent::ToolFinished {
+                name: "read_file".into(),
+                detail: "a.rs".into(),
+                note: None,
+                failed: false,
+            },
+            AgentEvent::SubagentProgress {
+                call_id: "c1".into(),
+                description: "map".into(),
+                actions: 1,
+                round: 1,
+                reporting: true,
+                activity: SubagentActivity::Writing,
+            },
+            AgentEvent::TodosUpdated(List::default()),
+            AgentEvent::CompactionProgress {
+                fraction: 0.5,
+                fragment: 1,
+                stage: SummaryStage::Waiting,
+            },
+            AgentEvent::Compacting {
+                before: 1,
+                context_tokens: 2,
+            },
+            AgentEvent::Compacted {
+                before: 1,
+                after: 1,
+                context_tokens: 2,
+            },
+        ];
+        for event in events {
+            renderer.event(event);
+            assert!(renderer.spinner.is_none());
+        }
+        assert!(renderer.running.is_empty());
+        assert_eq!(renderer.tools, 0);
+        assert_eq!(
+            renderer.bytes, 0,
+            "headless stdout gets only the final answer"
+        );
+        assert!(!renderer.summary_bar);
+        renderer.finish();
+    }
+}

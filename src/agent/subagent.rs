@@ -581,3 +581,141 @@ mod progress_tests {
         assert_eq!(progress.rounds, 2);
     }
 }
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+    use builder_core::protocol::{Function, ToolCall};
+    use serde_json::json;
+
+    fn call(id: &str, name: &str, arguments: serde_json::Value) -> Message {
+        let mut message = Message::text(Role::Assistant, "");
+        message.tool_calls.push(ToolCall {
+            id: id.into(),
+            kind: "function".into(),
+            function: Function {
+                name: name.into(),
+                arguments: arguments.to_string(),
+            },
+        });
+        message
+    }
+
+    #[test]
+    fn clipping_keeps_char_boundaries_and_marks_truncation() {
+        assert_eq!(clip_line("  short\nline  ", 100), "short line");
+        let clipped = clip_line(&"é".repeat(100), 11);
+        assert_eq!(clipped, format!("{}…", "é".repeat(5)));
+        assert_eq!(clip("short", 10), "short");
+        let clipped = clip(&"é".repeat(10), 7);
+        assert_eq!(
+            clipped,
+            format!("{}\n[report truncated at 7 bytes]", "é".repeat(3))
+        );
+    }
+
+    #[test]
+    fn the_final_answer_is_the_last_tool_free_assistant_message() {
+        let mut history = vec![
+            Message::text(Role::User, "go"),
+            Message::text(Role::Assistant, "Report text"),
+        ];
+        assert_eq!(final_answer(&history).as_deref(), Some("Report text"));
+        history.push(call("c1", "read_file", json!({"path":"a.rs"})));
+        assert_eq!(
+            final_answer(&history),
+            None,
+            "a pending call is not an answer"
+        );
+        history.push(Message::text(Role::Assistant, "   "));
+        assert_eq!(final_answer(&history), None, "blank text is not an answer");
+    }
+
+    #[test]
+    fn evidence_lists_reads_once_and_clips_findings_to_the_report_budget() {
+        let mut history = vec![Message::text(Role::User, "map the DI surface")];
+        let mut record = |id: &str, name: &str, arguments: serde_json::Value, result: &str| {
+            history.push(call(id, name, arguments));
+            history.push(Message::tool(id, result.into()));
+        };
+        record("r1", "read_file", json!({"path":"a.rs"}), "1|fn a() {}");
+        record("r2", "read_file", json!({"path":"a.rs"}), "1|fn a() {}");
+        record(
+            "r3",
+            "read_file",
+            json!({"path":"b.rs"}),
+            "ERROR: not found",
+        );
+        record(
+            "s1",
+            "search",
+            json!({"query":"needle"}),
+            "a.rs:1: needle\n\n a.rs:9: needle again\nb.rs:3: needle",
+        );
+        record("l1", "list_files", json!({"glob":"*.toml"}), "   ");
+        record(
+            "s2",
+            "search",
+            json!({"query":"gone"}),
+            "ERROR: too broad\nignored",
+        );
+        record(
+            "c1",
+            "search",
+            json!({"query":"late"}),
+            "CANCELLED: interrupted",
+        );
+        let huge = (0..2000)
+            .map(|line| format!("src/file{line}.rs:{line}: {}", "x".repeat(200)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        record("s3", "search", json!({"query":"everything"}), &huge);
+        history.push(Message::tool("orphan", "no call".into()));
+
+        let text = evidence(
+            " Map DI surface ",
+            "2bc461f7-0000-4000-8000-000000000000",
+            9,
+            "  Reached the budget\nsecond line  ",
+            &history,
+        );
+        assert!(
+            text.starts_with(
+                "Subagent evidence · Map DI surface · 9 tool calls · session 2bc461f7\n"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("(Reached the budget second line)"), "{text}");
+        assert!(
+            text.contains("\nRead (1): "),
+            "a repeated read is listed once: {text}"
+        );
+        assert!(
+            text.contains("\nSearches and listings, in order:\n"),
+            "{text}"
+        );
+        assert!(text.contains("1. read_file"), "{text}");
+        assert!(text.contains(" → ERROR: not found\n"), "{text}");
+        assert!(text.contains(" → 3 lines\n   a.rs:1: needle\n"), "{text}");
+        assert!(text.contains(" → no results\n"), "{text}");
+        assert!(text.contains(" → ERROR: too broad\n"), "{text}");
+        assert!(!text.contains("CANCELLED"), "{text}");
+        assert!(text.contains(" → 2000 lines\n"), "{text}");
+        assert!(
+            text.contains(" more\n"),
+            "the oversized search is cut: {text}"
+        );
+        assert!(!text.contains("src/file1999.rs"), "{text}");
+        assert!(text.len() < MAX_REPORT_BYTES, "{}", text.len());
+
+        let reads_only = evidence("x", "abcdefgh-session", 1, "r", &history[..3]);
+        assert!(
+            reads_only.ends_with("Read (1): read a.rs\n") || reads_only.contains("Read (1): "),
+            "{reads_only}"
+        );
+        assert!(
+            !reads_only.contains("Searches and listings"),
+            "{reads_only}"
+        );
+    }
+}

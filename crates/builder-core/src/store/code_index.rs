@@ -311,8 +311,10 @@ impl Store {
                 "Invalid stored code vector"
             );
             let vector = bytes
-                .chunks_exact(4)
-                .map(|part| f32::from_le_bytes(part.try_into().expect("four bytes")))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|part| f32::from_le_bytes(*part))
                 .collect::<Vec<_>>();
             validate_vector(&vector)?;
             Ok((serde_json::from_str(&body)?, vector))

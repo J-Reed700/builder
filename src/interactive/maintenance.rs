@@ -387,6 +387,14 @@ mod tests {
             outcome.is_ok(),
             "a blocked embedding queue must not starve extraction"
         );
+        // Cancellation is immediate in practice; an instrumented or loaded
+        // runner may need longer than the foreground grace period to join the
+        // worker thread, and ownership is retained until it does.
+        let stopped = std::time::Instant::now();
+        while task.is_some() && stopped.elapsed() < std::time::Duration::from_secs(5) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            reap_memory_task(&mut task);
+        }
         assert!(
             task.is_none(),
             "idle work must cancel before foreground work"

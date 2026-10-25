@@ -26,9 +26,11 @@ fn settings() -> PipelineSettings {
         ..Default::default()
     }
 }
+// Index paths are `/`-joined on every platform (see
+// `builder_tools::code_index::capture`), so labels use them unchanged.
 fn label(path: &str, start: usize, end: usize) -> Region {
     Region {
-        path: path.replace('/', std::path::MAIN_SEPARATOR_STR),
+        path: path.into(),
         lines: [start, end],
     }
 }

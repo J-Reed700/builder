@@ -74,20 +74,27 @@ impl Drop for ProcessGroup {
 pub(super) async fn run(root: &Path, command: &str, timeout_secs: Option<u64>) -> Result<String> {
     #[cfg(windows)]
     let mut process = {
+        // `cmd /C` parses the rest of its own command line, so hand the
+        // command over verbatim: argv quoting would wrap it in quotes and
+        // escape every inner quote as `\"`, which cmd does not understand.
+        // `/S` makes cmd strip exactly the outer quotes added here, however
+        // many quotes the command itself contains.
         let mut process = tokio::process::Command::new("cmd");
-        process.arg("/C");
+        process
+            .arg("/S")
+            .arg("/C")
+            .raw_arg(format!("\"{command}\""));
         process
     };
     #[cfg(not(windows))]
     let mut process = {
         let mut process = tokio::process::Command::new("sh");
-        process.arg("-c");
+        process.arg("-c").arg(command);
         process
     };
     #[cfg(unix)]
     process.process_group(0);
     let mut child = process
-        .arg(command)
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -229,7 +236,9 @@ async fn capture(mut stream: impl AsyncRead + Unpin, saved: &mut Capture) -> Res
     Ok(())
 }
 
-#[cfg(test)]
+// Every scenario here drives a POSIX shell, so the module is Unix-only;
+// otherwise its helpers are dead code on Windows.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::{Action, Workspace};

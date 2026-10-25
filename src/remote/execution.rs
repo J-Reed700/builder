@@ -16,7 +16,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use builder_core::{config::Config, store::Store};
+use builder_core::{
+    config::Config,
+    store::{SessionGuard, Store},
+};
 use builder_provider::{Activity, Endpoint, Event};
 use builder_tools::{Action, Workspace};
 use serde::Deserialize;
@@ -294,9 +297,8 @@ async fn start(State(shared): State<Arc<Shared>>, Json(request): Json<RunRequest
     let spawn = std::thread::Builder::new()
         .name("builder-remote".into())
         .spawn(move || {
-            let _finish = FinishRun(worker_run.clone());
+            let finish = FinishRun(worker_run.clone());
             let _permit = permit;
-            let _guard = guard;
             let result =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
                     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -307,6 +309,7 @@ async fn start(State(shared): State<Arc<Shared>>, Json(request): Json<RunRequest
                         worker_run.clone(),
                         RunInput {
                             store,
+                            guard,
                             config,
                             profile,
                             request,
@@ -322,6 +325,9 @@ async fn start(State(shared): State<Arc<Shared>>, Json(request): Json<RunRequest
                     runtime.shutdown_background();
                     result
                 }));
+            // `drive` owned the journal and the session lock and has released
+            // both by now, so the run is done before a failure is published.
+            drop(finish);
             if let Err(error) = result.unwrap_or_else(|_| {
                 Err(anyhow::anyhow!(
                     "Host worker stopped unexpectedly; inspect the saved session before retrying"
@@ -377,6 +383,8 @@ async fn cancelled(receiver: &mut watch::Receiver<bool>) {
 
 struct RunInput {
     store: Store,
+    /// Held for the whole run and released before its terminal phase is published.
+    guard: SessionGuard,
     config: Config,
     profile: builder_core::config::Profile,
     request: RunRequest,
@@ -393,6 +401,7 @@ async fn drive(
 ) -> Result<()> {
     let RunInput {
         mut store,
+        guard,
         config,
         profile,
         request,
@@ -446,6 +455,19 @@ async fn drive(
         } else {
             None
         };
+    let (phase, error) = match &result {
+        None => (Phase::Paused, None),
+        Some(Ok(())) if task_outcome.is_some_and(|outcome| outcome.requires_attention()) => (
+            Phase::Failed,
+            Some(format!(
+                "Task outcome: {:?}. Inspect the saved evidence before retrying.",
+                task_outcome.unwrap()
+            )),
+        ),
+        Some(Ok(())) => (Phase::Complete, None),
+        Some(Err(error)) => (Phase::Failed, Some(format!("{error:#}"))),
+    };
+    let maintenance = phase == Phase::Complete && agent.memory.is_some();
     {
         let mut state = run.snapshot.lock().unwrap();
         state.task_outcome = task_outcome;
@@ -456,35 +478,30 @@ async fn drive(
         state.preview.clear();
         state.preview_limited = false;
         state.thinking.clear();
-        match &result {
-            None => state.phase = Phase::Paused,
-            Some(Ok(())) if task_outcome.is_some_and(|outcome| outcome.requires_attention()) => {
-                state.phase = Phase::Failed;
-                state.error = Some(format!(
-                    "Task outcome: {:?}. Inspect the saved evidence before retrying.",
-                    task_outcome.unwrap()
-                ));
-            }
-            Some(Ok(())) => state.phase = Phase::Complete,
-            Some(Err(error)) => {
-                state.phase = Phase::Failed;
-                state.error = Some(format!("{error:#}"));
-            }
+        if maintenance {
+            state.phase = Phase::Maintaining;
         }
     }
-    if matches!(result, Some(Ok(())))
-        && !task_outcome.is_some_and(|outcome| outcome.requires_attention())
-        && let Some(memory) = &agent.memory
-    {
+    if maintenance && let Some(memory) = &agent.memory {
         let extraction_provider = MemoryRuntime::extraction_provider(&agent.profile)?;
-        run.snapshot.lock().unwrap().phase = Phase::Maintaining;
         tokio::select! {
             biased;
             _ = cancelled(&mut cancel) => {},
             _ = tokio::time::timeout(Duration::from_secs(105), memory.maintain(&extraction_provider, &mut store, &session, &agent.workspace, agent.profile.context_tokens)) => {},
         }
-        run.snapshot.lock().unwrap().phase = Phase::Complete;
     }
+    // A terminal phase tells the browser the chat can be managed or continued,
+    // so release the chat before publishing it: close the journal, drop the
+    // session lock, then mark the run done. Publishing first left a window in
+    // which `manage_chat` and `start` saw a finished phase but still found the
+    // chat running; on Windows, closing the database kept that window open
+    // long enough for both to reject the request.
+    drop(store);
+    drop(guard);
+    run.done.store(true, Ordering::Release);
+    let mut state = run.snapshot.lock().unwrap();
+    state.phase = phase;
+    state.error = error;
     Ok(())
 }
 

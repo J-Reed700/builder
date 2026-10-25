@@ -74,3 +74,106 @@ pub fn nudge_line(
     }
     line
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subagent_activity_reads_as_a_lowercase_phrase() {
+        assert_eq!(
+            subagent_activity(&SubagentActivity::Tool {
+                name: "read_file".into(),
+                detail: "src/main.rs".into()
+            }),
+            "read file src/main.rs"
+        );
+        assert_eq!(
+            subagent_activity(&SubagentActivity::Waiting),
+            "waiting for the model"
+        );
+        assert_eq!(subagent_activity(&SubagentActivity::Thinking), "thinking");
+        assert_eq!(
+            subagent_activity(&SubagentActivity::Preparing),
+            "preparing actions"
+        );
+        assert_eq!(subagent_activity(&SubagentActivity::Writing), "writing");
+    }
+
+    #[test]
+    fn prompt_progress_counts_in_thousands_from_a_thousand_up() {
+        assert_eq!(
+            subagent_activity(&SubagentActivity::Reading {
+                processed: 999,
+                total: 1000
+            }),
+            "reading 999 of 1.0k prompt tokens"
+        );
+        assert_eq!(
+            subagent_activity(&SubagentActivity::Reading {
+                processed: 12_345,
+                total: 131_072
+            }),
+            "reading 12.3k of 131.1k prompt tokens"
+        );
+        assert_eq!(
+            subagent_activity(&SubagentActivity::Reading {
+                processed: 0,
+                total: 0
+            }),
+            "reading 0 of 0 prompt tokens"
+        );
+    }
+
+    #[test]
+    fn compaction_fraction_is_clamped_and_rounded_to_a_percentage() {
+        assert_eq!(
+            subagent_activity(&SubagentActivity::Compacting { fraction: 0.456 }),
+            "summarizing its context 46%"
+        );
+        assert_eq!(
+            subagent_activity(&SubagentActivity::Compacting { fraction: -1.0 }),
+            "summarizing its context 0%"
+        );
+        assert_eq!(
+            subagent_activity(&SubagentActivity::Compacting { fraction: 7.0 }),
+            "summarizing its context 100%"
+        );
+    }
+
+    #[test]
+    fn subagent_round_distinguishes_starting_rounds_and_reporting() {
+        assert_eq!(subagent_round(0, false), "starting");
+        assert_eq!(subagent_round(3, false), "round 3");
+        assert_eq!(subagent_round(0, true), "writing its report");
+        assert_eq!(subagent_round(9, true), "writing its report");
+    }
+
+    #[test]
+    fn focus_line_names_the_step_and_what_is_paused() {
+        assert_eq!(
+            edit_focus_line(16, (9, 12), true),
+            "16 actions on todo step 9 of 12 without a file change · search paused until it edits"
+        );
+        assert_eq!(
+            edit_focus_line(32, (1, 1), false),
+            "32 actions on todo step 1 of 1 without a file change · only edits, shell and plan updates allowed"
+        );
+    }
+
+    #[test]
+    fn nudge_line_reports_repeats_and_where_the_model_was_sent() {
+        assert_eq!(
+            nudge_line(12, Some((2, 5)), 0, true),
+            "12 actions without new evidence or a file change · nudged back to todo step 2 of 5"
+        );
+        assert_eq!(
+            nudge_line(12, None, 1, true),
+            "12 actions without new evidence or a file change · 1 repeated read · no plan yet, nudged to write a todo list"
+        );
+        assert_eq!(
+            nudge_line(24, None, 3, false),
+            "24 actions without new evidence or a file change · 3 repeated reads · nudged to act on what it found"
+        );
+    }
+}

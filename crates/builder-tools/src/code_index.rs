@@ -65,10 +65,18 @@ pub fn capture(workspace: &Workspace, settings: &PipelineSettings) -> Result<Cod
             source_bytes.saturating_add(size) <= settings.code_index_max_bytes,
             "Code index exceeds configured total byte limit; previous generation remains active"
         );
+        // Index paths use `/` on every platform so they join with git history
+        // and read the same in model-facing output; `Path` accepts them back.
         let path = relative
-            .to_str()
-            .context("Non-UTF8 source path")?
-            .to_owned();
+            .components()
+            .map(|component| {
+                component
+                    .as_os_str()
+                    .to_str()
+                    .context("Non-UTF8 source path")
+            })
+            .collect::<Result<Vec<_>>>()?
+            .join("/");
         let mut bytes = Vec::with_capacity(size);
         std::fs::File::open(workspace.resolve(&path)?)?
             .take(settings.code_index_max_file_bytes as u64 + 1)
@@ -667,5 +675,112 @@ mod tests {
                 "{language}: {declarations:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod language_tests {
+    use super::{declared_symbol, language};
+    use std::path::Path;
+
+    #[test]
+    fn languages_follow_extensions_and_well_known_build_files() {
+        for (file, expected) in [
+            ("Dockerfile", "build"),
+            ("Makefile", "build"),
+            ("Justfile", "build"),
+            ("CMakeLists.txt", "build"),
+            ("a.rs", "rust"),
+            ("A.RS", "rust"),
+            ("a.pyi", "python"),
+            ("a.mjs", "javascript"),
+            ("a.tsx", "typescript"),
+            ("a.go", "go"),
+            ("a.java", "java"),
+            ("a.kts", "kotlin"),
+            ("a.h", "c"),
+            ("a.hpp", "cpp"),
+            ("a.cs", "csharp"),
+            ("a.rb", "ruby"),
+            ("a.php", "php"),
+            ("a.swift", "swift"),
+            ("a.zsh", "shell"),
+            ("a.sql", "sql"),
+            ("a.vue", "web"),
+            ("a.scss", "style"),
+            ("a.jsonc", "json"),
+            ("a.yml", "yaml"),
+            ("a.toml", "toml"),
+            ("a.mdx", "markdown"),
+            ("a.graphql", "schema"),
+        ] {
+            assert_eq!(language(Path::new(file)), Some(expected), "{file}");
+        }
+        assert_eq!(language(Path::new("a.bin")), None);
+        assert_eq!(language(Path::new("noext")), None);
+        assert_eq!(language(Path::new("")), None);
+    }
+
+    #[test]
+    fn declared_symbols_strip_visibility_and_follow_each_languages_keywords() {
+        let symbol = |language: &str, line: &str| declared_symbol(language, line);
+        assert_eq!(
+            symbol("rust", "pub(crate) fn parse_args(x: u8)"),
+            Some("parse_args".into())
+        );
+        assert_eq!(
+            symbol("rust", "    pub struct Config {"),
+            Some("Config".into())
+        );
+        assert_eq!(symbol("rust", "pub(super) enum Mode"), Some("Mode".into()));
+        assert_eq!(symbol("rust", "// fn commented()"), None);
+        assert_eq!(symbol("rust", "# fn commented()"), None);
+        assert_eq!(symbol("rust", "* fn in a doc block"), None);
+        assert_eq!(symbol("rust", "let x = 1;"), None);
+        assert_eq!(symbol("rust", "fn "), None);
+        assert_eq!(
+            symbol("python", "async def fetch_all():"),
+            Some("fetch_all".into())
+        );
+        assert_eq!(
+            symbol("python", "class Parser(Base):"),
+            Some("Parser".into())
+        );
+        assert_eq!(
+            symbol("typescript", "export default class App {"),
+            Some("App".into())
+        );
+        assert_eq!(
+            symbol("javascript", "export async function load()"),
+            Some("load".into())
+        );
+        assert_eq!(
+            symbol("typescript", "interface Props {"),
+            Some("Props".into())
+        );
+        assert_eq!(symbol("go", "func Start()"), Some("Start".into()));
+        assert_eq!(symbol("go", "type Server struct {"), Some("Server".into()));
+        assert_eq!(
+            symbol("java", "public class Builder {"),
+            Some("Builder".into())
+        );
+        assert_eq!(
+            symbol("csharp", "private interface IFoo"),
+            Some("IFoo".into())
+        );
+        assert_eq!(
+            symbol("swift", "protocol Drawable {"),
+            Some("Drawable".into())
+        );
+        assert_eq!(symbol("kotlin", "internal class Repo"), Some("Repo".into()));
+        assert_eq!(symbol("ruby", "module Billing"), Some("Billing".into()));
+        assert_eq!(symbol("php", "trait Loggable {"), Some("Loggable".into()));
+        assert_eq!(symbol("sql", "CREATE TABLE users ("), Some("users".into()));
+        assert_eq!(
+            symbol("sql", "create view active_users as"),
+            Some("active_users".into())
+        );
+        assert_eq!(symbol("markdown", "fn not_code()"), None);
+        assert_eq!(symbol("rust", "struct"), None);
     }
 }
