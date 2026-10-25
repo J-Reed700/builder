@@ -133,8 +133,26 @@ pub(crate) fn run(
             config.save(config_home)?;
             println!("Default profile: {}", ui::safe(name));
         }
+        ConfigCommand::Token { clear } => {
+            let (name, mut profile) = config.profile(cli.profile.as_deref())?;
+            if *clear {
+                profile.api_key = None;
+                println!("Cleared stored credential for {}", ui::safe(&name));
+            } else {
+                let token = read_secret("Paste token (input hidden), then Enter: ")?;
+                ensure!(!token.is_empty(), "No token provided; profile unchanged");
+                profile.api_key = Some(config::Secret::Literal(token));
+                // The stored token is the override; an env reference would conflict.
+                profile.api_key_env = None;
+                println!("Saved credential override for {}", ui::safe(&name));
+            }
+            profile.validate()?;
+            config.profiles.insert(name, profile);
+            config.save(config_home)?;
+        }
         ConfigCommand::Add {
             name,
+            api,
             base_url,
             model,
             api_key_env,
@@ -144,8 +162,17 @@ pub(crate) fn run(
             max_output_tokens,
         } => {
             ensure!(!name.trim().is_empty(), "Profile name cannot be empty");
+            let api: config::Api = (*api).into();
+            let base_url = match (base_url, api) {
+                (Some(url), _) => url.clone(),
+                (None, config::Api::Anthropic) => config::ANTHROPIC_BASE_URL.into(),
+                (None, config::Api::OpenAi) => {
+                    anyhow::bail!("--base-url is required for OpenAI-compatible profiles")
+                }
+            };
             let profile = Profile {
-                base_url: base_url.clone(),
+                api,
+                base_url,
                 model: model.clone(),
                 api_key_env: api_key_env.clone(),
                 stream: !no_stream,
@@ -162,3 +189,46 @@ pub(crate) fn run(
     }
     Ok(())
 }
+
+/// Reads one line from stdin without echo when it is a terminal; piped input
+/// (`pbpaste | builder config token`) is read as-is.
+fn read_secret(prompt: &str) -> Result<String> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    if stdin.is_terminal() {
+        eprint!("{prompt}");
+        std::io::stderr().flush()?;
+        let restore = disable_echo();
+        let result = stdin.lock().read_line(&mut line);
+        if restore {
+            enable_echo();
+        }
+        eprintln!();
+        result?;
+    } else {
+        stdin.lock().read_line(&mut line)?;
+    }
+    Ok(line.trim().to_owned())
+}
+#[cfg(unix)]
+fn disable_echo() -> bool {
+    std::process::Command::new("stty")
+        .arg("-echo")
+        .stdin(std::process::Stdio::inherit())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+#[cfg(unix)]
+fn enable_echo() {
+    let _ = std::process::Command::new("stty")
+        .arg("echo")
+        .stdin(std::process::Stdio::inherit())
+        .status();
+}
+#[cfg(not(unix))]
+fn disable_echo() -> bool {
+    false
+}
+#[cfg(not(unix))]
+fn enable_echo() {}

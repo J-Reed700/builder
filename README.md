@@ -22,7 +22,7 @@
 
 | Local-first | Durable by design | Model-agnostic |
 | :--- | :--- | :--- |
-| Code, tools, transcripts, memory, and credentials stay on the host running Builder. | Pause, retry, rewind, resume, and compact context without throwing away the original history. | Connect Ollama, LM Studio, llama.cpp, vLLM, or another OpenAI-compatible endpoint. |
+| Code, tools, transcripts, memory, and credentials stay on the host running Builder. | Pause, retry, rewind, resume, and compact context without throwing away the original history. | Connect Ollama, LM Studio, llama.cpp, vLLM, another OpenAI-compatible endpoint, or Claude directly with an Anthropic API key or Pro/Max OAuth token. |
 
 Builder can inspect a repository, edit files, run approved commands, remember
 useful context, and recover cleanly when a model or connection fails. Use it in

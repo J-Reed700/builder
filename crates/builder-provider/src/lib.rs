@@ -1,5 +1,7 @@
-//! Provider boundary and OpenAI-compatible transport. No UI or filesystem tools.
+//! Provider boundary and OpenAI-compatible / Anthropic transport. No UI or filesystem tools.
+mod anthropic;
 mod openai;
+pub use anthropic::TOKEN_ENV as ANTHROPIC_TOKEN_ENV;
 mod sse;
 use anyhow::Result;
 use builder_core::protocol::Message;

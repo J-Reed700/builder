@@ -1,5 +1,6 @@
-use crate::{Activity, Event, OutputLimit, Provider, SseDecoder};
+use crate::{Activity, Event, OutputLimit, Provider, SseDecoder, anthropic};
 use anyhow::{Context, Result, bail, ensure};
+use builder_core::config::Api;
 use builder_core::protocol::Role;
 use builder_core::{
     config::Profile,
@@ -24,6 +25,8 @@ pub struct OpenAiCompatible {
     /// Derived requests (memory extraction) that must not spend their small
     /// output budget on hidden reasoning.
     suppress_thinking: bool,
+    /// Anthropic profile authenticated with a Claude subscription OAuth token.
+    oauth: bool,
 }
 
 #[derive(Debug)]
@@ -43,14 +46,14 @@ impl std::fmt::Display for MissingResponse {
 impl std::error::Error for MissingResponse {}
 
 #[derive(Debug)]
-struct Failure {
+pub(crate) struct Failure {
     reason: String,
     retry: bool,
     retry_after: Option<u64>,
-    output_limit: bool,
+    pub(crate) output_limit: bool,
 }
 impl Failure {
-    fn validation(error: anyhow::Error) -> Self {
+    pub(crate) fn validation(error: anyhow::Error) -> Self {
         if error.is::<MissingResponse>() {
             Self::transient(error.to_string())
         } else {
@@ -58,13 +61,13 @@ impl Failure {
         }
     }
 
-    fn finish(error: anyhow::Error) -> Self {
+    pub(crate) fn finish(error: anyhow::Error) -> Self {
         Self {
             output_limit: error.is::<OutputLimit>(),
             ..Self::permanent(error.to_string())
         }
     }
-    fn transient(reason: impl Into<String>) -> Self {
+    pub(crate) fn transient(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
             retry: true,
@@ -72,7 +75,7 @@ impl Failure {
             output_limit: false,
         }
     }
-    fn permanent(reason: impl Into<String>) -> Self {
+    pub(crate) fn permanent(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
             retry: false,
@@ -110,8 +113,13 @@ impl OpenAiCompatible {
             value.set_sensitive(true);
             headers.insert(name, value);
         }
+        let oauth = if profile.api == Api::Anthropic {
+            anthropic::authorize(&profile, &mut headers)?
+        } else {
+            false
+        };
         // Explicit proxy auth wins, and a shadowed API-key env var need not exist.
-        if !headers.contains_key(reqwest::header::AUTHORIZATION) {
+        if profile.api == Api::OpenAi && !headers.contains_key(reqwest::header::AUTHORIZATION) {
             let key = match (&profile.api_key, &profile.api_key_env) {
                 (Some(secret), _) => Some(secret.resolve()?),
                 (_, Some(env)) => {
@@ -138,6 +146,7 @@ impl OpenAiCompatible {
             headers,
             props: tokio::sync::OnceCell::new(),
             suppress_thinking: false,
+            oauth,
         })
     }
     fn request(&self, method: reqwest::Method, suffix: &str) -> reqwest::RequestBuilder {
@@ -157,6 +166,10 @@ impl OpenAiCompatible {
     // Probe once per connection, including unsupported/error responses. Strip only
     // the compatibility API suffix so reverse-proxy path prefixes are preserved.
     async fn discover_props(&self) -> Option<ServerProps> {
+        // llama.cpp-only probe; never spend a request on hosted Claude.
+        if self.profile.api == Api::Anthropic {
+            return None;
+        }
         let base = self.profile.base_url.trim_end_matches('/');
         let root = base.strip_suffix("/v1").unwrap_or(base);
         let response = self
@@ -206,6 +219,10 @@ impl OpenAiCompatible {
     }
     /// A bounded, read-only embedding request. Never logs response bodies or credentials.
     pub async fn embed(&self, input: &str) -> Result<Vec<f32>> {
+        ensure!(
+            self.profile.api == Api::OpenAi,
+            "Anthropic profiles do not provide embeddings; use a local or OpenAI-compatible embedding profile"
+        );
         ensure!(
             !input.is_empty() && input.len() <= 8192,
             "Embedding input must be 1–8192 bytes"
@@ -258,9 +275,13 @@ impl OpenAiCompatible {
         body: &Value,
         emit: &mut dyn FnMut(Event),
     ) -> std::result::Result<Message, Failure> {
-        let request = self
-            .request(reqwest::Method::POST, "chat/completions")
-            .json(body);
+        let anthropic = self.profile.api == Api::Anthropic;
+        let suffix = if anthropic {
+            "messages"
+        } else {
+            "chat/completions"
+        };
+        let request = self.request(reqwest::Method::POST, suffix).json(body);
         let response = request
             .send()
             .await
@@ -275,12 +296,16 @@ impl OpenAiCompatible {
             // Do not persist response bodies: proxies can echo credentials.
             return Err(Failure {
                 reason: format!("Endpoint returned HTTP {status}"),
-                retry: matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504),
+                // 529: Anthropic overloaded.
+                retry: matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504 | 529),
                 retry_after,
                 output_limit: false,
             });
         }
         emit(Event::Activity(Activity::Connected));
+        if anthropic && self.profile.stream {
+            return anthropic::stream(response, emit).await;
+        }
         if !self.profile.stream {
             let mut stream = response.bytes_stream();
             let mut bytes = Vec::new();
@@ -293,6 +318,9 @@ impl OpenAiCompatible {
             }
             let value: Value = serde_json::from_slice(&bytes)
                 .map_err(|_| Failure::transient("Endpoint returned incomplete or invalid JSON"))?;
+            if anthropic {
+                return anthropic::parse(&value, emit);
+            }
             let choice = &value["choices"][0];
             check_finish(choice["finish_reason"].as_str()).map_err(Failure::finish)?;
             let mut message: Message = serde_json::from_value(choice["message"].clone())
@@ -464,6 +492,21 @@ impl OpenAiCompatible {
         json_mode: bool,
         emit: &mut dyn FnMut(Event),
     ) -> Result<Message> {
+        if self.profile.api == Api::Anthropic {
+            // JSON mode is an ordinary completion here; callers parse and
+            // validate the object themselves.
+            let _ = json_mode;
+            let (body, bytes) = anthropic::body(
+                &self.profile,
+                messages,
+                tools,
+                max_output_tokens,
+                self.oauth,
+                self.suppress_thinking,
+            )?;
+            emit(Event::Prompt { bytes });
+            return self.send_with_retries(&body, emit).await;
+        }
         // Some Jinja chat templates accept exactly one leading system message.
         // Preserve all policy text, order, and durable records; merge only the
         // consecutive leading system messages in the outbound representation.
@@ -541,6 +584,14 @@ impl OpenAiCompatible {
         emit(Event::Prompt {
             bytes: prompt_bytes,
         });
+        self.send_with_retries(&body, emit).await
+    }
+
+    async fn send_with_retries(
+        &self,
+        body: &Value,
+        emit: &mut dyn FnMut(Event),
+    ) -> Result<Message> {
         // Identical immutable request body on every attempt. Partial output never
         // enters the durable conversation and can never dispatch a tool.
         for number in 1..=self.profile.max_attempts {
@@ -548,7 +599,7 @@ impl OpenAiCompatible {
                 number,
                 maximum: self.profile.max_attempts,
             });
-            match self.attempt(&body, emit).await {
+            match self.attempt(body, emit).await {
                 Ok(message) => return Ok(message),
                 Err(failure) => {
                     if !failure.retry || number == self.profile.max_attempts {
@@ -606,7 +657,7 @@ fn reasoning_text(value: &Value) -> Option<&str> {
         .find_map(|key| value[*key].as_str().filter(|s| !s.trim().is_empty()))
 }
 
-fn validate(message: &Message, thinking: bool) -> Result<()> {
+pub(crate) fn validate(message: &Message, thinking: bool) -> Result<()> {
     ensure!(message.role == Role::Assistant, "Expected assistant role");
     ensure!(
         message

@@ -150,10 +150,16 @@ pub enum ConfigCommand {
     /// Print configuration with API keys and header values redacted.
     Show,
     /// Add or replace a profile. URL includes /v1 if required by your server.
+    /// `--api anthropic` talks to Claude directly (base URL defaults to
+    /// https://api.anthropic.com/v1).
     Add {
         name: String,
+        /// Wire protocol: openai (any OpenAI-compatible server) or anthropic (Claude).
+        #[arg(long, value_enum, default_value_t = ApiArg::Openai)]
+        api: ApiArg,
+        /// Required for openai profiles; defaults to Anthropic for anthropic profiles.
         #[arg(long)]
-        base_url: String,
+        base_url: Option<String>,
         #[arg(long)]
         model: String,
         #[arg(long)]
@@ -169,6 +175,29 @@ pub enum ConfigCommand {
     },
     /// Choose the default endpoint profile.
     Use { name: String },
+    /// Store a credential override on the selected profile (read from stdin,
+    /// never from argv). Accepts a Claude API key (sk-ant-api…) or a Claude
+    /// Pro/Max OAuth token (sk-ant-oat…, from `claude setup-token`). Overrides
+    /// ANTHROPIC_OAUTH_TOKEN / ANTHROPIC_API_KEY and any api_key_env.
+    Token {
+        /// Remove the stored override and fall back to environment variables.
+        #[arg(long)]
+        clear: bool,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum ApiArg {
+    Openai,
+    Anthropic,
+}
+impl From<ApiArg> for builder_core::config::Api {
+    fn from(value: ApiArg) -> Self {
+        match value {
+            ApiArg::Openai => Self::OpenAi,
+            ApiArg::Anthropic => Self::Anthropic,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
