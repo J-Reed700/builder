@@ -5,19 +5,20 @@ mod maintenance;
 pub(crate) use driver::drive;
 
 use self::{
-    compaction::{CompactionTask, start_compaction, wait_for_compaction},
+    compaction::{CompactionTask, settle, start_compaction, wait_for_compaction},
     driver::drive_foreground,
     maintenance::{MemoryTask, configured_index_update_mode, start_memory_task, stop_memory_task},
 };
 use crate::commands;
 use anyhow::{Context, Result, ensure};
+use base64::Engine;
 use builder::{
     agent::{Agent, ApprovalMode, estimate_history_tokens, pending},
     ui,
 };
 use builder_core::{
     config::{self, Config},
-    protocol::{Message, Role},
+    protocol::{Image, Message, Role},
     store::Store,
 };
 use builder_provider::OpenAiCompatible;
@@ -89,6 +90,7 @@ pub(crate) async fn run(
         }
     }
     let mut editor = builder::input::Composer::default();
+    editor.vision = agent.profile.vision;
     if let Some(draft) = store.composer_draft(&agent.session)? {
         editor.set_draft(&draft)?;
         eprintln!("  Previous message restored as a draft; Enter sends it.");
@@ -132,8 +134,8 @@ pub(crate) async fn run(
         } else {
             editor.read(&status)?
         };
-        let prompt = match input {
-            builder::input::Input::Submit(prompt) => prompt,
+        let message = match input {
+            builder::input::Input::Submit(message) => message,
             builder::input::Input::Exit => {
                 if let Some(task) = compaction_task.as_mut() {
                     task.cancel();
@@ -158,18 +160,31 @@ pub(crate) async fn run(
                 continue;
             }
         };
+        let prompt = message.content.clone().unwrap_or_default();
         let line = prompt.trim();
-        if line.is_empty() {
+        if line.is_empty() && message.images.is_empty() {
             continue;
         }
-        if compaction_task.is_some() {
-            println!("\n  Message queued until context compaction finishes.");
+        if let Some(task) = &compaction_task {
+            let queued = !task.finished();
+            if queued {
+                println!("\n  Message queued until context compaction finishes.");
+            }
+            settle(&compaction_task).await;
+            let outcome = compaction_task
+                .as_ref()
+                .map(CompactionTask::outcome)
+                .unwrap_or_default();
+            let sending = if queued {
+                "sending queued message"
+            } else {
+                "sending message"
+            };
             match wait_for_compaction(&mut compaction_task).await {
-                Ok(true) => println!("  Context compacted · sending queued message."),
-                Ok(false) => println!("  Compaction finished · sending queued message."),
+                Ok(_) => println!("  {outcome} · {sending}."),
                 Err(error) => {
                     report(&error);
-                    eprintln!("  Sending the queued message with the original context.");
+                    eprintln!("  Sending the message with the original context.");
                 }
             }
         }
@@ -550,35 +565,46 @@ pub(crate) async fn run(
             _ if line.starts_with("/attach ") && !line.contains('\n') => {
                 stop_memory_task(&mut memory_task).await;
                 let path = line.trim_start_matches("/attach ").trim();
-                match agent
-                    .workspace
-                    .execute(&builder_tools::Action::ReadFile {
-                        path: path.into(),
-                        start_line: None,
-                        end_line: None,
-                    })
-                    .await
-                {
-                    Ok(content) => {
-                        let text = format!(
-                            "Attached file: {path}\n\n{content}\n\nPlease acknowledge this file; I will send my task next."
-                        );
-                        match agent.submit(store, &text) {
-                            Ok(()) => {
-                                if let Err(error) = drive_foreground(
-                                    agent,
-                                    store,
-                                    true,
-                                    &home,
-                                    &config,
-                                    &mut memory_task,
-                                )
+                let message = match attach_image(path, &agent.workspace, agent.profile.vision) {
+                    Ok(Some(image)) => Message::text(
+                        Role::User,
+                        format!(
+                            "Attached image: {path}\n\nPlease acknowledge this image; I will send my task next."
+                        ),
+                    )
+                    .with_images(vec![image]),
+                    Ok(None) => match agent
+                        .workspace
+                        .execute(&builder_tools::Action::ReadFile {
+                            path: path.into(),
+                            start_line: None,
+                            end_line: None,
+                        })
+                        .await
+                    {
+                        Ok(content) => Message::text(
+                            Role::User,
+                            format!(
+                                "Attached file: {path}\n\n{content}\n\nPlease acknowledge this file; I will send my task next."
+                            ),
+                        ),
+                        Err(error) => {
+                            report(&error);
+                            continue;
+                        }
+                    },
+                    Err(error) => {
+                        report(&error);
+                        continue;
+                    }
+                };
+                match agent.submit_message(store, &message) {
+                    Ok(()) => {
+                        if let Err(error) =
+                            drive_foreground(agent, store, true, &home, &config, &mut memory_task)
                                 .await
-                                {
-                                    report(&error);
-                                }
-                            }
-                            Err(error) => report(&error),
+                        {
+                            report(&error);
                         }
                     }
                     Err(error) => report(&error),
@@ -589,7 +615,7 @@ pub(crate) async fn run(
             }
             _ => {
                 stop_memory_task(&mut memory_task).await;
-                match agent.submit(store, &prompt) {
+                match agent.submit_message(store, &message) {
                     Ok(()) => {
                         if let Err(error) =
                             drive_foreground(agent, store, true, &home, &config, &mut memory_task)
@@ -620,6 +646,52 @@ fn restored_answer(messages: &[Message]) -> Option<&str> {
         .last()
         .filter(|message| message.role == Role::Assistant && message.tool_calls.is_empty())
         .and_then(|message| message.content.as_deref())
+}
+/// The largest image /attach will base64 into a message, matching the
+/// clipboard paste limit.
+const MAX_ATTACH_IMAGE: usize = 4 * 1024 * 1024;
+
+/// Read a workspace image file for a vision-capable profile. None when the
+/// path is not an image file, so the caller falls back to a text attach.
+fn attach_image(
+    path: &str,
+    workspace: &builder_tools::Workspace,
+    vision: bool,
+) -> Result<Option<Image>> {
+    let extension = path
+        .rsplit_once('.')
+        .map_or("", |(_, ext)| ext)
+        .to_ascii_lowercase();
+    let mime = match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => return Ok(None),
+    };
+    ensure!(
+        vision,
+        "This profile cannot read images (no vision capability)"
+    );
+    let resolved = workspace.resolve(path)?;
+    // Bound the read itself, not just the result: a huge file must be
+    // rejected without loading it.
+    let file =
+        std::fs::File::open(&resolved).with_context(|| format!("Cannot read image {path}"))?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(file, MAX_ATTACH_IMAGE as u64 + 1),
+        &mut bytes,
+    )
+    .with_context(|| format!("Cannot read image {path}"))?;
+    ensure!(
+        bytes.len() <= MAX_ATTACH_IMAGE,
+        "Image exceeds the 4 MiB attach limit"
+    );
+    Ok(Some(Image {
+        mime: mime.into(),
+        data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+    }))
 }
 
 fn report(error: &anyhow::Error) {

@@ -102,8 +102,11 @@ impl<P: Provider> Agent<P> {
     }
 
     pub fn submit(&self, store: &mut Store, prompt: &str) -> Result<()> {
-        ensure!(!prompt.trim().is_empty(), "Prompt is empty");
-        let uncertain = store.interrupt_turn(&self.session, Some(prompt))?;
+        self.submit_message(store, &Message::text(Role::User, prompt))
+    }
+    /// Submit a full user message, e.g. one carrying a pasted image.
+    pub fn submit_message(&self, store: &mut Store, message: &Message) -> Result<()> {
+        let uncertain = store.interrupt_turn_with(&self.session, Some(message))?;
         ensure!(
             uncertain == 0,
             "Your new message is saved. An interrupted tool has an uncertain outcome; inspect the workspace, then /retry to continue with your new instruction."

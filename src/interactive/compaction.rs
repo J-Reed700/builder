@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use builder::{
-    agent::{Agent, AgentEvent},
-    ui,
+    agent::{Agent, AgentEvent, SummaryStage},
+    ui::token_count,
 };
 use builder_core::{config::Config, store::Store};
 use builder_provider::OpenAiCompatible;
@@ -26,7 +26,14 @@ impl CompactionTask {
             .unwrap_or_else(|_| "Compaction status unavailable".into())
     }
 
-    fn finished(&self) -> bool {
+    /// The final status as a transcript line, without the composer's
+    /// "enter a message" prompt.
+    pub(super) fn outcome(&self) -> String {
+        let status = self.status();
+        status.strip_suffix(QUEUE).unwrap_or(&status).to_owned()
+    }
+
+    pub(super) fn finished(&self) -> bool {
         self.state
             .result
             .lock()
@@ -96,7 +103,10 @@ pub(super) fn start_compaction(
                 };
                 let event_state = worker_state.clone();
                 let session_for_interrupt = compact_agent.session.clone();
-                let mut renderer = ui::Renderer::new(true);
+                // The composer owns the terminal while this runs: anything
+                // printed here (or a progress bar's ticker) would move the
+                // cursor under it and paint over the draft. Progress goes
+                // only to the status line the composer draws.
                 let result = runtime.block_on(async {
                     let mut emit = |event| {
                         if let Some(status) = compaction_event_status(&event)
@@ -104,7 +114,6 @@ pub(super) fn start_compaction(
                         {
                             *current = status;
                         }
-                        renderer.event(event);
                     };
                     let compact = compact_agent.compact(&mut store, &mut emit);
                     tokio::pin!(compact);
@@ -115,7 +124,6 @@ pub(super) fn start_compaction(
                         )),
                     }
                 });
-                renderer.finish();
                 if result.is_err() {
                     let _ = store.interrupt_attempts(&session_for_interrupt);
                 }
@@ -128,10 +136,16 @@ pub(super) fn start_compaction(
                 )),
             };
             let status = match &outcome {
-                Ok(true) => {
-                    "Context compacted · originals searchable · enter a message to queue it"
-                        .to_owned()
-                }
+                // Keep the sizes reported by the `Compacted` event.
+                Ok(true) => worker_state
+                    .status
+                    .lock()
+                    .ok()
+                    .filter(|status| status.starts_with("Context compacted"))
+                    .map_or_else(
+                        || format!("Context compacted · originals searchable{QUEUE}"),
+                        |status| status.clone(),
+                    ),
                 Ok(false) => "No older context to compact · enter a message to queue it".to_owned(),
                 Err(_) => {
                     "Compaction failed · original context intact · enter a message to queue it"
@@ -152,27 +166,47 @@ pub(super) fn start_compaction(
     })
 }
 
+const QUEUE: &str = " · enter a message to queue it";
+
 fn compaction_event_status(event: &AgentEvent) -> Option<String> {
     match event {
-        AgentEvent::Compacting { .. } => {
-            Some("Compacting context · enter a message to queue it".into())
-        }
-        AgentEvent::CompactionProgress { fraction, .. } => Some(format!(
-            "Compacting context · {:.0}% · enter a message to queue it",
-            (fraction.clamp(0.0, 1.0) * 100.0).round()
+        AgentEvent::Compacting { before, .. } => Some(format!(
+            "Compacting context · {}{QUEUE}",
+            token_count(*before)
         )),
-        AgentEvent::SummaryRecovery { .. } => {
-            Some("Tightening context summary · enter a message to queue it".into())
+        AgentEvent::CompactionProgress {
+            fraction,
+            fragment,
+            stage,
+        } => {
+            let part = if *fragment > 1 {
+                format!("part {fragment} · ")
+            } else {
+                String::new()
+            };
+            let stage = match stage {
+                SummaryStage::Waiting => "waiting for the model",
+                SummaryStage::Reading { .. } => "reading",
+                SummaryStage::Writing {
+                    summary_bytes: 0, ..
+                } => "thinking",
+                SummaryStage::Writing { .. } => "writing the summary",
+            };
+            Some(format!(
+                "Compacting context · {:.0}% · {part}{stage}{QUEUE}",
+                (fraction.clamp(0.0, 1.0) * 100.0).round()
+            ))
         }
-        AgentEvent::OutputRecovery { .. } => {
-            Some("Retrying context summary · enter a message to queue it".into())
-        }
+        AgentEvent::SummaryRecovery { .. } => Some(format!("Tightening context summary{QUEUE}")),
+        AgentEvent::OutputRecovery { .. } => Some(format!("Retrying context summary{QUEUE}")),
         AgentEvent::MemoryNotice(note) => {
             Some(format!("Compacting context · {}", one_line(note, 120)))
         }
-        AgentEvent::Compacted { .. } => {
-            Some("Context compacted · originals searchable · enter a message to queue it".into())
-        }
+        AgentEvent::Compacted { before, after, .. } => Some(format!(
+            "Context compacted · {} → {} · originals searchable{QUEUE}",
+            token_count(*before),
+            token_count(*after)
+        )),
         _ => None,
     }
 }
@@ -186,10 +220,15 @@ fn one_line(text: &str, limit: usize) -> String {
     text
 }
 
-pub(super) async fn wait_for_compaction(task: &mut Option<CompactionTask>) -> Result<bool> {
+/// Wait until the worker has stopped, leaving the task in place.
+pub(super) async fn settle(task: &Option<CompactionTask>) {
     while task.as_ref().is_some_and(|task| !task.finished()) {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
+}
+
+pub(super) async fn wait_for_compaction(task: &mut Option<CompactionTask>) -> Result<bool> {
+    settle(task).await;
     task.take()
         .context("Compaction task disappeared before it finished")?
         .finish()
@@ -289,9 +328,18 @@ mod tests {
             task.status()
         );
         settled(&task).await;
+        let status = task.status();
+        assert!(
+            status.starts_with("Context compacted · ")
+                && status.contains(" → ")
+                && status.ends_with(" · originals searchable · enter a message to queue it"),
+            "{status}"
+        );
         assert_eq!(
-            task.status(),
-            "Context compacted · originals searchable · enter a message to queue it"
+            task.outcome(),
+            status
+                .strip_suffix(" · enter a message to queue it")
+                .unwrap()
         );
         let mut slot = Some(task);
         assert!(wait_for_compaction(&mut slot).await.unwrap());
@@ -363,11 +411,11 @@ mod tests {
         let status = |event| compaction_event_status(&event);
         assert_eq!(
             status(AgentEvent::Compacting {
-                before: 1,
+                before: 12_345,
                 context_tokens: 2
             })
             .as_deref(),
-            Some("Compacting context · enter a message to queue it")
+            Some("Compacting context · 12.3k tokens · enter a message to queue it")
         );
         assert_eq!(
             status(AgentEvent::CompactionProgress {
@@ -376,7 +424,7 @@ mod tests {
                 stage: SummaryStage::Waiting
             })
             .as_deref(),
-            Some("Compacting context · 46% · enter a message to queue it")
+            Some("Compacting context · 46% · waiting for the model · enter a message to queue it")
         );
         assert_eq!(
             status(AgentEvent::CompactionProgress {
@@ -385,7 +433,26 @@ mod tests {
                 stage: SummaryStage::Waiting
             })
             .as_deref(),
-            Some("Compacting context · 100% · enter a message to queue it")
+            Some("Compacting context · 100% · waiting for the model · enter a message to queue it")
+        );
+        let writing = |summary_bytes| AgentEvent::CompactionProgress {
+            fraction: 0.5,
+            fragment: 2,
+            stage: SummaryStage::Writing {
+                summary_bytes,
+                reasoning_bytes: 10,
+                expected: 100,
+            },
+        };
+        assert_eq!(
+            status(writing(0)).as_deref(),
+            Some("Compacting context · 50% · part 2 · thinking · enter a message to queue it")
+        );
+        assert_eq!(
+            status(writing(5)).as_deref(),
+            Some(
+                "Compacting context · 50% · part 2 · writing the summary · enter a message to queue it"
+            )
         );
         assert_eq!(
             status(AgentEvent::SummaryRecovery { size: 2, limit: 1 }).as_deref(),
@@ -404,12 +471,14 @@ mod tests {
         assert!(long.len() <= "Compacting context · ".len() + 120 + '…'.len_utf8());
         assert_eq!(
             status(AgentEvent::Compacted {
-                before: 2,
-                after: 1,
+                before: 40_000,
+                after: 900,
                 context_tokens: 4
             })
             .as_deref(),
-            Some("Context compacted · originals searchable · enter a message to queue it")
+            Some(
+                "Context compacted · 40.0k tokens → 900 tokens · originals searchable · enter a message to queue it"
+            )
         );
         assert_eq!(
             status(AgentEvent::ToolStarted {

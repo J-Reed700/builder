@@ -197,7 +197,12 @@ fn convert_continue(mut config: Continue) -> Result<Imported> {
         profile.tools = profile.supports_chat()
             && model
                 .capabilities
+                .as_ref()
                 .is_none_or(|c| c.iter().any(|s| s == "tool_use"));
+        profile.vision = model
+            .capabilities
+            .as_ref()
+            .is_some_and(|c| c.iter().any(|s| s == "vision"));
         set_timeout(&mut profile, model.request_options.timeout)?;
         ensure!(!model.name.trim().is_empty(), "Model name cannot be empty");
         if preferred.is_none() && profile.supports_chat() {

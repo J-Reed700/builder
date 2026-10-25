@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail, ensure};
 use builder_core::protocol::Role;
 use builder_core::{
     config::Profile,
-    protocol::{Function, Message, ToolCall},
+    protocol::{Function, IMAGE_PROMPT_BYTES, Message, ToolCall},
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};
@@ -493,12 +493,37 @@ impl OpenAiCompatible {
         // for it; see `builder_core::config::ReasoningHistory`.
         let send_reasoning = self.profile.sends_reasoning();
         let mut wire = Vec::with_capacity(outbound.len());
+        // Prompt size is reported in estimated model terms: an image counts as
+        // its token budget, not as the length of its base64 payload.
+        let mut image_payload_bytes = 0usize;
+        let mut image_budget_bytes = 0usize;
         for message in &outbound {
             let mut value = serde_json::to_value(message)?;
             let object = value
                 .as_object_mut()
                 .expect("a message serializes as an object");
             object.remove("reasoning");
+            // `images` is transcript-only; the wire carries `wire_content`.
+            // A profile without vision (say, after switching models mid-session)
+            // gets a text note instead: most servers reject image parts outright,
+            // and that rejection would repeat on every retry of the history.
+            object.remove("images");
+            if !message.images.is_empty() {
+                let content = if self.profile.vision {
+                    image_payload_bytes += message
+                        .images
+                        .iter()
+                        .map(|image| image.data_url().len())
+                        .sum::<usize>();
+                    image_budget_bytes += message.images.len() * IMAGE_PROMPT_BYTES;
+                    message.wire_content()
+                } else {
+                    message
+                        .text_with_image_notes()
+                        .map_or(Value::Null, Value::String)
+                };
+                object.insert("content".into(), content);
+            }
             if send_reasoning
                 && message.role == Role::Assistant
                 && let Some(text) = message
@@ -510,7 +535,10 @@ impl OpenAiCompatible {
             }
             wire.push(value);
         }
-        let prompt_bytes = serde_json::to_vec(&wire)?.len();
+        let prompt_bytes = serde_json::to_vec(&wire)?
+            .len()
+            .saturating_sub(image_payload_bytes)
+            + image_budget_bytes;
         let mut body = json!({"model": self.profile.model, "messages": wire, "stream": self.profile.stream, "max_tokens": max_output_tokens});
         if self.profile.tools && !tools.is_empty() {
             body["tools"] = json!(tools);

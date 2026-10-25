@@ -8,14 +8,27 @@ impl Store {
     /// Close pending calls without executing them, and optionally commit a new
     /// instruction in the same transaction. Claimed calls remain uncertain.
     pub fn interrupt_turn(&mut self, id: &str, next: Option<&str>) -> Result<usize> {
-        if let Some(prompt) = next {
-            ensure!(!prompt.trim().is_empty(), "Prompt is empty");
+        let message = next.map(|prompt| Message::text(Role::User, prompt));
+        self.interrupt_turn_with(id, message.as_ref())
+    }
+    /// [`interrupt_turn`](Self::interrupt_turn) for a full message, so a
+    /// pasted image survives an interrupted turn.
+    pub fn interrupt_turn_with(&mut self, id: &str, next: Option<&Message>) -> Result<usize> {
+        if let Some(message) = next {
+            ensure!(
+                message.images.iter().any(|image| !image.data.is_empty())
+                    || message
+                        .content
+                        .as_deref()
+                        .is_some_and(|content| !content.trim().is_empty()),
+                "Prompt is empty"
+            );
         }
         let messages = self.messages(id)?;
         let tx = self.journal_transaction()?;
         let uncertain = close_pending(&tx, id, &messages)?;
-        if let Some(prompt) = next {
-            insert_message(&tx, id, &Message::text(Role::User, prompt))?;
+        if let Some(message) = next {
+            insert_message(&tx, id, message)?;
             tx.execute("DELETE FROM composer_drafts WHERE session_id=?1", [id])?;
         }
         touch(&tx, id)?;

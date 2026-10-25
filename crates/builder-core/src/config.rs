@@ -27,6 +27,9 @@ pub struct Profile {
     pub extra_body: BTreeMap<String, serde_json::Value>,
     pub stream: bool,
     pub tools: bool,
+    /// Whether the model can read images (vision/OCR). Pasted images are
+    /// attached to the prompt only when this is true.
+    pub vision: bool,
     pub context_tokens: usize,
     pub max_output_tokens: usize,
     pub auto_compact: bool,
@@ -53,6 +56,7 @@ impl Default for Profile {
             extra_body: BTreeMap::new(),
             stream: true,
             tools: true,
+            vision: false,
             context_tokens: 32768,
             max_output_tokens: 4096,
             auto_compact: true,

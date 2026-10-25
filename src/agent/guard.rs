@@ -85,10 +85,11 @@ pub(super) fn no_progress_streak(
 }
 
 /// Calls spent on the current todo item since the plan last moved: a file
-/// change, a completed item, or a new current item. Reads never reset it, so
-/// paging through new ranges cannot look like progress, and neither does a
-/// user message: "continue" asks for the same work, and a new direction shows
-/// up as a rewritten plan.
+/// change, a completed item, a new current item, or a new user instruction.
+/// Reads never reset it, so paging through new ranges cannot look like
+/// progress, and neither does a bare "continue", which asks for the same work.
+/// Anything else the user says may change what the step needs, and a model
+/// stripped of its tools cannot look at what the user just pointed to.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct StepFocus {
     pub(super) calls: usize,
@@ -110,6 +111,9 @@ pub(super) fn step_focus(
     let mut plan: Option<List> = None;
     let mut focus = StepFocus::default();
     for message in history {
+        if message.role == Role::User && !resumes(message) {
+            focus = StepFocus::default();
+        }
         for call in &message.tool_calls {
             calls.insert(call.id.as_str(), call);
         }
@@ -145,6 +149,21 @@ pub(super) fn step_focus(
         focus.calls += 1;
     }
     focus
+}
+
+/// A message that only asks to resume, as typed after an interruption.
+fn resumes(message: &Message) -> bool {
+    let text = message
+        .content
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches(['.', '!'])
+        .to_ascii_lowercase();
+    matches!(
+        text.as_str(),
+        "continue" | "go on" | "keep going" | "carry on" | "resume" | "proceed"
+    )
 }
 
 type InspectionEvidence = (String, String);
@@ -398,5 +417,43 @@ pub(super) fn blocked_outcome_name(outcome: ToolOutcome) -> &'static str {
         ToolOutcome::Denied => "denied",
         ToolOutcome::Uncertain => "uncertain",
         _ => "blocked",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use builder_core::protocol::Function;
+
+    #[test]
+    fn a_new_instruction_gives_a_stalled_step_its_tools_back() {
+        let mut history = vec![Message::text(Role::User, "fix the course cascade")];
+        let outcomes = std::collections::HashMap::new();
+        for id in ["r1", "r2", "r3"] {
+            let mut request = Message::text(Role::Assistant, "");
+            request.tool_calls.push(ToolCall {
+                id: id.into(),
+                kind: "function".into(),
+                function: Function {
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": "a.sql"}).to_string(),
+                },
+            });
+            history.push(request);
+            history.push(Message::tool(id, "create table".into()));
+        }
+        for resume in ["continue", "Continue.", " keep going! "] {
+            history.push(Message::text(Role::User, resume));
+            assert_eq!(
+                step_focus(&history, &outcomes).calls,
+                3,
+                "{resume:?} asks for the same work"
+            );
+        }
+        history.push(Message::text(
+            Role::User,
+            "hold on, I have existing data... make sure you're accounting for this",
+        ));
+        assert_eq!(step_focus(&history, &outcomes), StepFocus::default());
     }
 }
