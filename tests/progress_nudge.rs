@@ -150,6 +150,7 @@ impl Fixture {
             approval,
             // Above the final-rounds budget notice, which varies per round.
             max_rounds: Some(20),
+            calibration: Default::default(),
         };
         let mut events = Vec::new();
         agent
@@ -413,6 +414,7 @@ async fn a_run_has_no_round_budget_unless_one_is_requested() {
         session: f.session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: None,
+        calibration: Default::default(),
     };
     agent
         .run(&mut f.store, &mut |_| {}, &mut |_| true)

@@ -36,6 +36,7 @@ fn agent(server: Option<usize>, context_tokens: usize, max_output_tokens: usize)
         session: "test".into(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: None,
+        calibration: Default::default(),
     }
 }
 

@@ -241,6 +241,7 @@ async fn disabled_research_and_verification_cannot_execute_queued_calls_in_trust
             session: session.clone(),
             approval: ApprovalMode::Trust,
             max_rounds: Some(2),
+            calibration: Default::default(),
             memory: None,
         };
         agent
@@ -357,6 +358,7 @@ async fn completion_gate_and_review_can_be_disabled_without_bypassing_freshness(
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: Some(1),
+        calibration: Default::default(),
         memory: None,
     };
     agent

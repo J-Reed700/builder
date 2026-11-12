@@ -185,6 +185,7 @@ async fn progress_check_preserves_large_context_and_clears_after_edit() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(4),
+        calibration: Default::default(),
     };
     let mut notices = 0;
     agent
@@ -305,6 +306,7 @@ async fn twelve_distinct_successful_reads_keep_discovery_tools_available() {
         session,
         approval: ApprovalMode::Trust,
         max_rounds: Some(2),
+        calibration: Default::default(),
     };
     agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -377,6 +379,7 @@ async fn unique_shell_commands_consume_durable_liveness_budget_after_restart() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     let mut recoveries = 0;
     agent
@@ -445,6 +448,7 @@ async fn saved_unique_shell_batch_stops_at_durable_no_progress_execution_limit()
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -540,6 +544,7 @@ async fn ignored_progress_check_forces_a_tool_free_conclusion() {
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: Some(20),
+        calibration: Default::default(),
     };
     agent
         .run(&mut store, &mut |_| {}, &mut |_| true)
@@ -607,6 +612,7 @@ async fn tool_markup_at_progress_boundary_is_hidden_and_repaired_without_executi
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(4),
+        calibration: Default::default(),
     };
     let mut visible = String::new();
     agent
@@ -680,6 +686,7 @@ async fn repeated_shell_loop_is_answered_not_run_at_the_fourth_request_after_res
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "Answer without looping").unwrap();
     assert!(
@@ -769,6 +776,7 @@ async fn repeated_calls_inside_one_batch_run_to_the_limit_and_the_rest_are_answe
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(2),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "Do bounded work").unwrap();
     agent
@@ -830,6 +838,7 @@ async fn oversized_tool_batch_is_rejected_as_a_whole_before_dispatch() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(2),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "Do bounded work").unwrap();
     let error = agent
@@ -890,6 +899,7 @@ async fn saved_repeated_shell_is_answered_not_run_on_resume() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -955,6 +965,7 @@ async fn saved_oversized_batch_is_rejected_before_resume_dispatch() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1007,6 +1018,7 @@ async fn saved_duplicate_call_ids_are_rejected_before_resume_dispatch() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1055,6 +1067,7 @@ async fn saved_empty_call_id_is_rejected_before_resume_dispatch() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1103,6 +1116,7 @@ async fn saved_non_function_call_is_rejected_before_resume_dispatch() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1149,6 +1163,7 @@ async fn interrupted_claim_takes_precedence_over_saved_structure_validation() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1215,6 +1230,7 @@ async fn saved_call_cannot_reuse_an_earlier_generation_id_or_result() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1258,6 +1274,7 @@ async fn fresh_duplicate_call_ids_are_rejected_as_a_whole() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "Run bounded work").unwrap();
     let error = agent
@@ -1323,6 +1340,7 @@ async fn finished_tool_missing_from_legacy_projection_is_restored_without_reexec
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     let mut tool_starts = 0;
     agent
@@ -1402,6 +1420,7 @@ async fn uncertain_finished_projection_is_restored_then_pauses_without_dispatch(
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1481,6 +1500,7 @@ async fn completed_legacy_oversized_batch_can_resume_to_final_without_reexecutio
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     let mut tool_starts = 0;
     agent
@@ -1545,6 +1565,7 @@ async fn interrupted_claim_takes_precedence_over_saved_repetition_guard() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1613,6 +1634,7 @@ async fn uncertain_shell_cannot_be_replayed_with_a_new_id_or_timeout_on_retry() 
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     let first_error = agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1682,6 +1704,7 @@ async fn denied_shell_cannot_be_replayed_under_a_new_call_id() {
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "Run the command").unwrap();
     agent
@@ -1753,6 +1776,7 @@ async fn giant_read_returns_a_bounded_opening_then_a_targeted_read() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(4),
+        calibration: Default::default(),
     };
     agent
         .submit(&mut store, "Inspect the relevant function")
@@ -1796,6 +1820,7 @@ async fn read_inventory_survives_repeated_compaction_and_restart_even_if_model_f
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(4),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "Implement the change").unwrap();
     for (id, path, result) in [
@@ -2044,6 +2069,7 @@ async fn interrupted_tool_is_not_reexecuted_on_resume() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(5),
+        calibration: Default::default(),
     };
     let error = agent
         .run(&mut store, &mut |_| {}, &mut |_| true)
@@ -2094,6 +2120,7 @@ async fn completed_tool_is_not_repeated_when_next_generation_fails() {
         // Stay outside the last-five-round notice: a new run refreshes that
         // ephemeral budget, while the conversation and retry body stay intact.
         max_rounds: Some(10),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "write the file").unwrap();
     assert!(
@@ -2144,6 +2171,7 @@ async fn context_overflow_preserves_every_message_without_contacting_endpoint() 
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: Some(2),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, &"x".repeat(10_000)).unwrap();
     assert!(
@@ -2186,6 +2214,7 @@ async fn read_only_denies_model_mutations_and_records_denial() {
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "write").unwrap();
     agent
@@ -2230,6 +2259,7 @@ async fn cancelled_generation_leaves_durable_pending_turn() {
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "keep this request").unwrap();
     assert!(
@@ -2488,6 +2518,7 @@ async fn follow_up_after_interruption_cancels_queued_tools_and_uses_new_instruct
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(5),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "Implement the change").unwrap();
     store.append(&session, &tool_message()).unwrap();
@@ -2535,6 +2566,7 @@ async fn steering_persists_new_prompt_but_halts_for_uncertain_execution_even_in_
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(5),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "write").unwrap();
     store.append(&session, &tool_message()).unwrap();
@@ -2595,6 +2627,7 @@ async fn rewind_excludes_abandoned_turn_and_reserves_its_tool_ids() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(5),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "abandoned task").unwrap();
     store.append(&session, &tool_message()).unwrap();
@@ -2654,6 +2687,7 @@ async fn auto_compaction_preserves_tool_evidence_originals_and_latest_instructio
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(5),
+        calibration: Default::default(),
     };
     agent
         .submit(&mut store, "Implement only Arena changes; do not commit.")
@@ -2752,6 +2786,7 @@ async fn compaction_preserves_exact_user_contract_and_corrections_despite_bad_su
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     let request =
         r#"Set chance to 0.00625. Preserve current damage. Return only JSON: {"damage":number}."#;
@@ -2827,6 +2862,7 @@ async fn failed_compaction_never_changes_context_or_dispatches_summary_tools() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(5),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "old goal").unwrap();
     store
@@ -2890,6 +2926,7 @@ async fn oversized_history_is_summarized_in_bounded_fragments_without_losing_byt
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "original goal").unwrap();
     let evidence = Message::text(Role::Assistant, "source 🦀\n".repeat(9000));
@@ -2961,6 +2998,7 @@ async fn output_limit_recovery_is_bounded_and_never_executes_partial_tool_calls(
             session: session.clone(),
             approval: ApprovalMode::Trust,
             max_rounds: Some(8),
+            calibration: Default::default(),
         };
         agent.submit(&mut store, "write").unwrap();
         let result = agent
@@ -3010,6 +3048,7 @@ async fn cancelled_compaction_keeps_active_context_unchanged() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(5),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "task").unwrap();
     store
@@ -3050,6 +3089,7 @@ async fn compaction_retains_denied_actions_verbatim_even_if_summary_omits_them()
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(5),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "task").unwrap();
     store.append(&session, &tool_message()).unwrap();
@@ -3119,6 +3159,7 @@ async fn compaction_output_limit_retries_once_then_continues_or_preserves_origin
             session: session.clone(),
             approval: ApprovalMode::Trust,
             max_rounds: Some(5),
+            calibration: Default::default(),
         };
         agent.submit(&mut store, "Inspect source").unwrap();
         store
@@ -3215,6 +3256,7 @@ async fn compaction_sizes_only_the_handoff_that_will_be_kept() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(5),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "Old request").unwrap();
     store
@@ -3270,6 +3312,7 @@ async fn larger_compaction_generation_budget_does_not_allow_an_oversized_handoff
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(5),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "Old request").unwrap();
     store
@@ -3319,6 +3362,7 @@ async fn compaction_shortens_from_original_evidence_and_can_recover_output_limit
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(5),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "Original goal").unwrap();
     store
@@ -3416,6 +3460,7 @@ async fn missing_response_retries_identical_input_and_commits_only_completed_ans
                 session: session.clone(),
                 approval: ApprovalMode::Trust,
                 max_rounds: Some(4),
+                calibration: Default::default(),
             };
             agent.submit(&mut store, "answer this").unwrap();
             let before = store.messages(&session).unwrap().len();
@@ -3486,6 +3531,7 @@ async fn empty_and_reasoning_only_responses_preserve_pending_turn_after_configur
                 session: session.clone(),
                 approval: ApprovalMode::Trust,
                 max_rounds: Some(4),
+                calibration: Default::default(),
             };
             agent.submit(&mut store, "make a change").unwrap();
             let before = serde_json::to_value(store.messages(&session).unwrap()).unwrap();
@@ -3548,6 +3594,7 @@ async fn failed_model_request_during_progress_recovery_preserves_full_context() 
             session: session.clone(),
             approval: ApprovalMode::Trust,
             max_rounds: Some(4),
+            calibration: Default::default(),
         };
         assert!(
             agent
@@ -3594,6 +3641,7 @@ async fn recovery_resolves_queued_batch_and_retains_denials_without_granting_per
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: Some(5),
+        calibration: Default::default(),
     };
     agent
         .run(&mut store, &mut |_| {}, &mut |_| panic!("read-only policy"))
@@ -3682,6 +3730,7 @@ async fn recovery_restricts_broad_discovery_and_answers_unknown_tools() {
             session: session.clone(),
             approval: ApprovalMode::Trust,
             max_rounds: Some(16),
+            calibration: Default::default(),
         };
         let result = agent.run(&mut store, &mut |_| {}, &mut |_| true).await;
         let requests = server.mock.requests.lock().unwrap();
@@ -3800,6 +3849,7 @@ async fn invalid_research_loop_keeps_recovery_guidance_until_the_model_recovers(
             session: session.clone(),
             approval: ApprovalMode::ReadOnly,
             max_rounds: Some(12),
+            calibration: Default::default(),
         };
         let result = agent
             .run(&mut store, &mut |_| {}, &mut |_| {
@@ -3848,6 +3898,7 @@ async fn research_results_expose_the_durable_id_for_followup_evidence() {
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "Inspect the contract").unwrap();
     agent
@@ -3967,6 +4018,7 @@ async fn successful_memory_loop_recovers_or_concludes_with_originals_retained() 
             session: session.clone(),
             approval: ApprovalMode::ReadOnly,
             max_rounds: Some(20),
+            calibration: Default::default(),
         };
         agent
             .run(&mut store, &mut |_| {}, &mut |_| {
@@ -4055,6 +4107,7 @@ async fn recorded_outcomes_distinguish_real_edits_noops_and_execution_errors() {
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(4),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "Write the file").unwrap();
     agent
@@ -4094,6 +4147,7 @@ async fn productive_work_passes_twenty_rounds_and_budget_pause_resumes_pending_c
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(21),
+        calibration: Default::default(),
     };
     agent
         .submit(&mut store, "Perform the requested writes and verify.")
@@ -4241,6 +4295,7 @@ async fn reported_prompt_processing_becomes_progress_and_drives_the_summary_bar(
         session: session.clone(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(1),
+        calibration: Default::default(),
     };
     let mut fractions = Vec::new();
     let mut compacted = false;
@@ -4268,4 +4323,136 @@ async fn reported_prompt_processing_becomes_progress_and_drives_the_summary_bar(
                 .last()
                 .is_some_and(|last| *last > 0.6 && *last < 1.0)
     );
+}
+
+/// A streamed text reply followed by the usage chunk servers send last when
+/// asked with `stream_options.include_usage`.
+fn text_reply_with_usage(text: &str, prompt_tokens: u64) -> (StatusCode, String) {
+    let finished = json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+    let usage = json!({"choices":[],"usage":{"prompt_tokens":prompt_tokens,"completion_tokens":1}});
+    (
+        StatusCode::OK,
+        format!(
+            "{}data: {finished}\n\ndata: {usage}\n\ndata: [DONE]\n\n",
+            delta(json!({ "content": text }))
+        ),
+    )
+}
+
+#[tokio::test]
+async fn reported_prompt_usage_keeps_a_half_full_window_from_compacting() {
+    let server = server(vec![
+        text_reply_with_usage("noted", 7_000),
+        text_reply("done"),
+    ])
+    .await;
+    let mut profile = server.profile.clone();
+    profile.tools = false;
+    profile.pipeline.code_index = false;
+    profile.context_tokens = 20_000;
+    profile.max_output_tokens = 1_000;
+    profile.compact_at_percent = 75;
+    let threshold = 15_000;
+    let home = tempfile::tempdir().unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    let session = store
+        .create("calibrated", "local", home.path(), "system")
+        .unwrap();
+    let agent = Agent {
+        memory: None,
+        provider: Endpoint::new(profile.clone()).unwrap(),
+        profile,
+        workspace: Workspace::new(home.path()).unwrap(),
+        session: session.clone(),
+        approval: ApprovalMode::Trust,
+        max_rounds: Some(2),
+        calibration: Default::default(),
+    };
+    let background = "a".repeat(26_000);
+    agent.submit(&mut store, &background).unwrap();
+    let mut compactions = 0;
+    let mut count = |event: builder::agent::AgentEvent| {
+        if matches!(event, builder::agent::AgentEvent::AutoCompact { .. }) {
+            compactions += 1;
+        }
+    };
+    agent
+        .run(&mut store, &mut count, &mut |_| true)
+        .await
+        .unwrap();
+    // The next turn crosses the threshold by the raw byte estimate alone...
+    agent.submit(&mut store, &"b".repeat(4_000)).unwrap();
+    let raw = builder::agent::estimate_tokens(&store.messages(&session).unwrap());
+    assert!(raw + 1_000 >= threshold, "raw estimate {raw}");
+    // ...but the server counted the first request at about half its estimate,
+    // so the window is far from full and the conversation is sent whole.
+    agent
+        .run(&mut store, &mut count, &mut |_| true)
+        .await
+        .unwrap();
+    assert_eq!(compactions, 0);
+    let requests = server.mock.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "no summary request");
+    assert_eq!(requests[0]["stream_options"]["include_usage"], true);
+    assert!(
+        requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["content"] == background.as_str())
+    );
+}
+
+#[tokio::test]
+async fn output_reserve_returns_to_the_profile_budget_after_each_recovered_response() {
+    let cut_off = format!(
+        "{}{}",
+        delta(json!({"content":"partial"})),
+        finish("length")
+    );
+    let read = format!(
+        "{}{}",
+        delta(
+            json!({"tool_calls":[{"index":0,"id":"look","type":"function",
+            "function":{"name":"read_file","arguments":"{\"path\":\"notes.txt\"}"}}]})
+        ),
+        finish("tool_calls")
+    );
+    let server = server(vec![
+        (StatusCode::OK, cut_off.clone()),
+        (StatusCode::OK, read),
+        (StatusCode::OK, cut_off),
+        text_reply("Done"),
+    ])
+    .await;
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("notes.txt"), "a note").unwrap();
+    let mut store = Store::open(home.path()).unwrap();
+    let session = store
+        .create("reserve", "local", home.path(), "system")
+        .unwrap();
+    let agent = Agent {
+        memory: None,
+        provider: Endpoint::new(server.profile.clone()).unwrap(),
+        profile: server.profile.clone(),
+        workspace: Workspace::new(home.path()).unwrap(),
+        session: session.clone(),
+        approval: ApprovalMode::Trust,
+        max_rounds: Some(8),
+        calibration: Default::default(),
+    };
+    agent.submit(&mut store, "read the notes").unwrap();
+    agent
+        .run(&mut store, &mut |_| {}, &mut |_| true)
+        .await
+        .unwrap();
+    let budget = server.profile.max_output_tokens as u64;
+    let requests = server.mock.requests.lock().unwrap();
+    let budgets: Vec<_> = requests
+        .iter()
+        .map(|r| r["max_tokens"].as_u64().unwrap())
+        .collect();
+    // Each cut-off response gets one larger retry; the round after a
+    // recovered response is back at the profile's budget.
+    assert_eq!(budgets, [budget, budget * 2, budget, budget * 2]);
 }

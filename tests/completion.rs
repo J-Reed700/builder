@@ -155,6 +155,7 @@ async fn a_real_timeout_blocks_identical_side_effects_under_a_new_call_id() {
         session: session.clone(),
         approval: builder::agent::ApprovalMode::Trust,
         max_rounds: Some(3),
+        calibration: Default::default(),
     };
     agent.submit(&mut store, "run the check").unwrap();
     // The guard answers the retry instead of ending the run, so the run goes

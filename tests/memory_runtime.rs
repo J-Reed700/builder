@@ -339,6 +339,7 @@ async fn memory_is_loaded_automatically_and_new_user_correction_supersedes_old_t
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: Some(2),
+        calibration: Default::default(),
         memory: Some(memory),
     };
     agent
@@ -385,6 +386,7 @@ async fn eligible_memory_maintenance_never_delays_the_foreground_answer() {
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: Some(1),
+        calibration: Default::default(),
     };
     agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -446,6 +448,7 @@ async fn memory_forgetting_requires_approval_and_uncertain_calls_are_not_replaye
             session: session.clone(),
             approval: ApprovalMode::ReadOnly,
             max_rounds: Some(1),
+            calibration: Default::default(),
         };
         assert!(
             agent
@@ -721,6 +724,7 @@ async fn ineligible_batches_do_not_call_extractor_and_finals_do_not_run_maintena
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: Some(2),
+        calibration: Default::default(),
     };
     agent
         .run(&mut store, &mut |_| {}, &mut |_| false)
@@ -1072,6 +1076,7 @@ async fn indexed_navigation_is_supplied_to_the_agent_without_memory_or_discovery
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: Some(2),
+        calibration: Default::default(),
         memory: None,
     };
     agent

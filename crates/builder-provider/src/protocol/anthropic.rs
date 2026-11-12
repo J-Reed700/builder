@@ -315,11 +315,28 @@ fn new_call(block: &Value) -> ToolCall {
     }
 }
 
+/// The whole prompt: `input_tokens` counts only the uncached part, so cache
+/// reads and writes are added back.
+fn prompt_tokens(usage: &Value) -> Option<u64> {
+    let total = [
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ]
+    .iter()
+    .filter_map(|key| usage[*key].as_u64())
+    .sum::<u64>();
+    (total > 0).then_some(total)
+}
+
 /// Parse a non-streaming Messages response.
 pub(super) fn parse(
     value: &Value,
     emit: &mut dyn FnMut(Event),
 ) -> std::result::Result<Message, Failure> {
+    if let Some(prompt_tokens) = prompt_tokens(&value["usage"]) {
+        emit(Event::Usage { prompt_tokens });
+    }
     let mut message = Message::text(Role::Assistant, "");
     let mut calls = BTreeMap::new();
     for (index, block) in value["content"]
@@ -388,6 +405,11 @@ pub(super) async fn stream(
                     } else {
                         Failure::permanent(reason)
                     });
+                }
+                Some("message_start") => {
+                    if let Some(prompt_tokens) = prompt_tokens(&value["message"]["usage"]) {
+                        emit(Event::Usage { prompt_tokens });
+                    }
                 }
                 Some("content_block_start") => {
                     let index = value["index"].as_u64().unwrap_or_default();
@@ -566,5 +588,20 @@ mod tests {
         assert_eq!(message.tool_calls[0].function.arguments, r#"{"path":"a"}"#);
         let limit = json!({"stop_reason":"max_tokens","content":[{"type":"text","text":"x"}]});
         assert!(parse(&limit, &mut |_| {}).unwrap_err().output_limit);
+    }
+
+    #[test]
+    fn usage_counts_cached_prompt_tokens_even_when_the_reply_is_cut_off() {
+        let value = json!({"stop_reason":"max_tokens","content":[{"type":"text","text":"x"}],
+            "usage":{"input_tokens":12,"cache_creation_input_tokens":300,
+                "cache_read_input_tokens":40000,"output_tokens":9}});
+        let mut usage = vec![];
+        let _ = parse(&value, &mut |event| {
+            if let Event::Usage { prompt_tokens } = event {
+                usage.push(prompt_tokens);
+            }
+        });
+        assert_eq!(usage, [40_312]);
+        assert_eq!(prompt_tokens(&json!({"output_tokens": 5})), None);
     }
 }

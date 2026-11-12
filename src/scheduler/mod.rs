@@ -130,6 +130,7 @@ async fn execute(
             Access::Trust => ApprovalMode::Trust,
         },
         max_rounds: None,
+        calibration: Default::default(),
     };
     agent.fit_context().await;
     agent.submit(store, &definition.prompt)?;

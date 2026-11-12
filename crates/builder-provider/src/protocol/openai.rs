@@ -83,6 +83,10 @@ pub(super) fn encode(
     }
     let prompt_bytes = serde_json::to_vec(&wire)?.len();
     let mut body = json!({"model": profile.model, "messages": wire, "stream": profile.stream, "max_tokens": options.max_output_tokens});
+    if profile.stream {
+        // Streams carry usage only on request; it calibrates the context budget.
+        body["stream_options"] = json!({"include_usage": true});
+    }
     if profile.tools && !tools.is_empty() {
         body["tools"] = json!(tools);
     }
@@ -116,6 +120,9 @@ pub(super) fn parse(
     value: &Value,
     emit: &mut dyn FnMut(Event),
 ) -> std::result::Result<Message, Failure> {
+    if let Some(prompt_tokens) = prompt_tokens(value) {
+        emit(Event::Usage { prompt_tokens });
+    }
     let choice = &value["choices"][0];
     check_finish(choice["finish_reason"].as_str()).map_err(Failure::finish)?;
     let mut message: Message = serde_json::from_value(choice["message"].clone())
@@ -145,6 +152,7 @@ pub(super) async fn stream(
     let mut received = 0usize;
     let mut thinking = false;
     let mut preparing_tools = false;
+    let mut usage = None;
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.map_err(|e| Failure::transient(e.without_url().to_string()))?;
         received += bytes.len();
@@ -165,6 +173,13 @@ pub(super) async fn stream(
                 .map_err(|e| Failure::permanent(format!("Invalid SSE JSON: {e}")))?;
             if value.get("error").is_some() {
                 return Err(Failure::transient("Endpoint returned an in-stream error"));
+            }
+            // Usually a final chunk with no choices; some servers repeat it.
+            if let Some(prompt_tokens) = prompt_tokens(&value)
+                && usage != Some(prompt_tokens)
+            {
+                usage = Some(prompt_tokens);
+                emit(Event::Usage { prompt_tokens });
             }
             let progress = &value["prompt_progress"];
             if let (Some(processed), Some(total)) =
@@ -265,8 +280,56 @@ fn assemble(
     validate(&message, thinking).map_err(Failure::validation)?;
     Ok(message)
 }
+/// `usage.prompt_tokens`, which includes any cached prefix.
+fn prompt_tokens(value: &Value) -> Option<u64> {
+    value["usage"]["prompt_tokens"]
+        .as_u64()
+        .filter(|&tokens| tokens > 0)
+}
 fn reasoning_text(value: &Value) -> Option<&str> {
     ["reasoning_content", "reasoning"]
         .iter()
         .find_map(|key| value[*key].as_str().filter(|s| !s.trim().is_empty()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options() -> Options {
+        Options {
+            max_output_tokens: 64,
+            json_mode: false,
+            suppress_thinking: false,
+            llama_cpp: false,
+        }
+    }
+
+    #[test]
+    fn only_streamed_requests_ask_for_usage() {
+        let messages = [Message::text(Role::User, "hi")];
+        let streamed = encode(&Profile::default(), &messages, &[], &options()).unwrap();
+        assert_eq!(streamed.body["stream_options"]["include_usage"], true);
+        let buffered = Profile {
+            stream: false,
+            ..Profile::default()
+        };
+        let buffered = encode(&buffered, &messages, &[], &options()).unwrap();
+        assert!(buffered.body.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn buffered_usage_is_reported_even_when_the_reply_is_cut_off() {
+        let value = json!({"choices":[{"message":{"role":"assistant","content":"x"},
+            "finish_reason":"length"}],"usage":{"prompt_tokens":51234,"completion_tokens":64}});
+        let mut usage = vec![];
+        let result = parse(&value, &mut |event| {
+            if let Event::Usage { prompt_tokens } = event {
+                usage.push(prompt_tokens);
+            }
+        });
+        assert!(result.unwrap_err().output_limit);
+        assert_eq!(usage, [51_234]);
+        assert_eq!(prompt_tokens(&json!({"usage":{"prompt_tokens":0}})), None);
+    }
 }

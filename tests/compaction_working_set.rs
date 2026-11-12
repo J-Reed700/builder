@@ -102,6 +102,7 @@ impl Fixture {
             session,
             approval: ApprovalMode::Trust,
             max_rounds: Some(10),
+            calibration: Default::default(),
         };
         Self { home, store, agent }
     }

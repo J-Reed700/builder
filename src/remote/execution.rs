@@ -416,6 +416,7 @@ async fn drive(
         memory: MemoryRuntime::from_config(&config)?,
         provider: Endpoint::new(profile.clone())?,
         max_rounds: shared.options.max_rounds,
+        calibration: Default::default(),
         profile,
         workspace: Workspace::new(&workspace)?,
         session: session.clone(),

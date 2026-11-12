@@ -201,6 +201,7 @@ async fn app(cli: Cli) -> Result<()> {
         session,
         approval: cli.approval_mode(),
         max_rounds,
+        calibration: Default::default(),
     };
     if let Some(fit) = agent.fit_context().await {
         eprintln!(

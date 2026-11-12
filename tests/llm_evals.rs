@@ -544,6 +544,7 @@ async fn live_behavior_suite() -> Result<()> {
                 session: session.clone(),
                 approval: ApprovalMode::Ask,
                 max_rounds: Some(20),
+                calibration: Default::default(),
             };
             let started = Instant::now();
             let mut prompts = 0;
