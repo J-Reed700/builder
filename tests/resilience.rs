@@ -4404,7 +4404,7 @@ async fn reported_prompt_usage_keeps_a_half_full_window_from_compacting() {
 }
 
 #[tokio::test]
-async fn output_reserve_returns_to_the_profile_budget_after_each_recovered_response() {
+async fn a_larger_output_allowance_sticks_and_can_grow_once_per_response() {
     let cut_off = format!(
         "{}{}",
         delta(json!({"content":"partial"})),
@@ -4452,7 +4452,8 @@ async fn output_reserve_returns_to_the_profile_budget_after_each_recovered_respo
         .iter()
         .map(|r| r["max_tokens"].as_u64().unwrap())
         .collect();
-    // Each cut-off response gets one larger retry; the round after a
-    // recovered response is back at the profile's budget.
-    assert_eq!(budgets, [budget, budget * 2, budget, budget * 2]);
+    // Each cut-off response gets one larger retry, and the larger allowance
+    // stays: the next round starts there instead of paying for another
+    // discarded draft, and a further cut-off can double it again.
+    assert_eq!(budgets, [budget, budget * 2, budget * 2, budget * 4]);
 }

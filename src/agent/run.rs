@@ -363,10 +363,11 @@ impl<P: Provider> Agent<P> {
             }
             match result {
                 Ok(message) => {
-                    // The larger allowance was for the response that hit the
-                    // limit. Later rounds return to the profile's budget, so
-                    // the context reserve does not stay doubled for the run.
-                    output_budget = self.profile.max_output_tokens;
+                    // A larger allowance stays for the rest of the run: a model
+                    // that needed it once usually needs it again, and each
+                    // cut-off throws away a whole draft, which on a local
+                    // model is minutes of generation. The next response that
+                    // hits the limit may still ask for one more doubling.
                     recovered_output = false;
                     if force_conclusion
                         && (!message.tool_calls.is_empty()
