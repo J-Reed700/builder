@@ -79,6 +79,7 @@ fn agent(
         session: session.into(),
         approval: ApprovalMode::Trust,
         max_rounds: Some(4),
+        calibration: Default::default(),
     }
 }
 

@@ -93,7 +93,10 @@ impl<P: Provider> Agent<P> {
             }
             // Room for the answer and its one larger retry.
             if budget_end == BudgetEnd::Report
-                && estimate_history_tokens(&messages, &self.profile) + 2 * output_budget
+                && self
+                    .calibration
+                    .tokens(estimate_history_tokens(&messages, &self.profile))
+                    + 2 * output_budget
                     >= self.profile.context_tokens * usize::from(self.profile.compact_at_percent)
                         / 100
             {
@@ -336,9 +339,13 @@ impl<P: Provider> Agent<P> {
             // terminal even though the response is subsequently rejected.
             // Reasoning is never printed, and it is the only sign of life while
             // a slow model works on its conclusion.
+            let mut reported = None;
             let result = self
                 .provider
                 .complete_with_budget(&messages, &definitions, output_budget, &mut |event| {
+                    if let Event::Usage { prompt_tokens } = &event {
+                        reported = Some(*prompt_tokens);
+                    }
                     if force_conclusion {
                         match event {
                             Event::Delta(_) | Event::ToolProgress { .. } => {}
@@ -349,8 +356,19 @@ impl<P: Provider> Agent<P> {
                     }
                 })
                 .await;
+            // Even a response cut off at the output limit reports its prompt.
+            if let Some(tokens) = reported {
+                self.calibration
+                    .observe(estimate, usize::try_from(tokens).unwrap_or(usize::MAX));
+            }
             match result {
                 Ok(message) => {
+                    // A larger allowance stays for the rest of the run: a model
+                    // that needed it once usually needs it again, and each
+                    // cut-off throws away a whole draft, which on a local
+                    // model is minutes of generation. The next response that
+                    // hits the limit may still ask for one more doubling.
+                    recovered_output = false;
                     if force_conclusion
                         && (!message.tool_calls.is_empty()
                             || message
@@ -514,10 +532,11 @@ impl<P: Provider> Agent<P> {
                     store.finish_attempt(attempt, AttemptOutcome::Failed, &error.to_string())?;
                     // One bounded retry with more generation room. Partial
                     // text and tool calls from the failed attempt stay discarded.
-                    let larger = output_budget
-                        .saturating_mul(2)
-                        .min(32768)
-                        .min(self.profile.context_tokens.saturating_sub(estimate + 1024));
+                    let larger = output_budget.saturating_mul(2).min(32768).min(
+                        self.profile
+                            .context_tokens
+                            .saturating_sub(self.calibration.tokens(estimate) + 1024),
+                    );
                     if error.is::<OutputLimit>() && !recovered_output && larger > output_budget {
                         recovered_output = true;
                         output_budget = larger;

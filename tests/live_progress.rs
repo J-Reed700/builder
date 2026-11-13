@@ -62,6 +62,7 @@ async fn compacted_investigation_reaches_a_real_edit() -> anyhow::Result<()> {
         session: session.clone(),
         approval: ApprovalMode::Ask,
         max_rounds: Some(8),
+        calibration: Default::default(),
     };
     let mut calls = 0;
     let mut notices = 0;
@@ -145,6 +146,7 @@ async fn stalled_session_recovery_completes_run_with_multiple_edits() -> anyhow:
         session: session.clone(),
         approval: ApprovalMode::Ask,
         max_rounds: Some(40),
+        calibration: Default::default(),
     };
     let started = std::time::Instant::now();
     let result = tokio::time::timeout(

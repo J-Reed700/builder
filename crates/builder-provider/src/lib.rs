@@ -45,6 +45,11 @@ pub enum Event {
         processed: u64,
         total: u64,
     },
+    /// The prompt size the server counted for this request, cached prefix
+    /// included, when it reports usage. Never conversation content.
+    Usage {
+        prompt_tokens: u64,
+    },
     /// Tool-call arguments streamed so far in this response. A large edit can
     /// take minutes to generate; this is the only sign of life meanwhile.
     /// Never conversation content.

@@ -74,6 +74,7 @@ pub(super) fn start_compaction(
     let session = agent.session.clone();
     let approval = agent.approval;
     let max_rounds = agent.max_rounds;
+    let calibration = agent.calibration.clone();
     let worker = std::thread::Builder::new()
         .name("builder-compaction".into())
         .spawn(move || {
@@ -93,6 +94,7 @@ pub(super) fn start_compaction(
                     session,
                     approval,
                     max_rounds,
+                    calibration,
                 };
                 let event_state = worker_state.clone();
                 let session_for_interrupt = compact_agent.session.clone();
@@ -263,6 +265,7 @@ mod tests {
             session,
             approval: ApprovalMode::Trust,
             max_rounds: None,
+            calibration: Default::default(),
         }
     }
 

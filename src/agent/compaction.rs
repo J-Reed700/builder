@@ -433,7 +433,7 @@ impl<P: Provider> Agent<P> {
                 .cloned(),
         );
         emit(AgentEvent::Compacting {
-            before,
+            before: self.calibration.tokens(before),
             context_tokens: self.profile.context_tokens,
         });
         let protected_users = self.user_memory(store, &tail_users, emit).await?;
@@ -730,8 +730,8 @@ impl<P: Provider> Agent<P> {
         );
         store.checkpoint(&self.session, &original, &context)?;
         emit(AgentEvent::Compacted {
-            before,
-            after,
+            before: self.calibration.tokens(before),
+            after: self.calibration.tokens(after),
             context_tokens: self.profile.context_tokens,
         });
         Ok(true)

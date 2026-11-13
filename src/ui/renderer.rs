@@ -27,6 +27,10 @@ pub struct Renderer {
     tools: usize,
     reflow: stream::Reflow,
     prompt_tokens: usize,
+    /// Wire bytes of the latest request, and the server's tokens per byte
+    /// from the last request that reported usage.
+    prompt_bytes: usize,
+    tokens_per_byte: Option<f64>,
     model_activity: Option<ModelActivity>,
     /// Tools started and not yet finished; more than one means a parallel group.
     running: Vec<(String, String)>,
@@ -93,6 +97,8 @@ impl Renderer {
             tools: 0,
             reflow: stream::Reflow::default(),
             prompt_tokens: 0,
+            prompt_bytes: 0,
+            tokens_per_byte: None,
             model_activity: None,
             running: Vec::new(),
             subagents: std::collections::BTreeMap::new(),
@@ -416,8 +422,8 @@ impl Renderer {
             ),
         }
     }
-    /// The current request size, in the same estimated tokens the agent budgets
-    /// with. Silence during a long prompt is expected work, not a hang.
+    /// The current request size, calibrated by the server's last usage report
+    /// when there is one. Silence during a long prompt is expected work, not a hang.
     fn prompt_size(&self) -> String {
         match self.prompt_tokens {
             0 => "the conversation".to_owned(),
@@ -550,9 +556,24 @@ impl Renderer {
     }
     fn model_event(&mut self, event: Event) {
         match event {
-            // The estimator the agent budgets with, so the waiting states and
-            // the compaction notice quote the same number.
-            Event::Prompt { bytes } => self.prompt_tokens = bytes.div_ceil(2),
+            // The agent's conservative estimator until the server reports
+            // usage, then its measured density, so the waiting states and the
+            // compaction notice quote comparable numbers.
+            Event::Prompt { bytes } => {
+                self.prompt_bytes = bytes;
+                self.prompt_tokens = self.tokens_per_byte.map_or(bytes.div_ceil(2), |rate| {
+                    (bytes as f64 * rate).ceil() as usize
+                });
+            }
+            Event::Usage { prompt_tokens } => {
+                // Tool schemas count in the usage but not in the bytes, which
+                // inflates the rate for a short conversation; it never
+                // exceeds the estimator's two bytes per token.
+                if self.prompt_bytes > 0 {
+                    self.tokens_per_byte =
+                        Some((prompt_tokens as f64 / self.prompt_bytes as f64).min(0.5));
+                }
+            }
             Event::PromptProgress { processed, total } => {
                 self.record_model_activity();
                 if !self.compacting

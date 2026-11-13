@@ -196,6 +196,7 @@ impl Fixture {
             session: self.session.clone(),
             approval: ApprovalMode::Trust,
             max_rounds: Some(6),
+            calibration: Default::default(),
         }
     }
 

@@ -116,12 +116,22 @@ impl<P: Provider> Agent<P> {
                 .map_or(0, |m| estimate_tokens(std::slice::from_ref(m)));
         // The history as it will be sent, reasoning included when it is.
         let history = |messages: &[Message]| estimate_history_tokens(messages, &self.profile);
+        // The whole request as the server would count it: the raw estimate,
+        // anchored to the prompt size the server last reported.
+        let input = |messages: &[Message], schemas: usize| {
+            self.calibration.tokens(history(messages) + schemas)
+        };
         let threshold =
             self.profile.context_tokens * usize::from(self.profile.compact_at_percent) / 100;
-        if self.profile.auto_compact && history(&messages) + schemas + output_budget >= threshold {
+        let counted = input(&messages, schemas);
+        if self.profile.auto_compact && counted + output_budget >= threshold {
+            // Split the counted total in proportion to the raw terms.
+            let raw = history(&messages);
+            let conversation =
+                (counted as u128 * raw as u128 / (raw + schemas).max(1) as u128) as usize;
             emit(AgentEvent::AutoCompact {
-                messages: history(&messages),
-                overhead: schemas,
+                messages: conversation,
+                overhead: counted - conversation,
                 reserved: output_budget,
                 threshold,
                 context_tokens: self.profile.context_tokens,
@@ -129,22 +139,24 @@ impl<P: Provider> Agent<P> {
             self.compact(store, emit).await?;
             messages = store.messages(&self.session)?;
         }
-        if history(&messages) + schemas + output_budget > self.profile.context_tokens
+        if input(&messages, schemas) + output_budget > self.profile.context_tokens
             && let Some(packet) = code_packet.take()
         {
             schemas -= estimate_tokens(std::slice::from_ref(&packet));
             emit(AgentEvent::MemoryNotice("Automatic code-index reference omitted for this request to fit the configured context budget; the index and code_search tool remain available".into()));
         }
-        if history(&messages) + schemas + output_budget > self.profile.context_tokens
+        if input(&messages, schemas) + output_budget > self.profile.context_tokens
             && let Some(packet) = memory_packet.take()
         {
             schemas -= estimate_tokens(std::slice::from_ref(&packet));
             emit(AgentEvent::MemoryNotice("Memory reference omitted for this request to fit the context budget; stored notes retained".into()));
         }
+        // Raw, so the server's usage report for this request can anchor it.
         let estimate = history(&messages) + schemas;
+        let counted = self.calibration.tokens(estimate);
         ensure!(
-            estimate + output_budget <= self.profile.context_tokens,
-            "Context budget reached (estimated {estimate} input + {} output / {}). History is intact. Use /compact, reduce the latest prompt, or verify context_tokens against the server's actual capacity.",
+            counted + output_budget <= self.profile.context_tokens,
+            "Context budget reached (estimated {counted} input + {} output / {}). History is intact. Use /compact, reduce the latest prompt, or verify context_tokens against the server's actual capacity.",
             output_budget,
             self.profile.context_tokens
         );

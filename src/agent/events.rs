@@ -6,7 +6,9 @@ pub enum AgentEvent {
     Model(Event),
     /// Why an automatic compaction was triggered. The terms are reported
     /// separately because the schema and output reservations, not the
-    /// conversation alone, are usually what crosses the threshold.
+    /// conversation alone, are usually what crosses the threshold. Sizes here
+    /// and in `Compacting`/`Compacted` are calibrated by the server's last
+    /// usage report when there is one (see `TokenCalibration`).
     AutoCompact {
         messages: usize,
         overhead: usize,

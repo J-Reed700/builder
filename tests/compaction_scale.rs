@@ -117,6 +117,7 @@ async fn many_user_turns_keep_active_context_bounded() -> Result<()> {
             session: session.clone(),
             approval: ApprovalMode::ReadOnly,
             max_rounds: Some(1),
+            calibration: Default::default(),
         };
         let result = agent.compact(&mut store, &mut |_| {}).await;
         let after = store.messages(&session)?;
@@ -169,6 +170,7 @@ async fn live_many_turns_preserve_early_middle_and_recent_findings() -> Result<(
         session: session.clone(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: Some(2),
+        calibration: Default::default(),
     };
     let started = std::time::Instant::now();
     let compact = agent.compact(&mut store, &mut |_| {}).await;

@@ -386,6 +386,7 @@ async fn denial_and_uncertain_claim_never_execute_research_commands() {
             session: f.session.clone(),
             approval: ApprovalMode::ReadOnly,
             max_rounds: Some(1),
+            calibration: Default::default(),
             memory: None,
         };
         assert!(
@@ -642,6 +643,7 @@ async fn acceptance_requires_current_checks_and_independent_review_and_rejects_f
         session: f.session.clone(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: Some(4),
+        calibration: Default::default(),
         memory: None,
     };
     assert!(
@@ -843,6 +845,7 @@ async fn memory_disabled_also_disables_procedural_learning_and_automatic_recall(
         session: f.session.clone(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: Some(3),
+        calibration: Default::default(),
         memory: None,
     };
     agent
@@ -1042,6 +1045,7 @@ async fn configured_candidate_and_completion_retry_limits_use_durable_state() {
         session: f.session.clone(),
         approval: ApprovalMode::ReadOnly,
         max_rounds: Some(10),
+        calibration: Default::default(),
         memory: None,
     };
     let error = agent

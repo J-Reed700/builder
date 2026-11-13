@@ -368,6 +368,7 @@ mod tests {
             session,
             approval: ApprovalMode::ReadOnly,
             max_rounds: Some(2),
+            calibration: Default::default(),
         };
         let mut task = start_memory_task(&agent, home.path(), &config);
         assert_eq!(

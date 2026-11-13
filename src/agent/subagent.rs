@@ -90,6 +90,7 @@ impl Progress {
                     SubagentActivity::Preparing
                 }
                 (None, Event::Delta(_)) => SubagentActivity::Writing,
+                (None, Event::Usage { .. }) => return None,
             },
             _ => return None,
         };
@@ -206,6 +207,8 @@ impl<P: Provider> Agent<P> {
             // It investigates until it answers, its context is full, or the
             // focus guard ends a stalled search; then it reports.
             max_rounds: None,
+            // Same server and tokenizer: start from the parent's measurement.
+            calibration: self.calibration.clone(),
             profile,
             // A delegated report is not a current source read by the parent.
             // Keep its observations separate so a child cannot silently bless
@@ -304,7 +307,9 @@ impl<P: Provider> Agent<P> {
                     )?;
                     let larger = budget.saturating_mul(2).min(32768).min(
                         self.profile.context_tokens.saturating_sub(
-                            super::estimate_history_tokens(&messages, &self.profile) + 1024,
+                            self.calibration
+                                .tokens(super::estimate_history_tokens(&messages, &self.profile))
+                                + 1024,
                         ),
                     );
                     if error.is::<builder_provider::OutputLimit>()
